@@ -551,6 +551,34 @@ worth taking seriously rather than reflexively reaching for slices.
   later pass wants `Zip`/`azip!` across the spectral loops badly enough to pay for the
   subtree.
 
+> **§2.3's benefit is specific to large hot buffers, and a half-measure gets neither
+> half.** Two conversions, measured:
+>
+> | module | form | instructions |
+> | --- | --- | --- |
+> | `rng.rs` | 0-based slices, two 262144-element passes | **−5.13%** |
+> | `state.rs` | `Vec` indexed 1-based, element 0 unused | **+0.62%**, reverted |
+>
+> The `rng.rs` win is vectorisation of two long renormalisation passes. `state.rs`'s
+> arrays are indexed in short loops over the ~35 *real* layers of a velocity model —
+> `NLAYMAX = 500` is a ceiling, not a count — so there is nothing to vectorise, and
+> `Array1`'s `assert(i>=1)` then `data[i-1]` evidently folds better than a raw `Vec`
+> bounds check on `[i]`.
+>
+> The clarity argument also runs the wrong way for the half-measure. `Array1` as a *type*
+> documents and enforces the 1-based convention; a raw `Vec` indexed 1-based with element
+> 0 unused reads as 0-based to anyone who has not read the module header. So it cost
+> performance *and* legibility, and was reverted.
+>
+> **Revised plan for the remaining modules.** Convert only where the loops are long
+> enough to vectorise, and convert them **properly to 0-based**, never to a 1-based
+> `Vec`. That points at `highcor.rs` and `stoc.rs`, whose loops run over `np2`-sized
+> spectra. `state.rs` is a different job: going 0-based there means editing every index
+> expression in every kernel that reads a velocity model, `ray.rs` most of all, for no
+> measured performance gain. **That needs sign-off, not an unattended pass** — the
+> off-by-one risk is real (one was already caught in `rng.rs`) and the payoff is
+> readability alone.
+
 > **§2.3 has a performance benefit after all, measured.** This section and `PROFILE.md`
 > both said it was size and readability only. Converting `rng.rs` alone cut instructions
 > retired by **5.13%** for the whole program. The wrapper's `Index` impl is
