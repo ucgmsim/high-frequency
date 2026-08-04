@@ -160,7 +160,7 @@ fn ttime_matches_fortran() {
         for k in 1..=nseg { st.rays.nm[k] = r.i32(); }
         for k in 1..=nseg { st.coff.it[k] = r.i32(); }
         for k in 1..=nseg { st.coff.nup1[k] = r.i32(); }
-        st.rays.nd[1] = nseg as i32;
+        st.rays.nd = nseg as i32;
 
         let want_p1 = r.f64();
         let want_t1 = r.f64();

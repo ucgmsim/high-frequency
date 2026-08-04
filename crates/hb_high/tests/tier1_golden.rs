@@ -156,8 +156,8 @@ fn trav_matches_fortran() {
         for k in 1..=n {
             st.rays.nm[k] = r.i32();
         }
-        st.rays.nd[ir] = n as i32;
-        st.rays.ndeg[ir] = ndeg;
+        st.rays.nd = n as i32;
+        st.rays.ndeg = ndeg;
 
         let (w_love, w_nup, w_ndeep) = (r.i32(), r.i32(), r.i32());
         let w_it: Vec<i32> = (0..n).map(|_| r.i32()).collect();
@@ -211,7 +211,7 @@ fn geom_terms_matches_fortran() {
         for k in 1..=n {
             st.rays.nh[k] = r.i32();
         }
-        st.rays.nd[1] = n as i32;
+        st.rays.nd = n as i32;
 
         let w_rp = r.f64();
         let w_qb = r.f32();

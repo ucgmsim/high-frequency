@@ -78,7 +78,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     if state.rays.nm[1] == 4 {
         state.love = 2;
     }
-    let n = state.rays.nd[ray_index] as usize;
+    let n = state.rays.nd as usize;
 
     // DO 10 I=1,100 -- deliberately not 1..=NLAYMAX. See the note above.
     for i in 1..=100 {
@@ -112,7 +112,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     if lir > lis {
         nup = -nup;
     }
-    if state.rays.ndeg[ray_index] < 0 {
+    if state.rays.ndeg < 0 {
         nup = 1;
     }
     if n == 1 && receiver_depth_km >= source_depth_km {
@@ -267,7 +267,7 @@ pub fn geometric_spreading(
     let mut rsum = ri;
     let mut qb = (ti / vmod.attenuation_s[nh1] as f64) as f32;
 
-    for j in 2..=state.rays.nd[1] as usize {
+    for j in 2..=state.rays.nd as usize {
         let nhj = state.rays.nh[j] as usize;
         let mut sini = ray_parameter * vmod.vsh_km_s[nhj];
         if sini >= 1.0 {
@@ -479,7 +479,7 @@ pub fn travel_time(
     _time_guess: f64,
     range_km: f64,
 ) -> (f64, f64) {
-    let n = state.rays.nd[ray_index] as usize;
+    let n = state.rays.nd as usize;
     let mut p1 = ray_parameter;
 
     for i in 1..=n {
@@ -584,7 +584,7 @@ pub fn green_function(
     let krec = 2usize;
     let ir = 1usize;
 
-    state.rays.ndeg[ir] = 1;
+    state.rays.ndeg = 1;
     let hr = vmod.thickness_km[1];
     let mut hs = src_depth as f64;
     let rr = range as f64;
@@ -676,7 +676,7 @@ pub fn green_function(
             }
         }
     }
-    state.rays.nd[ir] = l as i32;
+    state.rays.nd = l as i32;
 
     build_ray_path(state, vmod, ir, hs, hr);
     let (p0, t0) = stationary_ray_parameter(state, vmod, ir, rr);

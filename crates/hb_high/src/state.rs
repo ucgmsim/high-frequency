@@ -128,9 +128,14 @@ pub struct Rays {
     /// Wave mode of each segment: 3 = SV, 4 = SH, 5 = P.
     pub nm: Array1<i32>,
     /// Ray degeneracy; negative means the ray is upgoing.
-    pub ndeg: Array1<i32>,
-    /// Number of segments in the ray.
-    pub nd: Array1<i32>,
+    ///
+    /// A scalar, not an array. The Fortran declares `ndeg(1)` and `nd(1)` -- indexed by
+    /// the same degenerate ray dimension the struct header describes -- and every routine
+    /// hardwires that index to 1, so an array here only invited the reader to wonder what
+    /// the other elements meant.
+    pub ndeg: i32,
+    /// Number of segments in the ray. A scalar, for the same reason as `ndeg`.
+    pub nd: i32,
 }
 
 impl Default for Rays {
@@ -144,8 +149,8 @@ impl Rays {
         Self {
             nh: Array1::new(NLAYMAX),
             nm: Array1::new(NLAYMAX),
-            ndeg: Array1::new(NLAYMAX),
-            nd: Array1::new(NLAYMAX),
+            ndeg: 0,
+            nd: 0,
         }
     }
 }

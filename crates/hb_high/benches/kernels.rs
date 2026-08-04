@@ -79,8 +79,8 @@ fn ray_state(ksrc: usize) -> RayState {
         st.rays.nm[l] = 4;
         j -= 1;
     }
-    st.rays.nd[1] = l as i32;
-    st.rays.ndeg[1] = 1;
+    st.rays.nd = l as i32;
+    st.rays.ndeg = 1;
     st
 }
 
