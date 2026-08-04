@@ -975,6 +975,95 @@ alongside or before §2.3, since both touch the same allocations.
 >
 > The capability goal is met: there is no record length that requires a rebuild.
 
+### 2.8 The de-Fortran-ification pass — **DONE**, and it lands *before* §2.7
+
+Numbered after §2.7 because it was planned later; sequenced before it deliberately.
+§2.7's whole risk is that if the stream shifts, every golden, CSV and Tier D attribution
+moves at once. Doing the structural work first means anything that moves when §2.7 lands
+is unambiguously the RNG rather than a refactor riding along.
+
+Nine commits, `7397c36..3745bb2`. One NUMERIC, the rest bit-exact and gated per commit by
+`run_selfparity.sh HEAD~1`.
+
+**The pi commit is the only numeric one.** Nine literals — the Fortran's own truncations,
+carried faithfully while bit-identity was the contract — became `std::consts`. Eight were
+honest truncations; the ninth, `highcor`'s taper `3.14159625`, was a *typo*, the digits of
+`3.14159265` transposed, 1.1e-6 relative and about thirty times worse than the rest. Its
+doc comment had said correcting it needed "a written justification, not a quiet cleanup";
+that justification is now in the comment.
+
+Three exact goldens became measured-divergence bounds, following the precedent §2.5 set
+for `delaz5` — measure the move, bound it by an argument, keep the test sensitive — rather
+than regenerating against an oracle that is itself wrong. `vertical_slowness` is where it
+bites: on the branch cut the phase is forced to exactly pi, so `cos(phi/2)` should be an
+exact zero, and the Fortran's truncation put 5.7e-11 there instead. **That error was the
+golden.** Measured: `cr` 2.051e-10 of |eta| against an analytic bound of 2.05e-10 —
+agreement to three digits, and 1050 of 1500 cases still bit-exact; `cagcon` 1.082e-10;
+`dtdp` 7.012e-10, which amplifies eta's error ~3.4x because it divides *by* eta.
+
+**The campaign, run once at the end of the pass** (`run_science.sh`, all three tiers):
+
+| tier | result | vs. the last recorded run |
+| --- | --- | --- |
+| B (paired, n=50) | 375 certified, **0 REFUTED**, pooled bias +0.006% | — |
+| C (distributional, n=2500) | 324 certified, **0 REFUTED**, 51 undetermined | **identical verdict counts** |
+| D (inter-frequency, n=600) | 4 of 15 flagged at raw p, **0 after Holm** | **identical**, P(≥4) = 0.0055 |
+
+The Tier C split is the same 324/0/51 recorded after §2.5, and Tier D's enrichment is the
+same 4-of-15 at the same P(≥4) = 0.0055 — with the same four tests, all on 090/000 and
+none on `ver`. That is the pattern the RNG attribution predicts, since the horizontals
+draw from the live stream and the vertical reads pre-drawn uniforms, and it is unchanged
+by a pass that rewrote the code around it. The 51 undetermined are a sample-size limit,
+not a failure: worst achieved resolution is ±1.42% against a ±2% band, and certifying them
+all would need n ≈ 5074 per stratum.
+
+The one thing that *did* move is the pooled Tier C bias, from **-0.003% to +0.025%**. That
+is the pi correction, and it is the only trace of it anywhere above the waveform level —
+0.028 percentage points against an endpoint-to-endpoint sd of 0.581%. Tier B, which is
+paired at matched seeds and far more sensitive, puts the whole pass at +0.006% with a
+worst endpoint ratio of 0.99250.
+
+**What the rest of the pass did.** Clippy did not compile before this — seven deny-level
+`approx_constant` errors on those same literals aborted the run before any lint reported,
+so 28 warnings had accumulated invisibly, eight of them `needless_range_loop`. A lint
+nobody can run is worse than no lint, because it reads like coverage. Now zero, with
+`[workspace.lints]` as a floor.
+
+Then: index loops became iterators across seven files; the velocity model became
+`Vec<Layer>` (the last parallel-array holdout, 158 access sites); the path-duration table
+became `Vec<DurationSegment>`, dropping a 50-element ceiling and an `ndur` that could
+disagree with it; `nm`/`it`/`nup` became `WaveMode`/`Interaction`/`Direction` and the
+three components became a `Component` enum, deleting two `panic!` arms that existed only
+because the operands were integers; six near-copy golden `Reader`s became one.
+
+**The find that mattered most.** `sim.rs`'s `nsum` block looks entirely dead — the loop
+runs once, the sub-event offset it computes is unconditionally zeroed two lines later, and
+`rise` and the `NINT` shim feed nothing. But `let si = rng.next_f32()` advances the shared
+generator once per (subfault, ray). Deleting it as obvious dead code would have moved
+every waveform in the program. The arithmetic is gone; the draw stays, named and
+explained. This is the sharpest example yet of the §2.6b lesson: in this program, *the
+number of draws is data*.
+
+Also worth recording: `Rays::ndeg` looked equally dead — sole writer sets 1, sole reader
+tests `< 0` — and is not. `tier1_driver.f` feeds `ndeg = -1` for case `kc == 6`
+specifically to exercise the branch that forces `nup = +1`. Verified before deleting
+rather than after.
+
+**Size.** `crates/hb_high/src` went 4,899 → 5,237, up 7%. That is the same honest outcome
+Stage 1 had and for the same reason: structs, enums and their doc comments cost more lines
+than the inlining saves. The tests went the other way — 492 lines deleted for 83 added
+plus a 236-line shared module. What improved is not line count: `nm == 3 .or. nm == 4`
+appears zero times instead of four, the two `panic!("unreachable")` arms are gone, and the
+velocity model can gain a field without seven edit sites and no compiler help.
+
+**What §2.8 did NOT do**, and is still open: `green_function`'s four copy-pasted
+descending loops and three Moho scans; the `simulate()` decomposition (still ~500 lines —
+`REFACTOR.md` §1.3 named `time_window_pass`/`subfault_pass` specifically and they are
+still not extracted); the deck's `read_values` + positional-closure pattern at 13 call
+sites; `GeoPoint` for the lat-first/lon-first mismatch between `distance_azimuth` and
+`subfault_geometry`; and the two deliberately-last index sites (`ksrc` coming back one
+past the model, and the sample accumulate where §2.6 defect 1 lived).
+
 ### 2.7 `rng.rs` → `rand` / `rand_pcg` — LAST, and carefully
 
 Queued deliberately at the very end of Stage 2, because it is the one replacement that
