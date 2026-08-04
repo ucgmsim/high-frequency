@@ -217,7 +217,14 @@ pub fn simulate(
     let mut vmod = VelocityModel::new();
     // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
     // touches this.
-    let mut acc = Array2::<f32>::new(3, ndata);
+    // Three component traces, not a 2-D array. The Fortran's `DS(3, mmv)` was a 2-D
+    // block because Fortran had no better option; here it is what it actually is, and it
+    // now matches `spectrum` and `subfault_acc` beside it.
+    //
+    // §2.3 could only do this once §2.6's defect-1 fix landed: `Array2`'s column-major
+    // layout was load-bearing for exactly one thing, the `stdd(0,l)` alias across
+    // columns, and that read is gone.
+    let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
     // This one STAYS at `mmv`, and the reason is not laziness. `fill_normal_deviates`
     // is called with `MMV` below, and the number of deviates drawn is part of the RNG
     // stream -- every subsequent draw depends on where the generator ended up. Shrinking
@@ -518,10 +525,13 @@ pub fn simulate(
                         // DS(1..ndata), so they are discarded rather than reproduced.
                         if li >= 1 {
                             let idx = (li - k2) as usize;
-                            let lu = li as usize;
-                            acc[(1, lu)] += sd * subfault_acc[0][idx];
-                            acc[(2, lu)] += sd * subfault_acc[1][idx];
-                            acc[(3, lu)] += sd * subfault_acc[2][idx];
+                            // `li` is the Fortran's 1-based sample number, so the
+                            // 0-based slot is one lower. Array2's second subscript was
+                            // 1-based and hid this.
+                            let sample = li as usize - 1;
+                            for component in 0..3 {
+                                acc[component][sample] += sd * subfault_acc[component][idx];
+                            }
                         }
                         li += 1;
                     }
@@ -539,9 +549,9 @@ pub fn simulate(
     // `!WRITE(6,*) 'ACC.MAX='` at hb_high_ref.f:1423 -- so the scan is dropped.
     // Interleaved, component fastest: 090/000/ver per time sample.
     let mut out = Vec::with_capacity(ndata * 3);
-    for i in 1..=ndata {
-        for l in 1..=3 {
-            out.push(acc[(l, i)]);
+    for sample in 0..ndata {
+        for component in &acc {
+            out.push(component[sample]);
         }
     }
 
