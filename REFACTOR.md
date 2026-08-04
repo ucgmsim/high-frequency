@@ -534,6 +534,41 @@ currently a dead store left uncomputed purely to avoid an `x**0.5`. All of this
 evaporates: write the natural expression. Small line count, large clarity gain,
 and it removes a documented footgun that will otherwise outlive the port.
 
+### 2.4c REJECTED: `sin` from `sqrt(1 - cos^2)` in Box-Muller
+
+`fill_normal_deviates` is the second-hottest routine in the program (15.1% self time)
+and needs both the cosine and the sine of one angle per pair. Replacing the `sinf` with
+`+/- sqrt(1 - cos^2)` — a sqrt, a multiply and a compare — measured **-2.46% of total
+instructions retired**, and it is wrong.
+
+**Why it fails, and why the verification missed it.** The identity was checked over
+200,000 angles and gave a worst absolute error of `2.4e-12`. That check was run in
+`f64`; the code runs in `f32`, where the same identity gives a worst absolute error of
+**`2.4e-4`** — eight orders of magnitude worse. The tier-0 golden caught it at a
+deviate of `0.00047` against the Fortran's `0.00038`.
+
+The cause is conditioning, not cancellation that a wider accumulator could fix:
+
+```
+d(sin)/d(cos) = -cos/sin
+```
+
+Near `|cos| = 1` the sine is tiny, so an `f32`-accurate cosine (error ~`6e-8`) implies a
+sine error of `6e-8 / sin`. At `sin = 1e-3` that is `6e-5`. **Widening the arithmetic to
+`f64` does not help** — the input cosine is only `f32`-accurate and that is the limiting
+term. There is no cheap repair.
+
+**The tempting wrong move was to loosen the golden's tolerance to `1e-4` and move on.**
+That would have hidden a genuine accuracy regression concentrated exactly on the
+near-zero deviates, two orders of magnitude worse than the ~`1e-6` every other Stage 2
+change has produced. Reverted instead.
+
+Rust's `sin_cos` is not an alternative: it is literally `(self.sin(), self.cos())`, so
+it saves nothing.
+
+**Lesson worth keeping: verify a float identity at the precision the code uses.** A
+`f64` check of an `f32` computation is not a check.
+
 ### 2.5 `geom::delaz5` → a geodesy crate
 
 ~100 lines of a 1970s distance/azimuth formulation with three separation regimes,
