@@ -18,6 +18,7 @@ python3 harness/ab_rng.py         Phase 0c leg 2: RNG swap
 cargo test                        kernel + reader goldens (bit-identical)
 harness/run_parity.sh [--debug]   whole-program parity ladder
 SLOW=1 harness/run_parity.sh      ... including the 2827-subfault alpine fault
+harness/cov.sh                    coverage of the reference under that ladder
 ```
 
 Both `cargo test` and `run_parity.sh` must pass in **both** profiles: a

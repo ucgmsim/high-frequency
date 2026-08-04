@@ -5,3 +5,7 @@
 *.mod
 /reference/hb_high_ref.f
 /reference/hb_high_subs.f
+/harness/out
+*.gcda
+*.gcno
+*.gcov
