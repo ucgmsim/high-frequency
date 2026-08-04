@@ -156,9 +156,16 @@ pub fn stochastic_spectrum(
     fast(np2, &mut ac, -1);
 
     // Average POWER spectrum to unity (2009-03-18), not amplitude.
+    //
+    // `norm_sqr()` is `re^2 + im^2`. The Fortran wrote `cabs(ac(i))*cabs(ac(i))`,
+    // which takes a square root and then squares it away again -- one `hypotf` per
+    // frequency bin, and `hypot` is not cheap. That was 4.5% of total runtime, and
+    // `PORTING_RULES.md` §4 / `PROFILE.md` item 3 recorded that it could not be
+    // simplified because `hypot(re,im)^2` and `re^2 + im^2` differ in the last bits.
+    // Under Stage 2 it can: this is the same quantity, computed without the detour.
     let mut fsa = 0.0f32;
     for i in 1..=fold_count {
-        fsa += ac[i].norm() * ac[i].norm();
+        fsa += ac[i].norm_sqr();
     }
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
