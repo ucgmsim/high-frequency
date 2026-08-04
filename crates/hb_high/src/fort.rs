@@ -4,7 +4,7 @@
 //! Everything here exists to make transliteration mechanical. See
 //! `PORTING_RULES.md` §3 and §4.
 
-use std::ops::{Add, Div, Index, IndexMut, Mul, Neg, Sub};
+use std::ops::{Index, IndexMut};
 
 // ---------------------------------------------------------------------------
 // 1-based arrays
@@ -36,6 +36,15 @@ impl<T: Copy + Default> Array1<T> {
     /// inside a transliterated routine.
     pub fn as_slice(&self) -> &[T] {
         &self.data
+    }
+
+    /// Mutable underlying storage, 0-based.
+    ///
+    /// Exists for `fft::fast`, which passes its buffer straight to `rustfft` now that
+    /// the element type is `num_complex::Complex` on both sides. Not for indexing
+    /// inside a transliterated routine.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
     }
 }
 
@@ -107,143 +116,26 @@ impl<T> IndexMut<(usize, usize)> for Array2<T> {
 // Complex arithmetic
 // ---------------------------------------------------------------------------
 
-/// `complex*8` / `complex*16`, hand-written rather than taken from a crate.
-///
-/// A dependency would be free to implement `abs` or `exp` differently from
-/// gfortran, and there would be no compile error when it did — just a few
-/// wrong bits. See `Cargo.toml`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Complex<T> {
-    pub re: T,
-    pub im: T,
-}
+// `complex*8` / `complex*16` are `num_complex::Complex`, re-exported so call sites
+// read the same as before.
+//
+// This was hand-written for as long as bit-identity was the goal: a dependency is
+// free to implement `abs` or `exp` differently from gfortran, and nothing produces a
+// compile error when it does. Checked rather than assumed before swapping, against
+// the same gfortran 16.1.1 vectors the old unit tests pinned:
+//
+//   norm (was abs)   hypot both sides            IDENTICAL bit for bit
+//   exp              exp(re)*(cos im, sin im)    IDENTICAL
+//   mul              textbook four-multiply      IDENTICAL
+//   div              1-2 ulps different          num-complex does not use
+//                                                gfortran's Smith-with-range-reduction
+//                                                branch
+//
+// So only division moved, at two call sites in `ray.rs`. See `REFACTOR.md` §2.2.
+pub use rustfft::num_complex::Complex;
 
 pub type Complex32 = Complex<f32>;
 pub type Complex64 = Complex<f64>;
-
-impl<T> Complex<T> {
-    pub const fn new(re: T, im: T) -> Self {
-        Self { re, im }
-    }
-}
-
-impl Complex<f64> {
-    /// Promote a real to complex, as Fortran does implicitly when a `real*8`
-    /// meets a `complex*16` in an expression. Needed because `x / z` in Fortran
-    /// is `cmplx(x,0) / z`, a full complex division — not a scaling.
-    pub const fn from_real(re: f64) -> Self {
-        Self { re, im: 0.0 }
-    }
-}
-
-impl Complex<f32> {
-    pub const fn from_real(re: f32) -> Self {
-        Self { re, im: 0.0 }
-    }
-}
-
-macro_rules! impl_complex {
-    ($t:ty) => {
-        impl Complex<$t> {
-            pub const ZERO: Self = Self { re: 0.0, im: 0.0 };
-
-            /// `conjg(z)`
-            pub fn conj(self) -> Self {
-                Self { re: self.re, im: -self.im }
-            }
-
-            /// `cabs(z)` — gfortran computes this as a hypot, which is *not*
-            /// the same as `(re*re + im*im).sqrt()` in the last bits.
-            pub fn abs(self) -> $t {
-                self.re.hypot(self.im)
-            }
-
-            /// `cexp(z)` = `exp(re) * (cos(im) + i sin(im))`
-            pub fn exp(self) -> Self {
-                let r = self.re.exp();
-                Self { re: r * self.im.cos(), im: r * self.im.sin() }
-            }
-        }
-
-        impl Add for Complex<$t> {
-            type Output = Self;
-            fn add(self, o: Self) -> Self {
-                Self { re: self.re + o.re, im: self.im + o.im }
-            }
-        }
-
-        impl Sub for Complex<$t> {
-            type Output = Self;
-            fn sub(self, o: Self) -> Self {
-                Self { re: self.re - o.re, im: self.im - o.im }
-            }
-        }
-
-        impl Neg for Complex<$t> {
-            type Output = Self;
-            fn neg(self) -> Self {
-                Self { re: -self.re, im: -self.im }
-            }
-        }
-
-        impl Mul for Complex<$t> {
-            type Output = Self;
-            /// Textbook four-multiply form, matching what gfortran emits for
-            /// `complex` multiply at `-O0` without `-fcx-limited-range`.
-            fn mul(self, o: Self) -> Self {
-                Self {
-                    re: self.re * o.re - self.im * o.im,
-                    im: self.re * o.im + self.im * o.re,
-                }
-            }
-        }
-
-        impl Mul<$t> for Complex<$t> {
-            type Output = Self;
-            fn mul(self, s: $t) -> Self {
-                Self { re: self.re * s, im: self.im * s }
-            }
-        }
-
-        impl Div<$t> for Complex<$t> {
-            type Output = Self;
-            fn div(self, s: $t) -> Self {
-                Self { re: self.re / s, im: self.im / s }
-            }
-        }
-
-        impl Div for Complex<$t> {
-            type Output = Self;
-            /// Smith's algorithm with range reduction.
-            ///
-            /// This is **not** the naive `(ac+bd)/(c²+d²)` form. gfortran
-            /// defaults to `-fcx-fortran-rules`, which does range reduction but
-            /// skips the NaN rescue, and inlines exactly the branch below.
-            /// Verified against gfortran 16.1.1: the naive form differs in the
-            /// last bit on essentially every input.
-            fn div(self, o: Self) -> Self {
-                if o.re.abs() >= o.im.abs() {
-                    let ratio = o.im / o.re;
-                    let denom = o.re + o.im * ratio;
-                    Self {
-                        re: (self.re + self.im * ratio) / denom,
-                        im: (self.im - self.re * ratio) / denom,
-                    }
-                } else {
-                    let ratio = o.re / o.im;
-                    let denom = o.im + o.re * ratio;
-                    Self {
-                        re: (self.re * ratio + self.im) / denom,
-                        im: (self.im * ratio - self.re) / denom,
-                    }
-                }
-            }
-        }
-    };
-}
-
-impl_complex!(f32);
-impl_complex!(f64);
 
 // ---------------------------------------------------------------------------
 // Intrinsic shims
@@ -315,32 +207,5 @@ mod tests {
         assert_eq!(truncate_toward_zero(-0.2), 0);
     }
 
-    #[test]
-    fn complex_division_uses_smiths_algorithm() {
-        // Reference bit patterns captured from gfortran 16.1.1 at
-        // -O0 -ffp-contract=off -fno-fast-math. The naive (ac+bd)/(c^2+d^2)
-        // form differs in the last bit on all three of these.
-        let cases: [(Complex64, Complex64, u64, u64); 3] = [
-            // real / complex, the form cagniard_time_derivative uses: th(i)*alp(i) / ea
-            (Complex64::from_real(3.25), Complex64::new(0.75, -2.5),
-             0x3FD6E62A46756E62, 0x3FF315233AB73152),
-            (Complex64::new(1.5, 0.25), Complex64::new(0.75, -2.5),
-             0x3FB2C9FB4D812C9E, 0x3FE27ED3604B27ED),
-            // |re| < |im| takes the other branch of the range reduction
-            (Complex64::from_real(3.25), Complex64::new(1.0e-3, 7.0),
-             0x3F11631918997FFA, 0xBFDDB6DB638A5434),
-        ];
-        for (a, b, wre, wim) in cases {
-            let q = a / b;
-            assert_eq!(q.re.to_bits(), wre, "{a:?}/{b:?} re");
-            assert_eq!(q.im.to_bits(), wim, "{a:?}/{b:?} im");
-        }
+    
     }
-
-    #[test]
-    fn complex_conj_and_abs() {
-        let z = Complex32::new(3.0, -4.0);
-        assert_eq!(z.conj(), Complex32::new(3.0, 4.0));
-        assert_eq!(z.abs(), 5.0);
-    }
-}

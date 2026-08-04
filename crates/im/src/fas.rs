@@ -51,7 +51,7 @@ pub fn fas(acc: &[f32], dt: f64) -> (Vec<f64>, Vec<f64>) {
     let mut amps = Vec::with_capacity(nf);
     for i in 1..=nf {
         freqs.push((i - 1) as f64 * df);
-        amps.push(z[i].abs() as f64 * dt);
+        amps.push(z[i].norm() as f64 * dt);
     }
     (freqs, amps)
 }

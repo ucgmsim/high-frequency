@@ -337,15 +337,15 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
         let mut c = Complex64::ZERO;
         if state.travel.alp[i] != 0.0 {
             let ea = vertical_slowness(ray_parameter, vmod.vp_km_s[i]);
-            b = Complex64::from_real(vmod.thickness_km[i] * state.travel.alp[i] as f64) / ea;
+            b = Complex64::from(vmod.thickness_km[i] * state.travel.alp[i] as f64) / ea;
         }
         if state.travel.als[i] != 0.0 {
             let eb = vertical_slowness(ray_parameter, vmod.vsh_km_s[i]);
-            c = Complex64::from_real(vmod.thickness_km[i] * state.travel.als[i] as f64) / eb;
+            c = Complex64::from(vmod.thickness_km[i] * state.travel.als[i] as f64) / eb;
         }
         a = a + b + c;
     }
-    Complex64::from_real(range_km) - ray_parameter * a
+    Complex64::from(range_km) - ray_parameter * a
 }
 
 /// `subroutine stationary_ray_parameter(ray_index,p0,t0,range_km)` — `hb_high_ref.f:3441`.
@@ -414,7 +414,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
         }
     }
 
-    let mut p = Complex64::from_real(ptest - 10.0 * eps);
+    let mut p = Complex64::from(ptest - 10.0 * eps);
 
     // Real part of a complex*16, assigned to a real*8.
     let mut a = cagniard_time_derivative(state, vmod, p, ray_index, range_km).re;
@@ -426,7 +426,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
         let mut pp = 0.0f64;
         loop {
             k += 1;
-            p = Complex64::from_real((pn + pp) / 2.0);
+            p = Complex64::from((pn + pp) / 2.0);
             a = cagniard_time_derivative(state, vmod, p, ray_index, range_km).re;
             if a.abs() <= 0.01 || k >= 40 {
                 break;
@@ -511,7 +511,7 @@ pub fn travel_time(
         p1 = p1.min(1.0 / va).min(1.0 / vb);
     }
 
-    let p = Complex64::from_real(p1);
+    let p = Complex64::from(p1);
     let t = cagniard_time(state, vmod, p, ray_index, range_km);
     (p1, t.re)
 }

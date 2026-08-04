@@ -158,7 +158,7 @@ pub fn stochastic_spectrum(
     // Average POWER spectrum to unity (2009-03-18), not amplitude.
     let mut fsa = 0.0f32;
     for i in 1..=fold_count {
-        fsa += ac[i].abs() * ac[i].abs();
+        fsa += ac[i].norm() * ac[i].norm();
     }
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 

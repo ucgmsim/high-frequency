@@ -24,7 +24,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rustfft::num_complex::Complex as RustComplex;
 use rustfft::{Fft, FftDirection, FftPlanner};
 
 use crate::fort::{Array1, Complex32};
@@ -39,12 +38,6 @@ thread_local! {
     /// lock would serialise them on the hottest path in the program.
     static PLANS: RefCell<HashMap<(usize, bool), Arc<dyn Fft<f32>>>> =
         RefCell::new(HashMap::new());
-    /// Scratch buffer for the conversion to `rustfft`'s complex type. Reused so the
-    /// per-call cost is a copy rather than an allocation.
-    ///
-    /// The copy exists only because `fort::Complex32` is this crate's own type.
-    /// §2.2 (`num-complex`) removes it.
-    static SCRATCH: RefCell<Vec<RustComplex<f32>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `SUBROUTINE FAST(NNN,ACE,IND)` — in-place unnormalised complex radix-2 FFT.
@@ -73,15 +66,9 @@ pub fn fast(nnn: usize, ace: &mut Array1<Complex32>, ind: i32) {
         }))
     });
 
-    SCRATCH.with(|scratch| {
-        let mut buffer = scratch.borrow_mut();
-        buffer.clear();
-        buffer.extend((1..=nnn).map(|i| RustComplex::new(ace[i].re, ace[i].im)));
-        plan.process(&mut buffer);
-        for (i, value) in buffer.iter().enumerate() {
-            ace[i + 1] = Complex32::new(value.re, value.im);
-        }
-    });
+    // No conversion: since §2.2, `Complex32` *is* `rustfft`'s element type, so the
+    // buffer goes straight in.
+    plan.process(&mut ace.as_mut_slice()[..nnn]);
 }
 
 /// `SUBROUTINE FLZERO(N,DT,A)` — remove the quadratic acceleration trend that

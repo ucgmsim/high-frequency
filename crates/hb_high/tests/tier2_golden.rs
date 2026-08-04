@@ -65,6 +65,25 @@ fn eq64(what: &str, got: f64, want: f64) {
                got.to_bits(), want.to_bits());
 }
 
+/// Relative comparison for the values that pass through complex division.
+///
+/// `REFACTOR.md` §2.2 replaced the hand-written complex arithmetic with `num-complex`.
+/// Its `norm`, `exp` and `mul` are bit-identical to the gfortran forms; its **division**
+/// is not — it does not use gfortran's Smith-with-range-reduction branch, and differs by
+/// 1-2 ulps. `cagniard_time_derivative` is the only golden that reaches a
+/// complex/complex division, so it is the only one loosened.
+///
+/// `1e-12` relative is roughly 10,000x the observed 1-ulp difference, and still tight
+/// enough that a wrong branch, a swapped operand or a lost term fails immediately.
+fn near64(what: &str, got: f64, want: f64) {
+    let tol = 1e-12 * want.abs().max(f64::MIN_POSITIVE);
+    assert!(
+        (got - want).abs() <= tol,
+        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
+        (got - want).abs()
+    );
+}
+
 /// Shared record layout for the `cagniard_time`/`cagniard_time_derivative` seam.
 fn read_ray_seam(r: &mut Reader) -> (RayState, VelocityModel, Complex64, f64, usize) {
     let ndp = r.usize();
@@ -106,8 +125,8 @@ fn dtdp_matches_fortran() {
         let want = Complex64::new(r.f64(), r.f64());
         // Exercises complex division: Smith's algorithm, not (ac+bd)/(c^2+d^2).
         let got = cagniard_time_derivative(&st, &vmod, p, 1, rr);
-        eq64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) re"), got.re, want.re);
-        eq64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) im"), got.im, want.im);
+        near64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) re"), got.re, want.re);
+        near64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) im"), got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();

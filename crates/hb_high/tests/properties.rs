@@ -243,7 +243,7 @@ proptest! {
         fraction in 0.05f64..0.9,
     ) {
         let critical = 1.0 / velocity_km_s;
-        let propagating = vertical_slowness(Complex64::from_real(fraction * critical), velocity_km_s);
+        let propagating = vertical_slowness(Complex64::from(fraction * critical), velocity_km_s);
         prop_assert!(
             propagating.im.abs() < 1e-12 * critical.max(1.0),
             "propagating slowness should be real, got {propagating:?}"
@@ -251,7 +251,7 @@ proptest! {
         prop_assert!(propagating.re.abs() > 0.0);
 
         let evanescent =
-            vertical_slowness(Complex64::from_real(critical / fraction), velocity_km_s);
+            vertical_slowness(Complex64::from(critical / fraction), velocity_km_s);
         prop_assert!(
             evanescent.re.abs() <= evanescent.im.abs(),
             "evanescent slowness should be dominated by its imaginary part, got {evanescent:?}"
@@ -329,12 +329,12 @@ proptest! {
 
         // Take the scale from the largest input bin, where it is best conditioned.
         let pivot = (1..=n)
-            .max_by(|&a, &b| original[a].abs().partial_cmp(&original[b].abs()).unwrap())
+            .max_by(|&a, &b| original[a].norm().partial_cmp(&original[b].norm()).unwrap())
             .unwrap();
         let scale = work[pivot].re / original[pivot].re;
         prop_assert!(scale.is_finite() && scale.abs() > 0.0);
 
-        let peak = (1..=n).map(|i| original[i].abs()).fold(0.0f32, f32::max);
+        let peak = (1..=n).map(|i| original[i].norm()).fold(0.0f32, f32::max);
         for i in 1..=n {
             for (got, want) in [
                 (work[i].re, scale * original[i].re),
@@ -367,7 +367,7 @@ proptest! {
             fast(len, arr, -1);
         }
 
-        let peak = (1..=n).map(|i| t_combined[i].abs()).fold(0.0f32, f32::max);
+        let peak = (1..=n).map(|i| t_combined[i].norm()).fold(0.0f32, f32::max);
         for i in 1..=n {
             let want = t_lhs[i] * alpha + t_rhs[i];
             prop_assert!(
@@ -586,8 +586,8 @@ proptest! {
 
         let want = level.exp();
         for i in 2..=np2 / 2 {
-            prop_assume!(original[i].abs() > 1e-3);
-            let gain = spec[i].abs() / original[i].abs();
+            prop_assume!(original[i].norm() > 1e-3);
+            let gain = spec[i].norm() / original[i].norm();
             prop_assert!(
                 (gain / want - 1.0).abs() < 1e-3,
                 "bin {i} gain {gain}, want exp({level}) = {want}"
@@ -606,7 +606,7 @@ proptest! {
         let (frequency, log_frequency, factors) = site_table(np2, level);
         apply_site_amplification(np2, &mut spec, &frequency, 6, &log_frequency, &factors);
         for i in 2..=np2 / 2 {
-            prop_assume!(original[i].abs() > 1e-3);
+            prop_assume!(original[i].norm() > 1e-3);
             let before = original[i].im.atan2(original[i].re);
             let after = spec[i].im.atan2(spec[i].re);
             prop_assert!(
@@ -630,11 +630,11 @@ proptest! {
             let positive = spec[i + 1];
             let negative = spec[np2 - i + 1];
             prop_assert!(
-                (positive.re - negative.re).abs() <= 1e-5 * positive.abs().max(1.0),
+                (positive.re - negative.re).abs() <= 1e-5 * positive.norm().max(1.0),
                 "bin {i}: re {} vs {}", positive.re, negative.re
             );
             prop_assert!(
-                (positive.im + negative.im).abs() <= 1e-5 * positive.abs().max(1.0),
+                (positive.im + negative.im).abs() <= 1e-5 * positive.norm().max(1.0),
                 "bin {i}: im {} vs {}", positive.im, negative.im
             );
         }
@@ -677,7 +677,7 @@ fn dc_and_nyquist_are_scaled_linearly_not_exponentially() {
         "DC gain {dc_gain} should be the raw factor {level}, not exp({level})"
     );
 
-    let interior_gain = spec[4].abs() / original[4].abs();
+    let interior_gain = spec[4].norm() / original[4].norm();
     assert!(
         (interior_gain - level.exp()).abs() < 1e-3,
         "interior gain {interior_gain} should be exp({level}) = {}",
