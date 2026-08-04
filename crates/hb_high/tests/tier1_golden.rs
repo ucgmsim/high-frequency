@@ -150,10 +150,10 @@ fn trav_matches_fortran() {
         let hr = r.f64();
         let vmod = r.vmod(j0);
 
-        for k in 1..=n {
+        for k in 0..n {
             st.rays.nh[k] = r.i32();
         }
-        for k in 1..=n {
+        for k in 0..n {
             st.rays.nm[k] = r.i32();
         }
         st.rays.nd = n as i32;
@@ -171,9 +171,9 @@ fn trav_matches_fortran() {
         assert_eq!(st.love, w_love, "{tag} love");
         assert_eq!(st.travel.nup, w_nup, "{tag} nup");
         assert_eq!(st.travel.ndeep, w_ndeep, "{tag} ndeep");
-        for k in 1..=n {
-            assert_eq!(st.coff.it[k], w_it[k - 1], "{tag} it[{k}]");
-            assert_eq!(st.coff.nup1[k], w_nup1[k - 1], "{tag} nup1[{k}]");
+        for k in 0..n {
+            assert_eq!(st.coff.it[k], w_it[k], "{tag} it[{k}]");
+            assert_eq!(st.coff.nup1[k], w_nup1[k], "{tag} nup1[{k}]");
         }
         for k in 1..=j0 {
             eq32(&format!("{tag} alp[{k}]"), st.travel.alp[k], w_alp[k - 1]);
@@ -208,7 +208,7 @@ fn geom_terms_matches_fortran() {
         }
 
         let mut st = RayState::default();
-        for k in 1..=n {
+        for k in 0..n {
             st.rays.nh[k] = r.i32();
         }
         st.rays.nd = n as i32;

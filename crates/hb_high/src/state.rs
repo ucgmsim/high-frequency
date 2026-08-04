@@ -123,10 +123,10 @@ impl VelocityModelInput {
 /// call sites match the Fortran, and assert it is 1.
 #[derive(Clone, Debug)]
 pub struct Rays {
-    /// Layer index of each ray segment.
-    pub nh: Array1<i32>,
-    /// Wave mode of each segment: 3 = SV, 4 = SH, 5 = P.
-    pub nm: Array1<i32>,
+    /// Layer index of each ray segment. **Indexed 0-based by segment**, `0..nd`.
+    pub nh: Vec<i32>,
+    /// Wave mode of each segment: 3 = SV, 4 = SH, 5 = P. 0-based by segment.
+    pub nm: Vec<i32>,
     /// Ray degeneracy; negative means the ray is upgoing.
     ///
     /// A scalar, not an array. The Fortran declares `ndeg(1)` and `nd(1)` -- indexed by
@@ -147,8 +147,8 @@ impl Default for Rays {
 impl Rays {
     pub fn new() -> Self {
         Self {
-            nh: Array1::new(NLAYMAX),
-            nm: Array1::new(NLAYMAX),
+            nh: vec![0; NLAYMAX],
+            nm: vec![0; NLAYMAX],
             ndeg: 0,
             nd: 0,
         }
@@ -193,10 +193,10 @@ impl Travel {
 /// Do not conflate with the dead `gencof`'s dummy argument, also named `it`.
 #[derive(Clone, Debug)]
 pub struct Coefficients {
-    /// 0 = transmission, 1 = reflection, 2 = direct ray.
-    pub it: Array1<i32>,
-    /// Segment direction: +1 up, -1 down.
-    pub nup1: Array1<i32>,
+    /// 0 = transmission, 1 = reflection, 2 = direct ray. 0-based by segment.
+    pub it: Vec<i32>,
+    /// Segment direction: +1 up, -1 down. 0-based by segment.
+    pub nup1: Vec<i32>,
 }
 
 impl Default for Coefficients {
@@ -207,7 +207,7 @@ impl Default for Coefficients {
 
 impl Coefficients {
     pub fn new() -> Self {
-        Self { it: Array1::new(NLAYMAX), nup1: Array1::new(NLAYMAX) }
+        Self { it: vec![0; NLAYMAX], nup1: vec![0; NLAYMAX] }
     }
 }
 

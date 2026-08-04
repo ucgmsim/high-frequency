@@ -156,10 +156,10 @@ fn ttime_matches_fortran() {
         let rr = r.f64();
         let (mut st, vmod) = r.state(ndeep);
 
-        for k in 1..=nseg { st.rays.nh[k] = r.i32(); }
-        for k in 1..=nseg { st.rays.nm[k] = r.i32(); }
-        for k in 1..=nseg { st.coff.it[k] = r.i32(); }
-        for k in 1..=nseg { st.coff.nup1[k] = r.i32(); }
+        for k in 0..nseg { st.rays.nh[k] = r.i32(); }
+        for k in 0..nseg { st.rays.nm[k] = r.i32(); }
+        for k in 0..nseg { st.coff.it[k] = r.i32(); }
+        for k in 0..nseg { st.coff.nup1[k] = r.i32(); }
         st.rays.nd = nseg as i32;
 
         let want_p1 = r.f64();

@@ -75,7 +75,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     assert_eq!(ray_index, 1, "/rays/ has a degenerate leading dimension; ray_index must be 1");
 
     state.love = 1;
-    if state.rays.nm[1] == 4 {
+    if state.rays.nm[0] == 4 {
         state.love = 2;
     }
     let n = state.rays.nd as usize;
@@ -86,8 +86,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
         state.travel.als[i] = 0.0;
     }
 
-    // Count how many times each layer is traversed, by wave mode.
-    for i in 1..=n {
+    // Count how many times each layer is traversed, by wave mode. Segments are 0-based
+    // since §2.3; the LAYER numbers in `nh` are still 1-based.
+    for i in 0..n {
         let h = state.rays.nh[i] as usize;
         if state.rays.nm[i] == 5 {
             state.travel.alp[h] += 1.0;
@@ -100,10 +101,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     // Ray direction from the source: nup = +1 up, -1 down. ndeg < 0 forces
     // upgoing, which resolves the ambiguity when source and receiver share a
     // layer.
-    let lis = state.rays.nh[1] as usize;
-    let lir = state.rays.nh[n] as usize;
+    let lis = state.rays.nh[0] as usize;
+    let lir = state.rays.nh[n - 1] as usize;
     let mut nl = 1i32;
-    for i in 1..=n {
+    for i in 0..n {
         if state.rays.nh[i] as usize == lis {
             nl += 1;
         }
@@ -122,9 +123,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
 
     // Interaction type at each interface and direction of each segment.
     let n1 = n - 1;
-    state.coff.nup1[1] = nup;
+    state.coff.nup1[0] = nup;
     if n != 1 {
-        for i in 1..=n1 {
+        for i in 0..n1 {
             let k = state.rays.nh[i];
             let m = state.rays.nh[i + 1];
             state.coff.it[i] = if m == k { 1 } else { 0 };
@@ -142,7 +143,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
         }
     }
     if n == 1 {
-        state.coff.it[1] = 2;
+        state.coff.it[0] = 2;
     }
 
     // Receiver position within its layer.
@@ -154,10 +155,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     let hrl = receiver_depth_km - thtot;
     let a1 = hrl / vmod.thickness_km[lir];
     let a2 = (vmod.thickness_km[lir] - hrl) / vmod.thickness_km[lir];
-    let nupa = state.coff.nup1[n];
+    let nupa = state.coff.nup1[n - 1];
     // Labels 23/24: mode 5 takes the P multiplier, modes 3 and 4 the S one,
     // and anything else falls through to P.
-    if state.rays.nm[n] == 3 || state.rays.nm[n] == 4 {
+    if state.rays.nm[n - 1] == 3 || state.rays.nm[n - 1] == 4 {
         if nupa == 1 {
             state.travel.als[lir] = (state.travel.als[lir] as f64 - a1) as f32;
         }
@@ -184,7 +185,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     let a2 = (vmod.thickness_km[lis] - hsl) / vmod.thickness_km[lis];
     // Note the a1/a2 roles are swapped relative to the receiver block above:
     // nup == 1 subtracts a2 here but a1 there. That is what the Fortran does.
-    if state.rays.nm[1] == 3 || state.rays.nm[1] == 4 {
+    if state.rays.nm[0] == 3 || state.rays.nm[0] == 4 {
         if nup == 1 {
             state.travel.als[lis] = (state.travel.als[lis] as f64 - a2) as f32;
         }
@@ -202,7 +203,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
 
     // Deepest layer the ray penetrates.
     let mut ndeep = 0i32;
-    for i in 1..=n {
+    for i in 0..n {
         ndeep = ndeep.max(state.rays.nh[i]);
     }
     state.travel.ndeep = ndeep;
@@ -235,7 +236,7 @@ pub fn geometric_spreading(
     ray_parameter: f64,
     ray_type: i32,
 ) -> (f64, f32) {
-    let nh1 = state.rays.nh[1] as usize;
+    let nh1 = state.rays.nh[0] as usize;
 
     let mut dep = 0.0f64;
     for j in 2..=nh1.saturating_sub(1) {
@@ -267,7 +268,7 @@ pub fn geometric_spreading(
     let mut rsum = ri;
     let mut qb = (ti / vmod.attenuation_s[nh1] as f64) as f32;
 
-    for j in 2..=state.rays.nd as usize {
+    for j in 1..state.rays.nd as usize {
         let nhj = state.rays.nh[j] as usize;
         let mut sini = ray_parameter * vmod.vsh_km_s[nhj];
         if sini >= 1.0 {
@@ -482,18 +483,19 @@ pub fn travel_time(
     let n = state.rays.nd as usize;
     let mut p1 = ray_parameter;
 
-    for i in 1..=n {
+    for i in 0..n {
         let nup = state.coff.nup1[i];
         let nhi = state.rays.nh[i] as usize;
 
         let mut vb = vmod.vsh_km_s[nhi];
         let mut va = vb;
-        if state.rays.nm[1] != 4 {
+        if state.rays.nm[0] != 4 {
             va = vmod.vp_km_s[nhi];
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
 
-        if i == n {
+        // The last segment has no interface below it.
+        if i == n - 1 {
             continue;
         }
         // Transmission needs no second clamp; only reflections do.
@@ -505,7 +507,7 @@ pub fn travel_time(
         let k = if nup == 1 { nhi - 1 } else { nhi + 1 };
         vb = vmod.vsh_km_s[k];
         va = vb;
-        if state.rays.nm[1] != 4 {
+        if state.rays.nm[0] != 4 {
             va = vmod.vp_km_s[k];
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
@@ -610,10 +612,12 @@ pub fn green_function(
     }
 
     let mut l = 0usize;
+    // 0-based: write at the current count, then advance it. The Fortran pre-increments,
+    // so `l` ends at the same segment count either way.
     let push = |state: &mut RayState, l: &mut usize, layer: usize| {
-        *l += 1;
         state.rays.nh[*l] = layer as i32;
         state.rays.nm[*l] = wave_mode;
+        *l += 1;
     };
 
     if ray_type % 2 == 1 {

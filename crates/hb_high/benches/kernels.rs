@@ -74,9 +74,9 @@ fn ray_state(ksrc: usize) -> RayState {
     let mut l = 0usize;
     let mut j = ksrc as i64;
     while j >= 2 {
-        l += 1;
         st.rays.nh[l] = j as i32;
         st.rays.nm[l] = 4;
+        l += 1;
         j -= 1;
     }
     st.rays.nd = l as i32;

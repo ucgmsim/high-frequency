@@ -167,9 +167,9 @@ fn gf_amp_tt_matches_fortran() {
         // The ray description itself, before the derived quantities: a wrong
         // segment list would otherwise only show up as a wrong travel time.
         assert_eq!(st.rays.nd as usize, want_nd, "{tag} nd");
-        for k in 1..=want_nd {
-            assert_eq!(st.rays.nh[k], want_nh[k - 1], "{tag} nh[{k}]");
-            assert_eq!(st.rays.nm[k], want_nm[k - 1], "{tag} nm[{k}]");
+        for k in 0..want_nd {
+            assert_eq!(st.rays.nh[k], want_nh[k], "{tag} nh[{k}]");
+            assert_eq!(st.rays.nm[k], want_nm[k], "{tag} nm[{k}]");
         }
         assert_eq!(st.travel.ndeep, want_ndeep, "{tag} ndeep");
         assert_eq!(st.love, want_love, "{tag} love");
