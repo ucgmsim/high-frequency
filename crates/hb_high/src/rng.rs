@@ -8,7 +8,21 @@
 //! The entire output of the program depends on the draw sequence, so the
 //! *number* of draws each routine consumes matters as much as their values.
 //! See `PORTING_RULES.md` §5 on iteration order.
+//!
+//! # This module is deliberately left un-tidied
+//!
+//! §2.8 converted the rest of the crate's index loops to iterators. The four in here
+//! were skipped on purpose, and the `#[allow]` below is the record of that decision
+//! rather than an oversight: `REFACTOR.md` §2.7 replaces this whole module with
+//! `rand_pcg`, gated on a draw-for-draw equality test, and "What not to do" is explicit
+//! that "small" is not a reason to disturb a generator whose stream is baked into every
+//! golden. Cleaning up code that is queued for deletion buys nothing and spends the one
+//! thing this file has — a diff against `reference/pcg32.f` that a reader can follow.
 
+// `needless_range_loop`: the loops write `out[..count]` sequentially and are correct as
+// iterators. `assign_op_pattern`: the Box-Muller step is written in the Fortran's order.
+// Both are staying until §2.7 deletes the module; see the note above.
+#![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]
 
 const PCG_MULT: u64 = 6364136223846793005;
 const PCG_INC_DEFAULT: u64 = 1442695040888963407;

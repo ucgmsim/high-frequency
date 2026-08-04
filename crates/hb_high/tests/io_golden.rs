@@ -100,7 +100,8 @@ fn check(golden: &str, stoch_name: &str) {
         eq32(&format!("seg {k} dhyp"), s.hypocentre_down_dip_km, r.f32());
         eq32(&format!("seg {k} astop"), s.along_strike_offset_km, r.f32());
         // Driver dump order: ((arr(iv,i,j), i=1,nx), j=1,nw)
-        let fields: [(&str, fn(&Subfault) -> f32); 3] = [
+        type Field = (&'static str, fn(&Subfault) -> f32);
+        let fields: [Field; 3] = [
             ("sddp", |sub| sub.slip),
             ("rist", |sub| sub.rise_time_s),
             ("rupt", |sub| sub.rupture_time_s),

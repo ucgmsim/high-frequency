@@ -45,3 +45,6 @@ harness = false
 [[bench]]
 name = "whole"
 harness = false
+
+[lints]
+workspace = true

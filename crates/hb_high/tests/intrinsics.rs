@@ -68,10 +68,10 @@ fn rust_libm_matches_gfortran() {
         ];
         for (k, name) in names_f32.iter().enumerate() {
             let want = f32r(&mut pos);
-            if got_f32[k].to_bits() != want.to_bits() {
-                if bad.iter().all(|(nm, _)| nm != name) {
-                    bad.push((name.to_string(), n));
-                }
+            if got_f32[k].to_bits() != want.to_bits()
+                && bad.iter().all(|(nm, _)| nm != name)
+            {
+                bad.push((name.to_string(), n));
             }
         }
 
@@ -90,10 +90,10 @@ fn rust_libm_matches_gfortran() {
         for (k, name) in names_f64.iter().enumerate() {
             let want = f64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            if got_f64[k].to_bits() != want.to_bits() {
-                if bad.iter().all(|(nm, _)| nm != name) {
-                    bad.push((name.to_string(), n));
-                }
+            if got_f64[k].to_bits() != want.to_bits()
+                && bad.iter().all(|(nm, _)| nm != name)
+            {
+                bad.push((name.to_string(), n));
             }
         }
         n += 1;

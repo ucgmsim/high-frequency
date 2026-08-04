@@ -360,10 +360,8 @@ pub fn simulate(
             let ray_geometry = geom.at(i, j);
             let subfault_window_s = window_s[seg.grid_index(i, j)];
 
-            for il in 0..np2 {
-                subfault_acc[0][il] = 0.0;
-                subfault_acc[1][il] = 0.0;
-                subfault_acc[2][il] = 0.0;
+            for component in &mut subfault_acc {
+                component.fill(0.0);
             }
 
             // This pass DOES default shear_velocity_km_s/density_g_cm3 before the lookup.
@@ -443,9 +441,9 @@ pub fn simulate(
                         &vmod, ksrc, nsfac, &siteamp_log_freq,
                         &mut siteamp_factors,
                     );
-                    for k in 0..3 {
+                    for component in &mut spectrum {
                         apply_site_amplification(
-                            &mut spectrum[k], &freq, nsfac,
+                            component, &freq, nsfac,
                             &siteamp_log_freq, &siteamp_factors,
                         );
                     }
@@ -680,7 +678,7 @@ fn normalise_source(
     // at hb_high_ref.f:683. Dropped, along with the O(subfault_count) loop that fed it.
     let mut dlm = 0.0f32;
     for s in &stoch.segments {
-        dlm = (s.subfault_length_km * s.subfault_width_km).sqrt() + dlm;
+        dlm += (s.subfault_length_km * s.subfault_width_km).sqrt();
     }
     dlm /= nevnt as f32;
 
@@ -725,7 +723,7 @@ fn normalise_source(
                 * width_km) as f32;
 
             for subfault in row {
-                subfault.slip = xmu * subfault.slip;
+                subfault.slip *= xmu;
                 xsum += subfault.slip;
             }
         }
@@ -767,7 +765,7 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
     let mut fd = 0.0f32;
     if avgdip <= 90.0 && avgdip > 45.0 {
         fd = 1.0 - (avgdip - 45.0) / 45.0;
-    } else if avgdip <= 45.0 && avgdip >= 0.0 {
+    } else if (0.0..=45.0).contains(&avgdip) {
         fd = 1.0;
     }
 
@@ -780,7 +778,7 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
     }
 
     let mut fr = 0.0f32;
-    if avgrak <= 180.0 && avgrak >= 0.0 {
+    if (0.0..=180.0).contains(&avgrak) {
         // sqrt(x*x) rather than abs(x); the Fortran writes it this way.
         fr = 1.0 - ((avgrak - 90.0) * (avgrak - 90.0)).sqrt() / 90.0;
     }

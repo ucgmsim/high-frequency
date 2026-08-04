@@ -202,11 +202,14 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
         let hypocentre_along_strike_km = crate::deck::parse_f32(g(4))?;
         let hypocentre_down_dip_km = crate::deck::parse_f32(g(5))?;
 
-        // Accumulated in the Fortran's order: `nx*nw + nstot`, not `nstot + nx*nw`.
-        subfault_count = along_strike_count * down_dip_count + subfault_count;
-        fault_area_km2 = along_strike_count as f32 * subfault_length_km
-            * down_dip_count as f32 * subfault_width_km
-            + fault_area_km2;
+        // The Fortran writes these as `nx*nw + nstot`, i.e. accumulator last. Operand
+        // order is irrelevant to both -- integer addition is exact and IEEE addition is
+        // commutative -- so they are written the natural way round. It is the
+        // *sequence* of additions across segments that must not change, not the order
+        // within one.
+        subfault_count += along_strike_count * down_dip_count;
+        fault_area_km2 += along_strike_count as f32 * subfault_length_km
+            * down_dip_count as f32 * subfault_width_km;
         let along_strike_offset_km = 0.5 * along_strike_count as f32 * subfault_length_km;
 
         // 2014-12-19: this was '*' and should have been '/'; fixed upstream.

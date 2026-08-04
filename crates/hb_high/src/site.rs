@@ -109,7 +109,7 @@ pub fn apply_site_amplification(
     // DC. The factors are LOG amplitudes, so this exponentiates like every interior
     // bin does -- §2.6 defect 2. There is no interpolation to do at zero frequency:
     // `ln(0)` is undefined, so the bottom table entry is used, as the original did.
-    spectrum[0] = spectrum[0] * factors[0].exp();
+    spectrum[0] *= factors[0].exp();
 
     for i in 1..np {
         let freq = frequency_hz[i].ln();
@@ -137,7 +137,7 @@ pub fn apply_site_amplification(
         }
 
         let fac = (am + (freq - fm) * (ap - am) / (fp - fm)).exp();
-        spectrum[i] = spectrum[i] * fac;
+        spectrum[i] *= fac;
     }
 
     // Re-impose Hermitian symmetry over the negative-frequency half. The Fortran
@@ -153,5 +153,5 @@ pub fn apply_site_amplification(
     // This is the half of §2.6 defect 2 that was actually live: unlike DC -- which
     // `stochastic_spectrum` sets to zero, making the wrong gain unobservable -- this
     // bin carries a value.
-    spectrum[np] = spectrum[np] * factors[table_count - 1].exp();
+    spectrum[np] *= factors[table_count - 1].exp();
 }

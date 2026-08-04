@@ -7,6 +7,31 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 
+# Clippy is a gate here, not a suggestion box, and this section exists because it was
+# not one. `cargo clippy -p hb_high` did not COMPILE until §2.8: seven deny-level
+# `approx_constant` errors on the Fortran's truncated-pi literals aborted the run before
+# any lint reported, so 28 warnings accumulated invisibly -- eight of them
+# `needless_range_loop`, which is precisely the Fortran-ism the port is trying to shed.
+#
+# The lesson is that a lint nobody can run is worse than no lint, because it reads like
+# coverage. Opting in at the workspace level means a future `approx_constant` (or
+# anything else deny-by-default) fails loudly instead of silently masking the rest.
+#
+# Deliberately `warn`, not `deny`: the numerics work in this repo regularly needs a
+# temporary state that lints dislike, and a hard failure would tempt a blanket
+# `#![allow]` at the crate root -- which is how the 28 accumulated in the first place.
+# The convention is a targeted `#[allow]` with the reason written next to it; see
+# `rng.rs`'s module note for the shape.
+#
+# Only `hb_high` opts in so far (`[lints] workspace = true` in its manifest). `im` and
+# `validate` have 7 warnings between them and were outside §2.8's scope; opting them in
+# is a two-line change once someone cleans them.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+unused = { level = "warn", priority = -1 }
+
 # Debug and release must still agree with EACH OTHER, even though neither is
 # bit-identical to the Fortran any more. That self-consistency is what catches a
 # dependence on optimisation-level float behaviour, which has already found one real

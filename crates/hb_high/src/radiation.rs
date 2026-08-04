@@ -142,7 +142,7 @@ pub fn horizontal_radiation_spectrum(
         let rads = rdsva * (component_rad - fa).cos() + rdsha * (component_rad - fa).sin();
         // Squared to remove the sign; polarity is applied at the end, hence
         // the sqrt below.
-        radv = radv + rads * rads;
+        radv += rads * rads;
     }
 
     let radvh = (radv / sample_count as f32).sqrt();
@@ -220,7 +220,7 @@ pub fn vertical_radiation_spectrum(
         let fa = 360.0 * pu * uniform_b[k];
         let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
         let rads = rdsva * th.sin();
-        radv = radv + rads.abs();
+        radv += rads.abs();
     }
 
     let radvh = radv / sample_count as f32 / 2.0;
@@ -231,7 +231,7 @@ pub fn vertical_radiation_spectrum(
             continue;
         }
         if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
-            radiation[i] = radiation[i] + (radvh - rdx) * (frequency_hz[i] - fr1) / (fr2 - fr1);
+            radiation[i] += (radvh - rdx) * (frequency_hz[i] - fr1) / (fr2 - fr1);
         } else {
             radiation[i] = radvh;
         }

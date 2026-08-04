@@ -28,6 +28,10 @@ use rustfft::{Fft, FftDirection, FftPlanner};
 
 use crate::fort::Complex32;
 
+/// A planned transform of one length and direction. `rustfft` hands these out behind an
+/// `Arc` because a plan is shareable and immutable once built.
+type FftPlan = Arc<dyn Fft<f32>>;
+
 thread_local! {
     /// Plans are cached per `(length, direction)`: building one is where `rustfft`
     /// does its twiddle precomputation, so planning per call would reintroduce
@@ -36,8 +40,7 @@ thread_local! {
     /// Thread-local rather than a global mutex because `simulate` is called once per
     /// station and a future caller will want stations on separate threads; a shared
     /// lock would serialise them on the hottest path in the program.
-    static PLANS: RefCell<HashMap<(usize, bool), Arc<dyn Fft<f32>>>> =
-        RefCell::new(HashMap::new());
+    static PLANS: RefCell<HashMap<(usize, bool), FftPlan>> = RefCell::new(HashMap::new());
 }
 
 /// `SUBROUTINE FAST(NNN,ACE,IND)` — in-place unnormalised complex radix-2 FFT.
@@ -103,7 +106,7 @@ pub fn remove_quadratic_trend(dt: f32, acceleration: &mut [f32]) {
     let mut previous = acceleration[0];
     for &next in &acceleration[1..] {
         de = de + ve * dt + a2 * (2.0 * previous + next);
-        ve = ve + a1 * (previous + next);
+        ve += a1 * (previous + next);
         previous = next;
     }
 

@@ -157,7 +157,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     // receiver, which is exactly the kind of silent one-layer error §2.3 is prone to.
     let mut thtot = 0.0f64;
     for i in 0..lir {
-        thtot = vmod.thickness_km[i] + thtot;
+        thtot += vmod.thickness_km[i];
     }
     let hrl = receiver_depth_km - thtot;
     let a1 = hrl / vmod.thickness_km[lir];
@@ -184,7 +184,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
     // Source position within its layer, same as the receiver block above.
     let mut thtot = 0.0f64;
     for i in 0..lis {
-        thtot = vmod.thickness_km[i] + thtot;
+        thtot += vmod.thickness_km[i];
     }
     let hsl = source_depth_km - thtot;
     let a1 = hsl / vmod.thickness_km[lis];
@@ -418,7 +418,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
     loop {
         let rp = (ptest - eps) * v;
         if rp >= 1.0 {
-            eps = 10.0 * eps;
+            eps *= 10.0;
         } else {
             break;
         }

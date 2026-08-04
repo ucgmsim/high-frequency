@@ -252,14 +252,13 @@ fn tokenize(line: &str) -> Vec<Token> {
         let raw: String = bytes[start..i].iter().collect();
         // Repeat count: r*value, where r is a positive integer. Note `3*` with
         // nothing after it is a repeated null, which we do not need to support.
-        if let Some((count, value)) = raw.split_once('*') {
-            if let Ok(c) = count.parse::<usize>() {
-                if !value.is_empty() {
-                    out.push(Token::Repeat(c, value.to_string()));
-                    expect_value_after_comma = false;
-                    continue;
-                }
-            }
+        if let Some((count, value)) = raw.split_once('*')
+            && let Ok(c) = count.parse::<usize>()
+            && !value.is_empty()
+        {
+            out.push(Token::Repeat(c, value.to_string()));
+            expect_value_after_comma = false;
+            continue;
         }
         out.push(Token::Value(raw));
         expect_value_after_comma = false;

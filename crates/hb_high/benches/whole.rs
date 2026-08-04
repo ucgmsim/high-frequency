@@ -11,7 +11,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Faults spanning three orders of magnitude in subfault count. The alpine case
@@ -29,7 +29,7 @@ fn repo_root() -> PathBuf {
 
 /// Build a deck via the harness generator, so benches and the parity gate cannot
 /// drift apart in what they consider a production deck.
-fn deck(fault: &str, out_dir: &PathBuf) -> String {
+fn deck(fault: &str, out_dir: &Path) -> String {
     let root = repo_root();
     let station = out_dir.join("station.ll");
     let output = out_dir.join("bench_out.bin");
