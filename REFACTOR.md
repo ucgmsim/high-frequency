@@ -869,6 +869,20 @@ with a note in `PROVENANCE.md`.
 Ordering: after §2.6's defect fixes (which settle the `stdd` layout question) and
 alongside or before §2.3, since both touch the same allocations.
 
+> **§2.6b is DONE — `504d354`.** No buffer in the program is sized by a compile-time
+> constant any more, so `params::NQ`, `NP`, `LV` and `MM` were deleted outright rather
+> than left as dead ceilings. Two buffers turned out to be sized by the *wrong* ceiling:
+> `siteamp_log_freq` and `siteamp_factors` are frequency tables indexed `0..nsfac = 20`
+> but were allocated at `NLAYMAX = 500`, because in the Fortran they shared a common
+> block with the velocity model. That is a storage accident, not a bound.
+>
+> `MMV` survives on purpose, and not as a size: it is the *number of deviates drawn* per
+> station, which is part of the RNG stream. Trap 1 above is the whole reason, and it is
+> now in the constant's own doc comment where the next reader will hit it. Changing it is
+> a §2.7 decision.
+>
+> The capability goal is met: there is no record length that requires a rebuild.
+
 ### 2.7 `rng.rs` → `rand` / `rand_pcg` — LAST, and carefully
 
 Queued deliberately at the very end of Stage 2, because it is the one replacement that
