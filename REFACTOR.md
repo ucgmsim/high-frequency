@@ -869,6 +869,27 @@ with a note in `PROVENANCE.md`.
 Ordering: after §2.6's defect fixes (which settle the `stdd` layout question) and
 alongside or before §2.3, since both touch the same allocations.
 
+> **§2.3 IS DONE — `Array1` and `Array2` are both deleted.** `fort.rs` is **82 lines**,
+> down from 211 at the start of Stage 2 and ~230 at the start of the port. What survives is
+> the two rounding intrinsics, which encode genuine Fortran-vs-Rust semantic differences
+> rather than transliteration scaffolding.
+>
+> The velocity-model conversion — the item this section flagged as needing sign-off, which
+> Jake gave — measured **−0.014%**, not the ~1% cost predicted here. The prediction came
+> from the reverted half-measure (`63eb218`, +0.62%), and the difference is the whole point
+> of that revert: a `Vec` indexed 1-based with element 0 unused pays for both conventions
+> and gets neither. A proper conversion is free.
+>
+> Also gone: the `array/indexed_sum` / `array/slice_sum` benchmark pair, which is the one
+> that produced `PROFILE.md`'s wrong "the wrapper is free" conclusion by measuring a loop
+> that failed to vectorise.
+>
+> **Final tally of the off-by-one risk this section kept warning about: three, in twelve
+> commits.** One caught by `cargo test` with self-parity blind, one by self-parity with
+> `cargo test` blind, one by reading alone. Both gates were necessary and neither was
+> sufficient — which is the argument for running both on every commit, not for avoiding
+> the work.
+
 > **§2.6b is DONE — `504d354`.** No buffer in the program is sized by a compile-time
 > constant any more, so `params::NQ`, `NP`, `LV` and `MM` were deleted outright rather
 > than left as dead ceilings. Two buffers turned out to be sized by the *wrong* ceiling:

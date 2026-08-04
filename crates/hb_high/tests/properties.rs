@@ -11,7 +11,7 @@
 //! Everything here is written to survive that. No test asserts a computed value, a
 //! bit pattern, or anything about the internals — only relationships that must hold
 //! for **any** correct implementation. Swapping the radix-2 FFT for `realfft`, the
-//! transcribed gamma for a library one, or `Array1` for plain slices must leave this
+//! transcribed gamma for a library one, or a 1-based wrapper for plain slices must leave this
 //! file untouched.
 //!
 //! That makes these tests the acceptance criteria for those swaps rather than an
@@ -37,7 +37,7 @@ use hb_high::config::{
     HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
 };
 use hb_high::fft::{fast, remove_quadratic_trend};
-use hb_high::fort::{Array1, Complex32, Complex64};
+use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry};
 use hb_high::input::{read_stoch, read_velocity_model, Station};
 use hb_high::radiation::radiation_pattern;
@@ -54,13 +54,11 @@ fn angle_gap_deg(a: f32, b: f32) -> f32 {
 }
 
 /// A complex spectrum of `n` bins, filled deterministically from `seed`.
-fn spectrum(n: usize, seed: i32) -> Array1<Complex32> {
-    let mut s = Array1::filled(n, Complex32::ZERO);
+fn spectrum(n: usize, seed: i32) -> Vec<Complex32> {
     let (mut rng, _) = Pcg32::seed(seed);
-    for i in 1..=n {
-        s[i] = Complex32::new(rng.next_f32() - 0.5, rng.next_f32() - 0.5);
-    }
-    s
+    (0..n)
+        .map(|_| Complex32::new(rng.next_f32() - 0.5, rng.next_f32() - 0.5))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -330,14 +328,14 @@ proptest! {
         fast(work.as_mut_slice(), 1);
 
         // Take the scale from the largest input bin, where it is best conditioned.
-        let pivot = (1..=n)
+        let pivot = (0..n)
             .max_by(|&a, &b| original[a].norm().partial_cmp(&original[b].norm()).unwrap())
             .unwrap();
         let scale = work[pivot].re / original[pivot].re;
         prop_assert!(scale.is_finite() && scale.abs() > 0.0);
 
-        let peak = (1..=n).map(|i| original[i].norm()).fold(0.0f32, f32::max);
-        for i in 1..=n {
+        let peak = original.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
+        for i in 0..n {
             for (got, want) in [
                 (work[i].re, scale * original[i].re),
                 (work[i].im, scale * original[i].im),
@@ -357,10 +355,8 @@ proptest! {
         let n = 1usize << exponent;
         let (lhs, rhs) = (spectrum(n, 13), spectrum(n, 29));
 
-        let mut combined = Array1::filled(n, Complex32::ZERO);
-        for i in 1..=n {
-            combined[i] = lhs[i] * alpha + rhs[i];
-        }
+        let combined: Vec<Complex32> =
+            lhs.iter().zip(&rhs).map(|(l, r)| *l * alpha + *r).collect();
 
         let mut t_lhs = lhs.clone();
         let mut t_rhs = rhs.clone();
@@ -369,8 +365,8 @@ proptest! {
             fast(arr.as_mut_slice(), -1);
         }
 
-        let peak = (1..=n).map(|i| t_combined[i].norm()).fold(0.0f32, f32::max);
-        for i in 1..=n {
+        let peak = t_combined.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
+        for i in 0..n {
             let want = t_lhs[i] * alpha + t_rhs[i];
             prop_assert!(
                 (t_combined[i].re - want.re).abs() <= 1e-4 * peak.max(1.0),
@@ -389,19 +385,20 @@ proptest! {
     #[test]
     fn real_input_has_a_real_dc_bin(exponent in 3u32..9) {
         let n = 1usize << exponent;
-        let mut work = Array1::filled(n, Complex32::ZERO);
         let (mut rng, _) = Pcg32::seed(97);
         let mut sum = 0.0f32;
-        for i in 1..=n {
+        let mut work = vec![Complex32::ZERO; n];
+        for slot in work.iter_mut() {
             let v = rng.next_f32() - 0.5;
-            work[i] = Complex32::new(v, 0.0);
+            *slot = Complex32::new(v, 0.0);
             sum += v;
         }
         fast(work.as_mut_slice(), -1);
+        // DC is bin 0 now, not 1.
         prop_assert!(
-            work[1].im.abs() <= 1e-4 * sum.abs().max(1.0),
+            work[0].im.abs() <= 1e-4 * sum.abs().max(1.0),
             "DC bin {:?} should be real",
-            work[1]
+            work[0]
         );
     }
 }
@@ -513,10 +510,10 @@ proptest! {
     #[test]
     fn uniform_deviates_lie_in_the_unit_interval(seed in any::<i32>(), count in 1usize..2048) {
         let (mut rng, _) = Pcg32::seed(seed);
-        let mut out = Array1::<f32>::new(count);
+        let mut out = vec![0.0; count];
         fill_uniform_deviates(&mut rng, count, out.as_mut_slice());
-        for i in 1..=count {
-            prop_assert!((0.0..1.0).contains(&out[i]), "deviate {i} = {}", out[i]);
+        for (i, deviate) in out.iter().enumerate() {
+            prop_assert!((0.0..1.0).contains(deviate), "deviate {i} = {deviate}");
         }
     }
 
@@ -529,11 +526,11 @@ proptest! {
     fn normal_deviates_have_unit_rms(seed in any::<i32>(), exponent in 6u32..13) {
         let count = 1usize << exponent;
         let (mut rng, _) = Pcg32::seed(seed);
-        let mut out = Array1::<f32>::new(count);
+        let mut out = vec![0.0; count];
         fill_normal_deviates(&mut rng, count, out.as_mut_slice());
 
         let mean_square =
-            (1..=count).map(|i| (out[i] as f64) * (out[i] as f64)).sum::<f64>() / count as f64;
+            out.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / count as f64;
         prop_assert!(
             (mean_square.sqrt() - 1.0).abs() < 1e-4,
             "RMS {} is not unity",
@@ -543,7 +540,7 @@ proptest! {
         // Mean is not renormalised, so only require it to be small for the size of
         // the sample: many standard errors of slack, catching a systematic offset
         // without ever failing by luck.
-        let mean = (1..=count).map(|i| out[i] as f64).sum::<f64>() / count as f64;
+        let mean = out.iter().map(|v| *v as f64).sum::<f64>() / count as f64;
         prop_assert!(
             mean.abs() < 8.0 / (count as f64).sqrt(),
             "mean {mean} too far from zero for n={count}"
@@ -645,9 +642,12 @@ proptest! {
         let mut spec = spectrum(np2, 53);
         let (frequency, log_frequency, factors) = site_table(np2, level);
         apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
-        for i in 1..=np2 / 2 - 1 {
-            let positive = spec[i + 1];
-            let negative = spec[np2 - i + 1];
+        // Bin `i` counted from DC, so `spec[i]` is the positive frequency and
+        // `spec[np2 - i]` its Hermitian partner. 0-based, the Fortran's `i + 1` and
+        // `np2 - i + 1` lose their offsets.
+        for i in 1..np2 / 2 {
+            let positive = spec[i];
+            let negative = spec[np2 - i];
             prop_assert!(
                 (positive.re - negative.re).abs() <= 1e-5 * positive.norm().max(1.0),
                 "bin {i}: re {} vs {}", positive.re, negative.re
@@ -662,15 +662,15 @@ proptest! {
 
 /// A frequency axis and a flat site table at `level`, spanning the whole axis so no
 /// bin falls outside the interpolation range.
-fn site_table(np2: usize, level: f32) -> (Array1<f32>, Array1<f32>, Array1<f32>) {
-    let mut frequency = Array1::<f32>::new(np2);
-    for i in 1..=np2 / 2 + 1 {
-        frequency[i] = (i - 1) as f32 * 0.5;
+fn site_table(np2: usize, level: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut frequency = vec![0.0; np2];
+    for (bin, slot) in frequency.iter_mut().enumerate().take(np2 / 2 + 1) {
+        *slot = bin as f32 * 0.5;
     }
-    let mut log_frequency = Array1::<f32>::new(hb_high::state::params::NLAYMAX);
-    let mut factors = Array1::<f32>::new(hb_high::state::params::NLAYMAX);
-    for i in 1..=6 {
-        log_frequency[i] = (0.001f32 * 10f32.powi(i as i32 - 1)).ln();
+    let mut log_frequency = vec![0.0; hb_high::state::params::NLAYMAX];
+    let mut factors = vec![0.0; hb_high::state::params::NLAYMAX];
+    for i in 0..6 {
+        log_frequency[i] = (0.001f32 * 10f32.powi(i as i32)).ln();
         factors[i] = level;
     }
     (frequency, log_frequency, factors)

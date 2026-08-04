@@ -8,7 +8,7 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::fort::{Array1, Complex32};
+use hb_high::fort::Complex32;
 use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};
@@ -95,14 +95,13 @@ fn stoc_f_matches_fortran() {
             saw_negative_kappa = true;
         }
 
-        let mut dfr = Array1::<f32>::new(nf);
-        for i in 1..=nf { dfr[i] = r.f32(); }
+        let dfr: Vec<f32> = (0..nf).map(|_| r.f32()).collect();
         let want: Vec<Complex32> =
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let (mut rng, _) = Pcg32::seed(seed);
-        let mut cw = Array1::<Complex32>::filled(np2, Complex32::ZERO);
+        let mut cw = vec![Complex32::ZERO; np2];
         stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
                fc, fmx, akapp, cw.as_mut_slice(), dfr.as_slice(), qb, qfe, bigc);
 
@@ -110,9 +109,10 @@ fn stoc_f_matches_fortran() {
         // Scale from the Fortran record, so the tolerance does not float with our
         // own output.
         let scale = want.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
-        for i in 1..=np2 {
-            near32(&format!("{tag} cw[{i}].re"), cw[i].re, want[i - 1].re, scale);
-            near32(&format!("{tag} cw[{i}].im"), cw[i].im, want[i - 1].im, scale);
+        for i in 0..np2 {
+            let at = i + 1;
+            near32(&format!("{tag} cw[{at}].re"), cw[i].re, want[i].re, scale);
+            near32(&format!("{tag} cw[{at}].im"), cw[i].im, want[i].im, scale);
         }
         // Generator position: stochastic_spectrum consumes np2 deviates via
         // normal_deviates, and the shared stream must stay in step.

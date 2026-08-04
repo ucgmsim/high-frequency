@@ -10,7 +10,6 @@
 //! program's output is noise, the resulting waveform would still look
 //! plausible. See `PORTING_RULES.md` §10.
 
-use hb_high::fort::Array1;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32, SEED_WORDS};
 use std::path::PathBuf;
 
@@ -91,7 +90,7 @@ fn ranu2_matches_fortran() {
     for seed in SEEDS {
         let want = read_f32s(&format!("ranu2_{seed}.bin"));
         let (mut g, _) = Pcg32::seed(seed);
-        let mut rn = Array1::<f32>::new(want.len());
+        let mut rn = vec![0.0; want.len()];
         fill_uniform_deviates(&mut g, want.len(), rn.as_mut_slice());
         assert_f32_bit_identical(
             &format!("uniform_deviates seed {seed}"),
@@ -109,7 +108,7 @@ fn normal_random_number_matches_fortran() {
         let want = read_f32s(&format!("normal_{n}.bin"));
         assert_eq!(want.len(), n);
         let (mut g, _) = Pcg32::seed(123456789);
-        let mut acc = Array1::<f32>::new(n);
+        let mut acc = vec![0.0; n];
         fill_normal_deviates(&mut g, n, acc.as_mut_slice());
         assert_f32_bit_identical(&format!("normal nr={n}"), acc.as_slice(), &want);
     }

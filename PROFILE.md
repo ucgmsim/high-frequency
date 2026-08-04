@@ -152,7 +152,8 @@ changes the order of operations. Only relevant to alpine-scale faults.
 
 ## What not to do
 
-**~~Do not strip the `Array1` 1-based wrapper from hot loops.~~ — WRONG, measured.**
+**~~Do not strip the `Array1` 1-based wrapper from hot loops.~~ — WRONG, measured, and
+the wrapper no longer exists.**
 This section previously argued the wrapper was free, from `array/indexed_sum` at
 60.06 µs against `array/slice_sum` at 60.10 µs over 65536 elements. §2.3 converted
 `rng.rs` and instructions retired fell **5.13%** for the whole program, with the
@@ -167,10 +168,17 @@ impl — bounds-checked and `#[track_caller]`, which forces a caller-location ar
 stops that. Over three passes per station the difference is large.
 
 The lesson is about the benchmark, not the wrapper: a microbenchmark that fails to
-vectorise cannot answer whether something blocks vectorisation. LLVM already elides the bounds checks in these loops. Removing
-the wrapper would mean rewriting index arithmetic across every kernel, which
-`PORTING_RULES.md` §3 identifies as the single most likely way to introduce a
-silent off-by-one, in exchange for nothing measurable.
+vectorise cannot answer whether something blocks vectorisation. The `array/indexed_sum`
+and `array/slice_sum` pair has been deleted along with the wrapper, because a benchmark
+that produced a wrong conclusion once will produce it again.
+
+The rest of the old warning — that removing the wrapper means rewriting index arithmetic
+across every kernel, which `PORTING_RULES.md` §3 calls the most likely source of a silent
+off-by-one — was right about the risk and wrong about the price. Measured across twelve
+§2.3 commits: **three off-by-ones**, each caught by a different mechanism (`cargo test`
+with self-parity blind, self-parity with `cargo test` blind, and one only by reading), and
+the final velocity-model conversion came in at **−0.014%**, i.e. free. `fort.rs` went from
+211 lines to 82.
 
 **Do not reach for a faster FFT algorithm first.** Radix-4 or split-radix would
 cut operation counts ~25%, but items 1 and 2 get a comparable win at tier A,

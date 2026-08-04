@@ -12,7 +12,6 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::fort::Array1;
 use hb_high::geom::subfault_geometry;
 use hb_high::ray::{geometric_spreading, build_ray_path};
 use hb_high::site::site_amplification_factors;

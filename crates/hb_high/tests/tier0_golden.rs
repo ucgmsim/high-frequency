@@ -32,7 +32,7 @@
 //! Every comparison is exact. See `PORTING_RULES.md` §10.
 
 use hb_high::fft::remove_quadratic_trend;
-use hb_high::fort::{Array1, Complex32, Complex64};
+use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::distance_azimuth;
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
@@ -176,21 +176,26 @@ fn flzero_matches_fortran() {
     while !r.done() {
         let n = r.i32() as usize;
         let dt = r.f32();
-        let mut a = Array1::<f32>::new(n);
-        for i in 1..=n {
-            a[i] = r.f32();
+        // 0-based since §2.3. The labels still report the Fortran's 1-based sample
+        // number, so a failure can be looked up in the oracle's own dump.
+        let mut a = vec![0.0; n];
+        for slot in a.iter_mut() {
+            *slot = r.f32();
         }
         let a_in = a.clone();
         let want: Vec<f32> = (0..n).map(|_| r.f32()).collect();
 
         remove_quadratic_trend(dt, a.as_mut_slice());
-        for i in 1..=n {
-            eq32(&format!("remove_quadratic_trend n={n} dt={dt} a[{i}]"), a[i], want[i - 1]);
+        for i in 0..n {
+            eq32(
+                &format!("remove_quadratic_trend n={n} dt={dt} a[{}]", i + 1),
+                a[i], want[i],
+            );
         }
-        // The correction loop starts at I=3, so the first two samples must come
+        // The correction loop starts at Fortran I=3, so the first two samples must come
         // back untouched. Pinned explicitly because it is easy to "fix".
-        eq32(&format!("remove_quadratic_trend n={n} a[1] must be untouched"), a[1], a_in[1]);
-        eq32(&format!("remove_quadratic_trend n={n} a[2] must be untouched"), a[2], a_in[2]);
+        eq32(&format!("remove_quadratic_trend n={n} a[1] must be untouched"), a[0], a_in[0]);
+        eq32(&format!("remove_quadratic_trend n={n} a[2] must be untouched"), a[1], a_in[1]);
         cases += 1;
     }
     r.assert_exhausted();
@@ -206,22 +211,11 @@ fn siteamp_matches_fortran() {
         let nn = r.i32() as usize;
         let np = np2 / 2;
 
-        let mut dfr = Array1::<f32>::new(np + 1);
-        for i in 1..=np + 1 {
-            dfr[i] = r.f32();
-        }
-        let mut fn_ = Array1::<f32>::new(nn);
-        for i in 1..=nn {
-            fn_[i] = r.f32();
-        }
-        let mut an = Array1::<f32>::new(nn);
-        for i in 1..=nn {
-            an[i] = r.f32();
-        }
-        let mut cw = Array1::<Complex32>::filled(np2, Complex32::ZERO);
-        for i in 1..=np2 {
-            cw[i] = Complex32::new(r.f32(), r.f32());
-        }
+        let dfr: Vec<f32> = (0..=np).map(|_| r.f32()).collect();
+        let fn_: Vec<f32> = (0..nn).map(|_| r.f32()).collect();
+        let an: Vec<f32> = (0..nn).map(|_| r.f32()).collect();
+        let mut cw: Vec<Complex32> =
+            (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want: Vec<Complex32> =
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
@@ -237,23 +231,32 @@ fn siteamp_matches_fortran() {
         //
         // The Hermitian mirror means the negative-frequency partner of Nyquist is the
         // same bin, so only these two indices move.
-        let nyquist = np2 / 2 + 1;
-        for i in 1..=np2 {
-            if i == 1 || i == nyquist {
+        // 0-based: the Fortran's bin 1 is index 0 and its np2/2 + 1 is index np2/2.
+        let nyquist = np2 / 2;
+        for i in 0..np2 {
+            if i == 0 || i == nyquist {
                 continue;
             }
-            eq32(&format!("apply_site_amplification np2={np2} [{i}].re"), cw[i].re, want[i - 1].re);
-            eq32(&format!("apply_site_amplification np2={np2} [{i}].im"), cw[i].im, want[i - 1].im);
+            eq32(
+                &format!("apply_site_amplification np2={np2} [{}].re", i + 1),
+                cw[i].re, want[i].re,
+            );
+            eq32(
+                &format!("apply_site_amplification np2={np2} [{}].im", i + 1),
+                cw[i].im, want[i].im,
+            );
         }
 
         // And assert the two excluded bins differ in exactly the way intended: the
         // fixed code applies exp(factor) where the Fortran applied factor. A silent
         // agreement here would mean the fix did not take.
-        for (i, factor) in [(1usize, an[1]), (nyquist, an[nn])] {
+        // DC takes the first table entry and Nyquist the clamped last one -- 0-based,
+        // `an[0]` and `an[nn - 1]`.
+        for (i, factor) in [(0usize, an[0]), (nyquist, an[nn - 1])] {
             let fortran_gain = factor;
             let fixed_gain = factor.exp();
-            if want[i - 1].re.abs() > 1e-20 && (fortran_gain - fixed_gain).abs() > 1e-6 {
-                let ratio = cw[i].re / want[i - 1].re;
+            if want[i].re.abs() > 1e-20 && (fortran_gain - fixed_gain).abs() > 1e-6 {
+                let ratio = cw[i].re / want[i].re;
                 let expected = fixed_gain / fortran_gain;
                 assert!(
                     (ratio / expected - 1.0).abs() < 1e-3,

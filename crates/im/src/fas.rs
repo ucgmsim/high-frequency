@@ -14,7 +14,7 @@
 //!   both codes, so it cannot bias a comparison.
 
 use hb_high::fft::fast;
-use hb_high::fort::{Array1, Complex32};
+use hb_high::fort::Complex32;
 
 /// Default frequency bins for the correlation analysis: 30 log-spaced bands from
 /// 0.1 to 20 Hz.
@@ -38,9 +38,9 @@ pub fn default_bin_edges() -> Vec<f64> {
 /// cm/s² · s = cm/s units for acceleration input.
 pub fn fas(acc: &[f32], dt: f64) -> (Vec<f64>, Vec<f64>) {
     let n = acc.len().next_power_of_two().max(2);
-    let mut z = Array1::filled(n, Complex32::ZERO);
-    for (i, &a) in acc.iter().enumerate() {
-        z[i + 1] = Complex32::new(a, 0.0);
+    let mut z = vec![Complex32::ZERO; n];
+    for (slot, &a) in z.iter_mut().zip(acc) {
+        *slot = Complex32::new(a, 0.0);
     }
     // ind = -1 is the analysis direction; see hb_high::fft::fast.
     fast(z.as_mut_slice(), -1);
@@ -49,9 +49,9 @@ pub fn fas(acc: &[f32], dt: f64) -> (Vec<f64>, Vec<f64>) {
     let df = 1.0 / (n as f64 * dt);
     let mut freqs = Vec::with_capacity(nf);
     let mut amps = Vec::with_capacity(nf);
-    for i in 1..=nf {
-        freqs.push((i - 1) as f64 * df);
-        amps.push(z[i].norm() as f64 * dt);
+    for (bin, z) in z.iter().enumerate().take(nf) {
+        freqs.push(bin as f64 * df);
+        amps.push(z.norm() as f64 * dt);
     }
     (freqs, amps)
 }

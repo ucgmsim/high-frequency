@@ -8,7 +8,7 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::fort::{Array1, Complex32, Complex64};
+use hb_high::fort::{Complex32, Complex64};
 use hb_high::highcor::apply_radiation_and_invert;
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use hb_high::ray::{cagniard_time, cagniard_time_derivative};
@@ -164,23 +164,24 @@ fn highcor_f_matches_fortran() {
         let mf = r.usize();
         let np2 = r.usize();
 
-        let mut rdna = Array1::<f32>::new(nf);
-        for i in 1..=nf { rdna[i] = r.f32(); }
-        let mut cw1 = Array1::<Complex32>::filled(np2, Complex32::ZERO);
-        for i in 1..=np2 { cw1[i] = Complex32::new(r.f32(), r.f32()); }
+        // 0-based since §2.3; labels keep the Fortran's 1-based index.
+        let rdna: Vec<f32> = (0..nf).map(|_| r.f32()).collect();
+        let mut cw1: Vec<Complex32> =
+            (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_cw: Vec<Complex32> =
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_stdd: Vec<f32> = (0..np2).map(|_| r.f32()).collect();
 
-        let mut stdd = Array1::<f32>::new(np2);
+        let mut stdd = vec![0.0; np2];
         apply_radiation_and_invert(nf, mf, cw1.as_mut_slice(), stdd.as_mut_slice(), rdna.as_slice());
 
         let cw_scale = want_cw.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
         let stdd_scale = want_stdd.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-        for i in 1..=np2 {
-            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].re"), cw1[i].re, want_cw[i - 1].re, cw_scale);
-            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].im"), cw1[i].im, want_cw[i - 1].im, cw_scale);
-            near32(&format!("apply_radiation_and_invert np2={np2} stdd[{i}]"), stdd[i], want_stdd[i - 1], stdd_scale);
+        for i in 0..np2 {
+            let at = i + 1;
+            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{at}].re"), cw1[i].re, want_cw[i].re, cw_scale);
+            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{at}].im"), cw1[i].im, want_cw[i].im, cw_scale);
+            near32(&format!("apply_radiation_and_invert np2={np2} stdd[{at}]"), stdd[i], want_stdd[i], stdd_scale);
         }
         cases += 1;
     }
@@ -199,20 +200,19 @@ fn radfrq_lin_matches_fortran() {
         let nr = r.usize();
         let seed = r.i32();
 
-        let mut dfr = Array1::<f32>::new(nfold);
-        for i in 1..=nfold { dfr[i] = r.f32(); }
+        let dfr: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
         let want_fr1 = r.f32();
         let want_rdna: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let (mut rng, _) = Pcg32::seed(seed);
-        let mut rdna = Array1::<f32>::new(nfold);
+        let mut rdna = vec![0.0; nfold];
         let fr1 = horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, thaa, dfr.as_slice(), nfold, cmp, nr, rdna.as_mut_slice());
 
         let tag = format!("horizontal_radiation_spectrum case {cases} (cmp={cmp})");
         eq32(&format!("{tag} fr1 (clobbered)"), fr1, want_fr1);
-        for i in 1..=nfold {
-            eq32(&format!("{tag} rdna[{i}]"), rdna[i], want_rdna[i - 1]);
+        for i in 0..nfold {
+            eq32(&format!("{tag} rdna[{}]", i + 1), rdna[i], want_rdna[i]);
         }
         // The stream position after the call. This is what catches a version
         // that gets the pattern right while drawing the wrong number of
@@ -236,22 +236,19 @@ fn radv_lin_matches_fortran() {
         let nfold = r.usize();
         let nr = r.usize();
 
-        let mut dfr = Array1::<f32>::new(nfold);
-        for i in 1..=nfold { dfr[i] = r.f32(); }
-        let mut rna = Array1::<f32>::new(nr);
-        for i in 1..=nr { rna[i] = r.f32(); }
-        let mut rnb = Array1::<f32>::new(nr);
-        for i in 1..=nr { rnb[i] = r.f32(); }
+        let dfr: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
+        let rna: Vec<f32> = (0..nr).map(|_| r.f32()).collect();
+        let rnb: Vec<f32> = (0..nr).map(|_| r.f32()).collect();
         let want_fr1 = r.f32();
         let want_rdna: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
 
-        let mut rdna = Array1::<f32>::new(nfold);
+        let mut rdna = vec![0.0; nfold];
         let fr1 = vertical_radiation_spectrum(stra, dipa, raka, pa, thaa, dfr.as_slice(), nfold, rna.as_slice(), rnb.as_slice(), nr, rdna.as_mut_slice());
 
         let tag = format!("vertical_radiation_spectrum case {cases}");
         eq32(&format!("{tag} fr1 (clobbered to 0.001)"), fr1, want_fr1);
-        for i in 1..=nfold {
-            eq32(&format!("{tag} rdna[{i}]"), rdna[i], want_rdna[i - 1]);
+        for i in 0..nfold {
+            eq32(&format!("{tag} rdna[{}]", i + 1), rdna[i], want_rdna[i]);
         }
         cases += 1;
     }

@@ -110,16 +110,27 @@ every intermediate. The traps that actually occur in this program:
   Those three are `f32` *only because they are undeclared in both scopes that
   declare the block*. Do not "tidy" them.
 
-## 3. Arrays stay 1-based and column-major
+## 3. Arrays stay 1-based and column-major — ***RETIRED, and the risk it named was real***
 
-Use `Array1<T>` / `Array2<T>` from `fort.rs`, which index from 1 and store 2-D
+> **This rule governed the port up to `REFACTOR.md` §2.3 and no longer applies.** The
+> crate is 0-based throughout and `fort::Array1`/`Array2` are deleted. It is kept here
+> because it explains why the transliteration looks the way it does in the git history,
+> and because its central warning was vindicated: across the twelve §2.3 commits that
+> undid it, index rewriting produced **three off-by-ones**, one of which no gate caught —
+> it was found by reading. The lesson is not "never do it" but "do it behind an exact
+> gate, in small commits, and read every changed index expression".
+>
+> The `stdd` column-major dependency below stopped existing when §2.6 fixed the
+> out-of-bounds read that created it.
+
+~~Use `Array1<T>` / `Array2<T>` from `fort.rs`, which index from 1 and store 2-D
 data column-major. **Do not rewrite index arithmetic** during transliteration —
 not `i-1`, not iterator chains, not slice windows. An off-by-one introduced
 while "cleaning up" indexing is the single most likely way to produce a
 plausible-looking wrong answer.
 
 `stdd` is declared `stdd(mmv,3)` and is read at index 0 (see rule 7), so its
-backing store must be laid out column-major for the aliasing to work.
+backing store must be laid out column-major for the aliasing to work.~~
 
 Assumed-size dummies (`dimension x(1)`, twelve of them) become slices with an
 explicit length taken from the call site. Resolve the true length before

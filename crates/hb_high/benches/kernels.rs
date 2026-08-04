@@ -22,7 +22,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::hint::black_box;
 
 use hb_high::fft::{fast, remove_quadratic_trend};
-use hb_high::fort::{Array1, Complex32, Complex64};
+use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::subfault_geometry;
 use hb_high::highcor::apply_radiation_and_invert;
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern};
@@ -52,8 +52,8 @@ const DT: f32 = 0.005;
 fn vmod(j0: usize) -> VelocityModel {
     let mut v = VelocityModel::new();
     let mut dep = 0.0f64;
-    for k in 1..=j0 {
-        let frac = (k - 1) as f64 / (j0 - 1) as f64;
+    for k in 0..j0 {
+        let frac = k as f64 / (j0 - 1) as f64;
         v.thickness_km[k] = 0.05 + 3.0 * frac;
         v.vsh_km_s[k] = 0.5 + 4.1 * frac;
         v.vp_km_s[k] = v.vsh_km_s[k] * 1.75;
@@ -63,7 +63,7 @@ fn vmod(j0: usize) -> VelocityModel {
         dep += v.thickness_km[k];
         v.depth_km[k] = dep;
     }
-    v.thickness_km[j0] = 0.0;
+    v.thickness_km[j0 - 1] = 0.0;
     v
 }
 
@@ -89,45 +89,43 @@ fn ray_state(ksrc: usize) -> RayState {
 fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     let mut st = ray_state(ksrc);
     let mut depsum = 0.0f64;
-    for k in 1..=ksrc {
+    for k in 0..=ksrc {
         depsum += v.thickness_km[k];
     }
     let hs = depsum - 0.5 * v.thickness_km[ksrc];
-    build_ray_path(&mut st, v, 1, hs, v.thickness_km[1]);
+    build_ray_path(&mut st, v, 1, hs, v.thickness_km[0]);
     st
 }
 
 /// The frequency axis the main program builds: `dfr(i) = df*(i-1)`.
-fn dfr_axis(np2: usize) -> Array1<f32> {
-    let mut dfr = Array1::<f32>::new(np2);
+fn dfr_axis(np2: usize) -> Vec<f32> {
+    let mut dfr = vec![0.0; np2];
     let df = 1.0 / (np2 as f32 * DT);
-    for i in 1..=np2 / 2 + 1 {
-        dfr[i] = df * (i - 1) as f32;
+    for (bin, slot) in dfr.iter_mut().enumerate().take(np2 / 2 + 1) {
+        *slot = df * bin as f32;
     }
     dfr
 }
 
 /// Complex spectrum of plausible magnitude, deterministic so runs are comparable.
-fn spectrum(np2: usize) -> Array1<Complex32> {
-    let mut cw = Array1::filled(np2, Complex32::ZERO);
+fn spectrum(np2: usize) -> Vec<Complex32> {
     let (mut g, _) = Pcg32::seed(20260804);
-    for i in 1..=np2 {
-        cw[i] = Complex32::new(g.next_f32() - 0.5, g.next_f32() - 0.5);
-    }
-    cw
+    (0..np2)
+        .map(|_| Complex32::new(g.next_f32() - 0.5, g.next_f32() - 0.5))
+        .collect()
 }
 
 /// The 20-entry log-frequency site-amplification table from `:196-218`.
-fn site_table() -> (Array1<f32>, Array1<f32>) {
+fn site_table() -> (Vec<f32>, Vec<f32>) {
     const HZ: [f32; 20] = [
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00,
         3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let mut fn_ = Array1::<f32>::new(params::NLAYMAX);
-    let mut an = Array1::<f32>::new(params::NLAYMAX);
+    let mut fn_ = vec![0.0; params::NLAYMAX];
+    let mut an = vec![0.0; params::NLAYMAX];
     let (mut g, _) = Pcg32::seed(11);
-    for i in 1..=20 {
-        fn_[i] = HZ[i - 1].ln();
+    for i in 0..20 {
+        fn_[i] = HZ[i].ln();
         an[i] = 0.5 * g.next_f32();
     }
     (fn_, an)
@@ -187,12 +185,12 @@ fn bench_rng(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("normal", n), &n, |b, &n| {
             let (mut g, _) = Pcg32::seed(1);
-            let mut acc = Array1::<f32>::new(n);
+            let mut acc = vec![0.0; n];
             b.iter(|| fill_normal_deviates(&mut g, black_box(n), acc.as_mut_slice()))
         });
         group.bench_with_input(BenchmarkId::new("uniform_deviates", n), &n, |b, &n| {
             let (mut g, _) = Pcg32::seed(1);
-            let mut rn = Array1::<f32>::new(n);
+            let mut rn = vec![0.0; n];
             b.iter(|| fill_uniform_deviates(&mut g, black_box(n), rn.as_mut_slice()))
         });
     }
@@ -226,7 +224,7 @@ fn bench_radiation(c: &mut Criterion) {
     let np2 = 4096usize;
     let nfold = np2 / 2 + 1;
     let dfr = dfr_axis(np2);
-    let mut rdna = Array1::<f32>::new(np2);
+    let mut rdna = vec![0.0; np2];
 
     // Per call, not per draw: the useful comparison is against one FFT of the
     // same np2, since both happen the same number of times per subfault.
@@ -242,8 +240,8 @@ fn bench_radiation(c: &mut Criterion) {
     });
 
     let (mut g, _) = Pcg32::seed(3);
-    let mut rna = Array1::<f32>::new(NR);
-    let mut rnb = Array1::<f32>::new(NR);
+    let mut rna = vec![0.0; NR];
+    let mut rnb = vec![0.0; NR];
     fill_uniform_deviates(&mut g, NR, rna.as_mut_slice());
     fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
     group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
@@ -324,9 +322,9 @@ fn bench_spectrum(c: &mut Criterion) {
         let dfr = dfr_axis(np2);
         let src = spectrum(np2);
         let (fn_, an) = site_table();
-        let mut rdna = Array1::<f32>::new(np2);
-        for i in 1..=nf {
-            rdna[i] = 0.7;
+        let mut rdna = vec![0.0; np2];
+        for slot in rdna.iter_mut().take(nf) {
+            *slot = 0.7;
         }
 
         group.throughput(Throughput::Elements(np2 as u64));
@@ -334,7 +332,7 @@ fn bench_spectrum(c: &mut Criterion) {
         // stochastic_spectrum: one FFT plus np2 normal draws plus the per-bin spectral shape.
         group.bench_with_input(BenchmarkId::new("stochastic_spectrum", np2), &np2, |b, &np2| {
             let (mut g, _) = Pcg32::seed(5);
-            let mut cw = Array1::filled(np2, Complex32::ZERO);
+            let mut cw = vec![Complex32::ZERO; np2];
             b.iter(|| {
                 stochastic_spectrum(
                     &mut g, np2, 60.0, 2.0, 0.2, 0.05, 3.2, 2.7, DT, 3.0e22, 0.0,
@@ -346,7 +344,7 @@ fn bench_spectrum(c: &mut Criterion) {
         // apply_radiation_and_invert: the radiation multiply, one inverse FFT, the scale and the
         // raised-cosine taper.
         group.bench_with_input(BenchmarkId::new("apply_radiation_and_invert", np2), &np2, |b, &np2| {
-            let mut stdd = Array1::<f32>::new(np2);
+            let mut stdd = vec![0.0; np2];
             b.iter_batched_ref(
                 || src.clone(),
                 |cw| apply_radiation_and_invert(nf, mf, cw.as_mut_slice(), stdd.as_mut_slice(), rdna.as_slice()),
@@ -363,10 +361,8 @@ fn bench_spectrum(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("remove_quadratic_trend", np2), &np2, |b, &np2| {
-            let mut a = Array1::<f32>::new(np2);
-            for i in 1..=np2 {
-                a[i] = (i as f32 * 0.01).sin();
-            }
+            let a: Vec<f32> =
+                (0..np2).map(|i| (i as f32 * 0.01).sin()).collect();
             b.iter_batched_ref(
                 || a.clone(),
                 |a| remove_quadratic_trend(DT, a.as_mut_slice()),
@@ -419,40 +415,6 @@ fn bench_geom(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
-// The 1-based array wrapper
-// ---------------------------------------------------------------------------
-
-/// What the transliteration's indexing discipline costs.
-///
-/// `Array1`'s `Index` impl asserts `i >= 1` and then bounds-checks the `Vec`, so
-/// every element access in every kernel carries two branches. This quantifies
-/// that against a plain slice sum, which tells us whether removing the wrapper in
-/// hot loops during Phase 3 is worth the risk of touching index arithmetic.
-fn bench_array(c: &mut Criterion) {
-    let mut group = c.benchmark_group("array");
-    let n = 65536usize;
-    let mut a = Array1::<f32>::new(n);
-    for i in 1..=n {
-        a[i] = i as f32;
-    }
-    group.throughput(Throughput::Elements(n as u64));
-    group.bench_function("indexed_sum", |b| {
-        b.iter(|| {
-            let mut s = 0.0f32;
-            for i in 1..=n {
-                s += a[i];
-            }
-            black_box(s)
-        })
-    });
-    group.bench_function("slice_sum", |b| {
-        let s = a.as_slice();
-        b.iter(|| black_box(s.iter().sum::<f32>()))
-    });
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_fft,
@@ -461,6 +423,5 @@ criterion_group!(
     bench_ray,
     bench_spectrum,
     bench_geom,
-    bench_array,
 );
 criterion_main!(benches);
