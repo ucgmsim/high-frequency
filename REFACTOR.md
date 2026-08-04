@@ -577,7 +577,21 @@ passes 0. A modern geodesic (`geographiclib-rs`) is both smaller at the call sit
 and more accurate. Tier C, since it moves distances by metres and distance feeds
 the path-duration branch selection.
 
-### 2.6 Defects: both are to be FIXED, in Stage 2
+### 2.6 Defects: both FIXED — `fff2abf` and `262c75f`
+
+> **Done.** Defect 2 (`siteamp` conventions) in `fff2abf`, measured delta 1e-5 of
+> waveform peak, isolated to the site path — the one deck unaffected is `siteamp=0`.
+> Defect 1 (`stdd(0,l)`) in `262c75f`, verified as a pure one-sample translation: mean
+> difference is exactly zero at +1 sample of alignment and non-zero at every other
+> offset. Tier B certified 375/375 on both, which for defect 1 is expected rather than
+> reassuring — see below.
+>
+> One correction to record: defect 2's severity was estimated as negligible from the
+> kappa attenuation at Nyquist, and the measured delta is 1e-5 of peak rather than the
+> ~1e-7 that implied. The estimate looked at `a2` alone and ignored the rest of the
+> spectral shaping at that frequency.
+
+
 
 Two genuine defects in the original, both faithfully reproduced by the port.
 

@@ -253,7 +253,7 @@ one at the call site. **Default disposition: reproduce.**
 
 | bug | location | disposition |
 | --- | --- | --- |
-| `stdd(0,l)` read below the array start; `stdd(0,2)` aliases `stdd(mmv,1)`, `stdd(0,1)` is out of bounds entirely. Shifts the trace one sample | `:1394-1396` | reproduce via an explicitly offset flat buffer; document the alias |
+| ~~`stdd(0,l)` read below the array start; `stdd(0,2)` aliases `stdd(mmv,1)`, `stdd(0,1)` is out of bounds entirely. Shifts the trace one sample~~ | `:1394-1396` | **FIXED in Stage 2** (`262c75f`). Sample 1 now lands on `k2`. Verified as a pure one-sample translation: aligning before and after gives exactly zero difference at +1 sample and nowhere else |
 | `k2` can be negative, so `DS(l,li)` writes before the array start | `:1371` | reproduce; needs the same offset buffer treatment |
 | `bet` used uninitialised in the `do 893/894` pass | `:974-983` | reproduce: initialise to the same value gfortran leaves, which at `-O0` is whatever the previous iteration left. Pin this with a kernel test before relying on it |
 | `trav` zeroes only `alp(1:100)` of 500, leaking stale multipliers | `:3521` | reproduce (benign at the ~34 layers used, but do not silently widen) |
@@ -261,16 +261,18 @@ one at the call site. **Default disposition: reproduce.**
 | `ksrc = j0+1` passed as a layer index | `:1145` | reproduce |
 | `d10` reset to `10000.` inside the segment loop, so the stderr distance covers only the last segment | `:973` | reproduce |
 | `ttime`'s `p1`/`t1` discarded by its only caller | `:3313` | keep the call; it is side-effect-free but keeping it preserves line-by-line comparability |
-| `siteamp` scales the DC and Nyquist bins by the factor **directly** while every interior bin gets `exp(factor)` — two conventions in one routine, disagreeing by 3.3x at a log-amplitude of 0.5 | `siteamp` | reproduce. Impact is negligible: DC is identically zero on entry (`stoc_f` sets `as(1)=0`), and Nyquist sits at 100 Hz where kappa has attenuated the spectrum by ~7e-7. Flagged for Stage 2 in `REFACTOR.md` §2.6 |
+| ~~`siteamp` scales the DC and Nyquist bins by the factor **directly** while every interior bin gets `exp(factor)`~~ | `siteamp` | **FIXED in Stage 2** (`fff2abf`), reconciled towards the exponential. Measured delta 1e-5 of waveform peak — larger than the ~1e-7 the kappa-attenuation argument predicted, so that estimate was too optimistic |
 
 Fixing any of these is Stage 2 work, done as a deliberate re-baseline with a written
 justification. Never silently re-baseline a golden.
 
-Two of them are **decided: fix, in Stage 2** — the `stdd(0,l)` sample shift and the
-`siteamp` convention split. See `REFACTOR.md` §2.6. They stay reproduced through
-Stage 1 only because fixing them changes output, which would confound the
-bit-reproducibility gate Stage 1 is verified against. The rest keep the default
-disposition.
+Two of them are **now FIXED** — the `stdd(0,l)` sample shift and the `siteamp`
+convention split, struck through above. See `REFACTOR.md` §2.6. The rest keep the
+default disposition of *reproduce*.
+
+Note what that means for the `k2` row below it: `k2` can still be negative and writes
+below index 1 are still discarded rather than reproduced, because the Fortran never
+reads them back. Only the read at index 0 was fixed.
 
 ## 8. Input parsing
 
