@@ -9,8 +9,16 @@ oracle. Two independent sources, and they agree:
   `-C force-frame-pointers=yes`
 
 Numbers are the 112-subfault fault (`2013p543824`) at `duration=20`, `dt=0.005`,
-which gives `np2 = 16384`. Whole-program time **812 ms**, of which 7.25 ms per
+which gives `np2 = 16384`. Whole-program time **745 ms**, of which 6.65 ms per
 subfault.
+
+> **Re-measured at the end of Stage 1** (`a075ff2`). The previous figures were 812 ms
+> and 7.25 ms per subfault. Most of that drop is real — Stage 1 deleted a
+> rupture-velocity taper and an `alphaT` evaluation *per subfault* that fed only the
+> discarded `bigC3` — but part is machine conditions: an earlier re-run moved 25
+> untouched kernels by a uniform 7–12%, which is not something code changes do. Treat
+> the absolute numbers as a self-consistent baseline for Stage 2, not as a measured
+> Stage 1 speedup.
 
 ---
 
@@ -18,31 +26,40 @@ subfault.
 
 | | |
 | --- | --- |
-| `hb_high::fft::fast` self time | **50.7%** |
-| `libm` (transcendentals, almost all twiddles) | **25.2%** |
-| everything else in `hb_high` | 23.1% |
+| `hb_high::fft::fast` self time | **48.5%** |
+| `libm` (transcendentals, almost all twiddles) | **27.1%** |
+| everything else in `hb_high` | 24.4% |
 
-`fast` splits almost exactly evenly between its two callers — 25.15% via
-`highcor_f`, 25.26% via `stoc_f` — which is what you would expect from three
-forward transforms in `stoc_f` and three inverse in `highcor_f` per subfault.
+So **75.6% of runtime is the transform and the transcendentals it calls** — the single
+number that justifies §2.1 of `REFACTOR.md`. The next largest self times are
+`stochastic_spectrum` at 8.2%, `fill_normal_deviates` at 6.4%,
+`remove_quadratic_trend` at 2.8% and `apply_site_amplification` at 2.4%.
+
+`fast` splits almost exactly evenly between its two callers — three forward transforms
+in `stochastic_spectrum` and three inverse in `apply_radiation_and_invert` per
+subfault.
 
 ## Cost model, and it checks out
 
 Built from the microbenchmarks alone, per subfault at `np2 = 16384`:
 
-| component | per subfault | share |
+| component | per subfault | share of model |
 | --- | --- | --- |
-| `stoc_f` × 3 | 4.79 ms | 61.5% |
-| `highcor_f` × 3 | 2.09 ms | 22.4% |
-| `radfrq_lin` × 2 | 0.09 ms | 7.1% |
-| `siteamp` × 3 | 0.31 ms | 5.8% |
-| `radv_lin` × 1 | 0.03 ms | 2.5% |
-| `gf_amp_tt` × 1 | 0.01 ms | 0.7% |
-| **model total** | **7.0 ms** | |
-| **measured** | **7.25 ms** | |
+| `stochastic_spectrum` × 3 | 4.76 ms | 66.9% |
+| `apply_radiation_and_invert` × 3 | 1.92 ms | 27.1% |
+| `apply_site_amplification` × 3 | 0.30 ms | 4.2% |
+| `horizontal_radiation_spectrum` × 2 | 0.09 ms | 1.3% |
+| `vertical_radiation_spectrum` × 1 | 0.03 ms | 0.4% |
+| `green_function` × 1 | 0.01 ms | 0.1% |
+| **model total** | **7.11 ms** | |
+| **measured** | **6.65 ms** | |
 
-The model predicts the end-to-end time to within 4%, which means attribution
-below is trustworthy rather than plausible.
+The model now **over**-predicts by 7%, where it previously under-predicted by 4%. That
+is a weaker agreement and the reason is worth stating rather than smoothing over: the
+whole-program time fell while the kernel benchmarks did not move correspondingly,
+which is exactly the signature of Stage 1 removing per-subfault work that lives in
+*none* of these kernels. The two FFT-bound rows are 93.9% of the model either way, so
+the attribution stands; the arithmetic no longer independently confirms it.
 
 ## Call counts, because they explain the shape
 
