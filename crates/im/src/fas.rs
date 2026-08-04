@@ -43,7 +43,7 @@ pub fn fas(acc: &[f32], dt: f64) -> (Vec<f64>, Vec<f64>) {
         z[i + 1] = Complex32::new(a, 0.0);
     }
     // ind = -1 is the analysis direction; see hb_high::fft::fast.
-    fast(n, &mut z, -1);
+    fast(z.as_mut_slice(), -1);
 
     let nf = n / 2 + 1;
     let df = 1.0 / (n as f64 * dt);

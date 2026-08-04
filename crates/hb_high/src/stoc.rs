@@ -172,14 +172,14 @@ pub fn stochastic_spectrum(
 
     let mut a = Array1::<f32>::new(np2);
     fill_normal_deviates(rng, np2, &mut a);
-    remove_quadratic_trend(np2, dt, &mut a);
+    remove_quadratic_trend(dt, a.as_mut_slice());
 
     let mut ac = Array1::<Complex32>::filled(np2, Complex32::ZERO);
     for i in 1..=np2 {
         ac[i] = Complex32::new(a[i] * w[i], 0.0);
     }
 
-    fast(np2, &mut ac, -1);
+    fast(ac.as_mut_slice(), -1);
 
     // Average POWER spectrum to unity (2009-03-18), not amplitude.
     //

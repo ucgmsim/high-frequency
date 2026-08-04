@@ -150,10 +150,10 @@ fn bench_fft(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(name, np2),
                 &(np2, ind),
-                |b, &(n, i)| {
+                |b, &(_n, i)| {
                     b.iter_batched_ref(
                         || src.clone(),
-                        |ace| fast(black_box(n), ace, black_box(i)),
+                        |ace| fast(ace.as_mut_slice(), black_box(i)),
                         criterion::BatchSize::SmallInput,
                     )
                 },
@@ -369,7 +369,7 @@ fn bench_spectrum(c: &mut Criterion) {
             }
             b.iter_batched_ref(
                 || a.clone(),
-                |a| remove_quadratic_trend(np2, DT, a),
+                |a| remove_quadratic_trend(DT, a.as_mut_slice()),
                 criterion::BatchSize::SmallInput,
             )
         });

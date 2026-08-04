@@ -50,7 +50,7 @@ pub fn apply_radiation_and_invert(
         spectrum[i] = spectrum[i] * radiation[mm];
     }
 
-    fast(np2, spectrum, 1);
+    fast(spectrum.as_mut_slice(), 1);
 
     let fac = 1.0 / (radiation_norm * partition_factor * np2 as f32);
     for i in 1..=np2 {

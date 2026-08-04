@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use rustfft::{Fft, FftDirection, FftPlanner};
 
-use crate::fort::{Array1, Complex32};
+use crate::fort::Complex32;
 
 thread_local! {
     /// Plans are cached per `(length, direction)`: building one is where `rustfft`
@@ -53,34 +53,42 @@ thread_local! {
 /// The `3.141593` in the twiddle argument is a 7-digit truncation of pi, about
 /// 2 `f32` ulps off. It is load-bearing: substituting a more accurate value
 /// changes the last bits of every transform. See `PORTING_RULES.md` §1.
-pub fn fast(nnn: usize, ace: &mut Array1<Complex32>, ind: i32) {
-    assert!(nnn.is_power_of_two(), "FAST requires a power-of-two length, got {nnn}");
+pub fn fast(data: &mut [Complex32], ind: i32) {
+    // The length is the slice's, not a separate argument. Every call site passed
+    // exactly `data.len()`, so the parameter could only ever have disagreed with
+    // reality -- §2.3.
+    let len = data.len();
+    assert!(len.is_power_of_two(), "FAST requires a power-of-two length, got {len}");
     assert!(ind == 1 || ind == -1, "FAST direction must be +/-1, got {ind}");
     let forward = ind == -1;
 
     let plan = PLANS.with(|plans| {
-        Arc::clone(plans.borrow_mut().entry((nnn, forward)).or_insert_with(|| {
+        Arc::clone(plans.borrow_mut().entry((len, forward)).or_insert_with(|| {
             let direction =
                 if forward { FftDirection::Forward } else { FftDirection::Inverse };
-            FftPlanner::new().plan_fft(nnn, direction)
+            FftPlanner::new().plan_fft(len, direction)
         }))
     });
 
-    // No conversion: since §2.2, `Complex32` *is* `rustfft`'s element type, so the
-    // buffer goes straight in.
-    plan.process(&mut ace.as_mut_slice()[..nnn]);
+    // Since §2.2 `Complex32` *is* `rustfft`'s element type, so the buffer goes
+    // straight in with no conversion and no copy.
+    plan.process(data);
 }
 
 /// `SUBROUTINE FLZERO(N,DT,A)` — remove the quadratic acceleration trend that
 /// leaves final velocity and displacement at zero.
 ///
-/// Note it modifies only `acceleration(3..=count)`: `acceleration(1)` and `acceleration(2)` are left untouched
-/// because the correction loop starts at `I=3`. That asymmetry is preserved.
-pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f32>) {
+/// Note it modifies only `acceleration[2..]` in 0-based terms — the Fortran's
+/// `A(3..=N)`. `A(1)` and `A(2)` are left untouched because the correction loop starts
+/// at `I=3`. That asymmetry is preserved.
+///
+/// 0-based since §2.3. The length is the slice's; every caller passed `len()`.
+pub fn remove_quadratic_trend(dt: f32, acceleration: &mut [f32]) {
     let mut ve = 0.0f32;
     let mut de = 0.0f32;
     let a1 = dt / 2.0;
     let a2 = a1 * dt / 3.0;
+    let count = acceleration.len();
     let nstps = count - 1;
 
     // Trapezoidal double integration. Inherently serial -- `de` depends on the `ve`
@@ -91,9 +99,8 @@ pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f
     // register halves the loads.
     //
     // The arithmetic and its order are untouched, so this is bit-exact.
-    let samples = &acceleration.as_slice()[..count];
-    let mut previous = samples[0];
-    for &next in &samples[1..count] {
+    let mut previous = acceleration[0];
+    for &next in &acceleration[1..] {
         de = de + ve * dt + a2 * (2.0 * previous + next);
         ve = ve + a1 * (previous + next);
         previous = next;
@@ -110,7 +117,7 @@ pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f
     // for that reason; `a3` keeps the same value it had (`i - 1` for Fortran index `i`,
     // which is `k + 2` here) and the multiply order is unchanged, so this too is
     // bit-exact.
-    for (k, sample) in acceleration.as_mut_slice()[2..count].iter_mut().enumerate() {
+    for (k, sample) in acceleration[2..].iter_mut().enumerate() {
         let a3 = (k + 2) as f32;
         *sample = *sample + c1 + c2 * a3 * dt;
     }

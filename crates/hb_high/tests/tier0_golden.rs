@@ -183,7 +183,7 @@ fn flzero_matches_fortran() {
         let a_in = a.clone();
         let want: Vec<f32> = (0..n).map(|_| r.f32()).collect();
 
-        remove_quadratic_trend(n, dt, &mut a);
+        remove_quadratic_trend(dt, a.as_mut_slice());
         for i in 1..=n {
             eq32(&format!("remove_quadratic_trend n={n} dt={dt} a[{i}]"), a[i], want[i - 1]);
         }

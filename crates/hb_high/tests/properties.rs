@@ -324,8 +324,8 @@ proptest! {
         let n = 1usize << exponent;
         let original = spectrum(n, 7);
         let mut work = original.clone();
-        fast(n, &mut work, -1);
-        fast(n, &mut work, 1);
+        fast(work.as_mut_slice(), -1);
+        fast(work.as_mut_slice(), 1);
 
         // Take the scale from the largest input bin, where it is best conditioned.
         let pivot = (1..=n)
@@ -363,8 +363,8 @@ proptest! {
         let mut t_lhs = lhs.clone();
         let mut t_rhs = rhs.clone();
         let mut t_combined = combined.clone();
-        for (arr, len) in [(&mut t_lhs, n), (&mut t_rhs, n), (&mut t_combined, n)] {
-            fast(len, arr, -1);
+        for arr in [&mut t_lhs, &mut t_rhs, &mut t_combined] {
+            fast(arr.as_mut_slice(), -1);
         }
 
         let peak = (1..=n).map(|i| t_combined[i].norm()).fold(0.0f32, f32::max);
@@ -395,7 +395,7 @@ proptest! {
             work[i] = Complex32::new(v, 0.0);
             sum += v;
         }
-        fast(n, &mut work, -1);
+        fast(work.as_mut_slice(), -1);
         prop_assert!(
             work[1].im.abs() <= 1e-4 * sum.abs().max(1.0),
             "DC bin {:?} should be real",
@@ -430,7 +430,7 @@ proptest! {
             acceleration[i] = rng.next_f32() - 0.5 + offset;
         }
         let before = acceleration.clone();
-        remove_quadratic_trend(n, dt, &mut acceleration);
+        remove_quadratic_trend(dt, acceleration.as_mut_slice());
 
         let correction: Vec<f64> =
             (1..=n).map(|i| (acceleration[i] - before[i]) as f64).collect();
