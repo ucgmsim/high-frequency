@@ -75,6 +75,13 @@ consumer narrows to `f32`. So keep running it, and treat the result as a *classi
 twenty small commits finds a regression in four or five parity runs. Over three large
 ones it tells you almost nothing.
 
+**A periodic Tier C is only worth running if the binary's output actually moved.** Prove
+it rather than assume it either way: `run_selfparity.sh <commit-of-last-tier-C>` in
+bit-exact mode. If it passes, the binary is byte-identical to the one Tier C already
+validated and a re-run reproduces the same CSV — 50 minutes for no information. A run of
+bit-exact commits, which is what a well-behaved §2.3 looks like, needs no re-validation at
+all.
+
 **The drift baseline has to advance past deliberate structural changes.** `run_selfparity`
 compares sample `i` to sample `i`, so a change that *translates* the waveform reads as a
 difference of order the waveform itself, not of order the change. §2.6's defect-1 fix
