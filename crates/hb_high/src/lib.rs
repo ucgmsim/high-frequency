@@ -22,6 +22,7 @@ pub mod highcor;
 pub mod radiation;
 pub mod ray;
 pub mod rng;
+pub mod sim;
 pub mod site;
 pub mod state;
 pub mod stoc;
