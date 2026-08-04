@@ -645,6 +645,49 @@ built for (`site_amplification_factors` produces log amplitudes) and the one 819
 8193 bins already use. Changing the interior to match the ends would be the wrong
 direction and would move every waveform.
 
+### 2.7 `rng.rs` → `rand` / `rand_pcg` — LAST, and carefully
+
+Queued deliberately at the very end of Stage 2, because it is the one replacement that
+can invalidate the harness that validates everything else.
+
+**The good news.** `Pcg32::next_u32` is the standard PCG32 XSH-RR variant — multiplier
+`6364136223846793005`, increment `1442695040888963407`, `((old >> 18) ^ old) >> 27`
+rotated right by `old >> 59`. That is exactly `rand_pcg::Pcg32` (`Lcg64Xsh32`), so the
+*output function* should match bit for bit given the same state.
+
+**The risk, which is why this goes last.** Three things around that core are custom and
+load-bearing:
+
+1. **Seeding.** `init_random_seed` folds `irand, irand+1, …` through `SEED_WORDS = 8`
+   rounds of `state = state*MULT + irand`, then discards two draws — and it *mutates*
+   `irand`, whose final value gates the rupture-time jitter at `:1366`. `rand_pcg`'s
+   `Pcg32::new(state, stream)` does its own initialisation and does not expose a raw
+   state setter, so matching the stream means constructing state by hand and verifying
+   it, not calling a constructor.
+2. **`next_f32` takes the top 24 bits** and divides by `2^24`, deliberately: dividing a
+   full 32-bit value by `2^32` rounds, and values near 1 round *up* to exactly 1.0,
+   breaking the `[0,1)` contract the zero-rejection loops depend on. `rand`'s standard
+   float conversion is not necessarily this one.
+3. **`fill_normal_deviates` renormalises to unit RMS**, and
+   `stochastic_spectrum`'s amplitude calibration is tuned against that. `rand_distr`'s
+   `Normal` will not do it, so this routine stays regardless — it is algorithm, not
+   generator.
+
+**If the stream does not match exactly, every golden, every recorded CSV, and the
+Tier D attribution all move at once** — and Tier D's finding is specifically *about*
+the RNG, so disturbing it while that lead is open would destroy the evidence.
+
+**How to do it safely:** before changing anything, write a test that seeds both
+generators and asserts the first few thousand `u32` draws are identical. If that test
+cannot be made to pass, stop — the win is roughly 25 lines and it is not worth an
+unexplained shift in every number. Run Tier D before and after and compare, not just
+Tier B.
+
+Honest assessment: `rand` would be the obvious choice writing this fresh. Here it
+replaces ~25 lines of standard, property-tested code whose stream is baked into every
+fixture. Do it for the dependency hygiene, not for the line count, and only with the
+draw-for-draw test in place.
+
 #### Not defects: frozen switches
 
 `nsum` is computed from `ratio` and then forced to 1 (dated 2004-04-20), which is why
@@ -695,9 +738,10 @@ code does.
   ever be checked against the original.
 - **Don't start Stage 2 before Stage 1 is committed and green.** See the top of
   this document.
-- **Don't touch `rng.rs`.** The Tier D result makes it the one numerically
-  interesting module, and "small" is not a reason to disturb a generator whose
-  stream is baked into every golden.
+- **Don't touch `rng.rs` until everything else is done** — see §2.7. The Tier D result
+  makes it the one numerically interesting module, and "small" is not a reason to
+  disturb a generator whose stream is baked into every golden. Replacing it is queued
+  as the final step, gated on a draw-for-draw equality test.
 - **Don't chase the Tier D enrichment as a defect** until a prod-vs-prod A/A has
   ruled out the remaining benign explanation.
 
@@ -764,8 +808,10 @@ Stage 2, each with Tier B then C:
 11. The two defect fixes (2.6), separately, each with its Tier C delta recorded:
     the `siteamp` convention split, then the `stdd(0,l)` sample shift. The second of
     these **unblocks** step 12 — see §2.3.
-12. `Array1`/`Array2` (2.3) → plain slices, module by module. Last, and only after
-    step 11 removes the layout constraint.
+12. `Array1`/`Array2` (2.3) → plain slices, module by module, after step 11 removes
+    the layout constraint.
+13. `rng.rs` → `rand_pcg` (2.7). **Very last**, gated on a draw-for-draw equality test
+    against the current generator, and with Tier D run before and after.
 13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
 Re-run Tier D at the end of Stage 2 as a release gate, comparing Rust-before vs
