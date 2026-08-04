@@ -32,8 +32,68 @@
 /// mean ratio. ±2% ≈ 0.04 of a typical ground-motion-model aleatory sigma.
 pub const DEFAULT_BAND: f64 = 0.02;
 
+/// Sample size needed to have a realistic chance of *passing* an equivalence test
+/// at `band`, given the log-scale scatter `sigma`.
+///
+/// # The trap this exists to avoid
+///
+/// The obvious sizing is "make the confidence interval narrower than the band":
+/// `1.645 * sigma * sqrt(2/n) < ln(1+band)`. That is wrong, and it is wrong in a
+/// way that looks right. It sizes for the interval to *fit* the band with the point
+/// estimate sitting exactly at 1.0 — but the point estimate is itself a random
+/// variable with standard error `hw/1.645`, so it essentially never sits at 1.0.
+/// TOST requires `|log GM| + hw < ln(1+band)`, and with that sizing the slack is
+/// zero.
+///
+/// Measured consequence, with the real `sigma = 0.198` and a ±2% band: n = 600
+/// (what the naive formula gives) passes about **7%** of endpoints even when the
+/// two codes are statistically identical. n = 2500 passes about 94%.
+///
+/// So this targets a half-width of `band/2`, leaving the other half as headroom for
+/// the estimate to wander and for any small genuine bias.
+pub fn sample_size_for(band: f64, sigma: f64) -> usize {
+    let target_hw = (1.0 + band).ln() / 2.0;
+    let n = 2.0 * (Z_90 * sigma / target_hw).powi(2);
+    n.ceil() as usize
+}
+
 /// z for a one-sided 95% bound, i.e. the 90% two-sided interval used by TOST.
 const Z_90: f64 = 1.6448536269514722;
+
+/// Three-way outcome of an equivalence test.
+///
+/// A binary pass/fail conflates two very different situations: "we demonstrated
+/// the difference is smaller than the band" and "our sample was too small to
+/// tell". Both come out as "fail", which is actively misleading — the second is
+/// not evidence against the port, and treating it as such invites either widening
+/// the band or dropping endpoints, neither of which is honest.
+///
+/// It also matters because the campaign uses an intersection-union test over
+/// hundreds of endpoints. That construction controls type-I error without any
+/// multiplicity correction, but its *power* falls as endpoints are added: demanding
+/// that all 375 be certified is far harder than certifying each. Separating
+/// `Undetermined` from `Refuted` is what keeps that from reading as failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The whole confidence interval lies inside the band: equivalence demonstrated.
+    Certified,
+    /// The point estimate itself lies outside the band: a difference this large is
+    /// not compatible with equivalence, whatever the sample size.
+    Refuted,
+    /// Neither. The interval straddles a band edge, so this sample cannot decide.
+    /// Report the achieved resolution and, if it matters, gather more.
+    Undetermined,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Certified => "certified",
+            Verdict::Refuted => "REFUTED",
+            Verdict::Undetermined => "undetermined",
+        }
+    }
+}
 
 /// Summary of one endpoint's comparison.
 #[derive(Clone, Debug)]
@@ -49,6 +109,8 @@ pub struct Equivalence {
     pub band: f64,
     /// True when the whole CI lies inside `[1-band, 1+band]`.
     pub equivalent: bool,
+    /// Three-way outcome; see [`Verdict`].
+    pub verdict: Verdict,
     /// Ratio of standard deviations of ln IM (A/B). Reported, not gated.
     pub sd_ratio: f64,
     /// Two-sample Kolmogorov-Smirnov statistic. Diagnostic, not gated.
@@ -84,8 +146,8 @@ pub fn equivalence_unpaired(a: &[f64], b: &[f64], band: f64) -> Equivalence {
     if na < 2 || nb < 2 {
         return Equivalence {
             n_a: na, n_b: nb, gm_ratio: f64::NAN, ci_lo: f64::NAN, ci_hi: f64::NAN,
-            band, equivalent: false, sd_ratio: f64::NAN, ks: f64::NAN,
-            achieved_half_width: f64::NAN,
+            band, equivalent: false, verdict: Verdict::Undetermined,
+            sd_ratio: f64::NAN, ks: f64::NAN, achieved_half_width: f64::NAN,
         };
     }
 
@@ -107,9 +169,23 @@ pub fn equivalence_unpaired(a: &[f64], b: &[f64], band: f64) -> Equivalence {
         ci_hi: hi.exp(),
         band,
         equivalent: lo > band_lo && hi < band_hi,
+        verdict: verdict_of(d, lo, hi, band_lo, band_hi),
         sd_ratio: if vb > 0.0 { (va / vb).sqrt() } else { f64::NAN },
         ks: ks_2samp(&la, &lb),
         achieved_half_width: hw,
+    }
+}
+
+/// Classify an endpoint from its point estimate and interval, both in ln units.
+fn verdict_of(d: f64, lo: f64, hi: f64, band_lo: f64, band_hi: f64) -> Verdict {
+    if lo > band_lo && hi < band_hi {
+        Verdict::Certified
+    } else if d <= band_lo || d >= band_hi {
+        // The estimate itself is outside the band. More data narrows the interval
+        // around this value, so it will not come back inside.
+        Verdict::Refuted
+    } else {
+        Verdict::Undetermined
     }
 }
 
@@ -131,8 +207,8 @@ pub fn equivalence_paired(a: &[f64], b: &[f64], band: f64) -> Equivalence {
     if n < 2 {
         return Equivalence {
             n_a: n, n_b: n, gm_ratio: f64::NAN, ci_lo: f64::NAN, ci_hi: f64::NAN,
-            band, equivalent: false, sd_ratio: f64::NAN, ks: f64::NAN,
-            achieved_half_width: f64::NAN,
+            band, equivalent: false, verdict: Verdict::Undetermined,
+            sd_ratio: f64::NAN, ks: f64::NAN, achieved_half_width: f64::NAN,
         };
     }
     let m = mean(&d);
@@ -149,6 +225,7 @@ pub fn equivalence_paired(a: &[f64], b: &[f64], band: f64) -> Equivalence {
         ci_hi: hi.exp(),
         band,
         equivalent: lo > band_lo && hi < band_hi,
+        verdict: verdict_of(m, lo, hi, band_lo, band_hi),
         sd_ratio: f64::NAN, // meaningless for a paired difference
         ks: f64::NAN,
         achieved_half_width: hw,
@@ -376,6 +453,28 @@ mod tests {
     }
 
     #[test]
+    fn verdict_separates_refuted_from_undetermined() {
+        // A real 6% bias, well sampled: REFUTED. The estimate is outside the band,
+        // so no amount of extra data brings it back.
+        let a = lognormal(2000, (1.06f64).ln(), 0.2, 21);
+        let b = lognormal(2000, 0.0, 0.2, 22);
+        assert_eq!(equivalence_unpaired(&a, &b, 0.02).verdict, Verdict::Refuted);
+
+        // No bias at all, but far too few samples: UNDETERMINED, not refuted. This
+        // is the distinction a binary pass/fail destroys.
+        let a = lognormal(30, 0.0, 0.2, 23);
+        let b = lognormal(30, 0.0, 0.2, 24);
+        let e = equivalence_unpaired(&a, &b, 0.02);
+        assert_eq!(e.verdict, Verdict::Undetermined);
+        assert!(e.achieved_half_width > (1.02f64).ln());
+
+        // No bias, plenty of samples: CERTIFIED.
+        let a = lognormal(20000, 0.0, 0.2, 25);
+        let b = lognormal(20000, 0.0, 0.2, 26);
+        assert_eq!(equivalence_unpaired(&a, &b, 0.02).verdict, Verdict::Certified);
+    }
+
+    #[test]
     fn a_five_percent_bias_is_not_equivalent_at_two_percent() {
         let a = lognormal(600, 0.0, 0.2, 1);
         let b = lognormal(600, (1.05f64).ln(), 0.2, 2);
@@ -385,9 +484,6 @@ mod tests {
 
     #[test]
     fn achieved_half_width_matches_the_design_calculation() {
-        // The plan sized n = 600 from sigma ~ 0.2 and 1.645*sigma*sqrt(2/n) < 0.0198.
-        // Check the estimator agrees with that arithmetic, so the design is not
-        // resting on a formula nobody ever evaluated.
         let a = lognormal(600, 0.0, 0.2, 3);
         let b = lognormal(600, 0.0, 0.2, 4);
         let e = equivalence_unpaired(&a, &b, DEFAULT_BAND);
@@ -396,6 +492,39 @@ mod tests {
             (e.achieved_half_width / expected - 1.0).abs() < 0.15,
             "half width {} vs design {expected}",
             e.achieved_half_width
+        );
+    }
+
+    #[test]
+    fn naive_sizing_is_underpowered_and_sample_size_for_fixes_it() {
+        // Regression test for a real mistake: the campaign was first sized at
+        // n = 600 from "half-width < band", which passes only ~7% of endpoints even
+        // when both samples come from one distribution. Measured here rather than
+        // argued.
+        let sigma = 0.198;
+        let band = DEFAULT_BAND;
+        let trial = |n: usize, seed: u64| {
+            let a = lognormal(n, 0.0, sigma, seed);
+            let b = lognormal(n, 0.0, sigma, seed + 1000);
+            equivalence_unpaired(&a, &b, band).equivalent
+        };
+        let naive = 600;
+        let sized = sample_size_for(band, sigma);
+        assert!(
+            sized > 2000,
+            "sizing for a {band} band at sigma {sigma} should need thousands, got {sized}"
+        );
+        let pass_naive = (0..40u64).filter(|i| trial(naive, 2 * i + 1)).count();
+        let pass_sized = (0..40u64).filter(|i| trial(sized, 2 * i + 1)).count();
+        assert!(
+            pass_sized > pass_naive * 2,
+            "properly sized n={sized} passed {pass_sized}/40 but naive n={naive} \
+             passed {pass_naive}/40 -- the correction should be large"
+        );
+        assert!(
+            pass_sized >= 32,
+            "n={sized} should pass most trials on identical distributions, got \
+             {pass_sized}/40"
         );
     }
 

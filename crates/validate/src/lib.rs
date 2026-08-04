@@ -14,4 +14,5 @@
 //! See `stats` for why this is framed as equivalence testing rather than as a
 //! null-hypothesis test.
 
+pub mod campaign;
 pub mod stats;
