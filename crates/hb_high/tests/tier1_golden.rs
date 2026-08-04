@@ -70,18 +70,18 @@ impl Reader {
         );
     }
 
-    /// Read `th`, `vsh`, `rho` for layers `1..=j0` into a fresh `VelocityModel`,
+    /// Read `th`, `vsh_km_s`, `density_g_cm3` for layers `1..=j0` into a fresh `VelocityModel`,
     /// matching the driver's `dump_vmod`.
     fn vmod(&mut self, j0: usize) -> VelocityModel {
         let mut v = VelocityModel::new();
         for k in 1..=j0 {
-            v.thic[k] = self.f64();
+            v.thickness_km[k] = self.f64();
         }
         for k in 1..=j0 {
-            v.vsh[k] = self.f64();
+            v.vsh_km_s[k] = self.f64();
         }
         for k in 1..=j0 {
-            v.rho[k] = self.f64();
+            v.density_g_cm3[k] = self.f64();
         }
         v
     }
@@ -198,13 +198,13 @@ fn geom_terms_matches_fortran() {
 
         let mut vmod = VelocityModel::new();
         for k in 1..=j0 {
-            vmod.thic[k] = r.f64();
+            vmod.thickness_km[k] = r.f64();
         }
         for k in 1..=j0 {
-            vmod.vsh[k] = r.f64();
+            vmod.vsh_km_s[k] = r.f64();
         }
         for k in 1..=j0 {
-            vmod.qs[k] = r.f32();
+            vmod.attenuation_s[k] = r.f32();
         }
 
         let mut st = RayState::default();

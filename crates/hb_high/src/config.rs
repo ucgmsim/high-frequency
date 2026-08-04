@@ -28,10 +28,10 @@
 /// **Not** `std::f32::consts::PI`, which differs in the last bits. Both the slip
 /// model reader and the simulation convert degrees with this, so it lives in one
 /// place to keep them from drifting.
-pub const PAI: f32 = 3.1415926;
+pub const PI: f32 = 3.1415926;
 
-/// Degrees to radians.
-pub const PU: f32 = PAI / 180.0;
+/// Degrees to radians, from the same literal.
+pub const DEG_TO_RAD: f32 = PI / 180.0;
 
 /// Built-in defaults for the fields the deck can leave unset.
 ///

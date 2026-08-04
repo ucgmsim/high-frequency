@@ -2,7 +2,7 @@
 //!
 //! Field names are the canonical ones from `PORTING_RULES.md` §6, chosen once
 //! rather than per-routine — the Fortran calls the same storage `dep`/`dpt`,
-//! `th`/`thic`, `vs`/`vsh`/`s`, and `dn`/`rho`/`d`/`rh` in different routines.
+//! `th`/`thickness_km`, `vs`/`vsh_km_s`/`s`, and `dn`/`density_g_cm3`/`d`/`rh` in different routines.
 //! Layouts are positionally identical across every declaration, so only the
 //! naming needed resolving.
 
@@ -34,24 +34,24 @@ use params::NLAYMAX;
 
 /// `common /vmod/` — the working velocity model, as perturbed and truncated.
 ///
-/// Mixed precision within one block: the first five arrays are `real*8`, `qp`
-/// and `qs` are `real*4`. Note that five of the fourteen declarations get their
+/// Mixed precision within one block: the first five arrays are `real*8`, `attenuation_p`
+/// and `attenuation_s` are `real*4`. Note that five of the fourteen declarations get their
 /// `real*8`-ness solely from `implicit real*8 (a-h,o-z)`, so the types here are
 /// not negotiable.
 #[derive(Clone, Debug)]
 pub struct VelocityModel {
     /// `dep` / `dpt` — cumulative depth to the base of each layer.
-    pub depth: Array1<f64>,
+    pub depth_km: Array1<f64>,
     /// `th` — layer thickness.
-    pub thic: Array1<f64>,
+    pub thickness_km: Array1<f64>,
     /// P velocity. Named `c` in the dead `gencof`.
-    pub vp: Array1<f64>,
+    pub vp_km_s: Array1<f64>,
     /// S velocity. Named `vs` or `s` elsewhere.
-    pub vsh: Array1<f64>,
+    pub vsh_km_s: Array1<f64>,
     /// Density. Named `dn`, `d` or `rh` elsewhere.
-    pub rho: Array1<f64>,
-    pub qp: Array1<f32>,
-    pub qs: Array1<f32>,
+    pub density_g_cm3: Array1<f64>,
+    pub attenuation_p: Array1<f32>,
+    pub attenuation_s: Array1<f32>,
 }
 
 impl Default for VelocityModel {
@@ -63,33 +63,33 @@ impl Default for VelocityModel {
 impl VelocityModel {
     pub fn new() -> Self {
         Self {
-            depth: Array1::new(NLAYMAX),
-            thic: Array1::new(NLAYMAX),
-            vp: Array1::new(NLAYMAX),
-            vsh: Array1::new(NLAYMAX),
-            rho: Array1::new(NLAYMAX),
-            qp: Array1::new(NLAYMAX),
-            qs: Array1::new(NLAYMAX),
+            depth_km: Array1::new(NLAYMAX),
+            thickness_km: Array1::new(NLAYMAX),
+            vp_km_s: Array1::new(NLAYMAX),
+            vsh_km_s: Array1::new(NLAYMAX),
+            density_g_cm3: Array1::new(NLAYMAX),
+            attenuation_p: Array1::new(NLAYMAX),
+            attenuation_s: Array1::new(NLAYMAX),
         }
     }
 }
 
 /// `common /vmod_in/` — the unperturbed model as read from file.
 ///
-/// `depth0`, `thic0` and `qp0` are `real*4` here while the corresponding
+/// `depth_km`, `thickness_km` and `attenuation_p` are `real*4` here while the corresponding
 /// `/vmod/` fields are `real*8`. That asymmetry is not a mistake in the port:
 /// those three are undeclared in *both* scopes that declare the block, so they
 /// fall to implicit `real*4`. Adding `implicit none` to either Fortran scope
 /// would shift the whole block. See `PORTING_RULES.md` §2.
 #[derive(Clone, Debug)]
 pub struct VelocityModelInput {
-    pub depth0: Array1<f32>,
-    pub thic0: Array1<f32>,
-    pub vp0: Array1<f64>,
-    pub vsh0: Array1<f64>,
-    pub rho0: Array1<f64>,
-    pub qp0: Array1<f32>,
-    pub qs0: Array1<f32>,
+    pub depth_km: Array1<f32>,
+    pub thickness_km: Array1<f32>,
+    pub vp_km_s: Array1<f64>,
+    pub vsh_km_s: Array1<f64>,
+    pub density_g_cm3: Array1<f64>,
+    pub attenuation_p: Array1<f32>,
+    pub attenuation_s: Array1<f32>,
     /// `grand` / `gr` — RNG scratch shared with `grandvel` (dead in production).
     pub grand: Array1<f32>,
 }
@@ -103,13 +103,13 @@ impl Default for VelocityModelInput {
 impl VelocityModelInput {
     pub fn new() -> Self {
         Self {
-            depth0: Array1::new(NLAYMAX),
-            thic0: Array1::new(NLAYMAX),
-            vp0: Array1::new(NLAYMAX),
-            vsh0: Array1::new(NLAYMAX),
-            rho0: Array1::new(NLAYMAX),
-            qp0: Array1::new(NLAYMAX),
-            qs0: Array1::new(NLAYMAX),
+            depth_km: Array1::new(NLAYMAX),
+            thickness_km: Array1::new(NLAYMAX),
+            vp_km_s: Array1::new(NLAYMAX),
+            vsh_km_s: Array1::new(NLAYMAX),
+            density_g_cm3: Array1::new(NLAYMAX),
+            attenuation_p: Array1::new(NLAYMAX),
+            attenuation_s: Array1::new(NLAYMAX),
             grand: Array1::new(3000),
         }
     }

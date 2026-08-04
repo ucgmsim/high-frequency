@@ -14,7 +14,7 @@
 use std::io::Write;
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, PU,
+    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
 };
 use hb_high::deck::ListReader;
 use hb_high::input::{read_stations, read_stoch, read_velocity_model};
@@ -259,7 +259,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let slip = {
         let text = std::fs::read_to_string(&io.slip_model)
             .map_err(|e| format!("opening slip model {}: {e}", io.slip_model))?;
-        read_stoch(&text, PU)?
+        read_stoch(&text, DEG_TO_RAD)?
     };
 
     let mut vmod_in = VelocityModelInput::new();

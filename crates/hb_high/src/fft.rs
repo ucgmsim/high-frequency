@@ -72,20 +72,20 @@ pub fn fast(nnn: usize, ace: &mut Array1<Complex32>, ind: i32) {
 /// `SUBROUTINE FLZERO(N,DT,A)` — remove the quadratic acceleration trend that
 /// leaves final velocity and displacement at zero.
 ///
-/// Note it modifies only `a(3..=n)`: `a(1)` and `a(2)` are left untouched
+/// Note it modifies only `acceleration(3..=count)`: `acceleration(1)` and `acceleration(2)` are left untouched
 /// because the correction loop starts at `I=3`. That asymmetry is preserved.
-pub fn remove_quadratic_trend(n: usize, dt: f32, a: &mut Array1<f32>) {
+pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f32>) {
     let mut ve = 0.0f32;
     let mut de = 0.0f32;
     let a1 = dt / 2.0;
     let a2 = a1 * dt / 3.0;
-    let nstps = n - 1;
+    let nstps = count - 1;
 
     for i in 1..=nstps {
         // DE uses the value of VE from *before* this iteration's update; the
         // two statements are both inside DO 1 and their order matters.
-        de = de + ve * dt + a2 * (2.0 * a[i] + a[i + 1]);
-        ve = ve + a1 * (a[i] + a[i + 1]);
+        de = de + ve * dt + a2 * (2.0 * acceleration[i] + acceleration[i + 1]);
+        ve = ve + a1 * (acceleration[i] + acceleration[i + 1]);
     }
 
     let rnstp = nstps as f32;
@@ -93,8 +93,8 @@ pub fn remove_quadratic_trend(n: usize, dt: f32, a: &mut Array1<f32>) {
     let c1 = 2.0 / t * (ve - 3.0 / t * de);
     let c2 = 6.0 / t * (2.0 / t * de - ve) / t;
 
-    for i in 3..=n {
+    for i in 3..=count {
         let a3 = (i - 1) as f32;
-        a[i] = a[i] + c1 + c2 * a3 * dt;
+        acceleration[i] = acceleration[i] + c1 + c2 * a3 * dt;
     }
 }

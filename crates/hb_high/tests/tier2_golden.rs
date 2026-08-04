@@ -71,9 +71,9 @@ fn read_ray_seam(r: &mut Reader) -> (RayState, VelocityModel, Complex64, f64, us
     let p = Complex64::new(r.f64(), r.f64());
     let rr = r.f64();
     let mut vmod = VelocityModel::new();
-    for k in 1..=ndp { vmod.thic[k] = r.f64(); }
-    for k in 1..=ndp { vmod.vp[k] = r.f64(); }
-    for k in 1..=ndp { vmod.vsh[k] = r.f64(); }
+    for k in 1..=ndp { vmod.thickness_km[k] = r.f64(); }
+    for k in 1..=ndp { vmod.vp_km_s[k] = r.f64(); }
+    for k in 1..=ndp { vmod.vsh_km_s[k] = r.f64(); }
     let mut st = RayState::default();
     for k in 1..=ndp { st.travel.alp[k] = r.f32(); }
     for k in 1..=ndp { st.travel.als[k] = r.f32(); }

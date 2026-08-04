@@ -5,8 +5,8 @@
 /// `SUBROUTINE RDATN(STR,DIP,RAK,AZ,TH,RDSH,RDSV)` — `hb_high_ref.f:2275`.
 ///
 /// SH and SV radiation coefficients for a double couple (Aki & Richards).
-/// All angles in radians: `str` strike, `dip` dip, `rak` rake, `az` azimuth
-/// source to receiver clockwise from north, `th` incidence angle measured from
+/// All angles in radians: `str` strike, `dip_rad` dip_rad, `rake_rad` rake, `azimuth_rad` azimuth
+/// source to receiver clockwise from north, `takeoff_rad` incidence angle measured from
 /// down. Returns `(rdsh, rdsv)`.
 ///
 /// The expressions below preserve Fortran's left-to-right association exactly.
@@ -17,15 +17,15 @@
 /// The commented-out alternative forms in the source are earlier versions using
 /// double-angle identities; they are *not* bit-equivalent to what is compiled
 /// and must not be substituted.
-pub fn radiation_pattern(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f32, f32) {
-    let sr = rak.sin();
-    let vertical_slowness = rak.cos();
-    let sd = dip.sin();
-    let cd = dip.cos();
-    let st = th.sin();
-    let ct = th.cos();
-    let ss = (az - str_).sin();
-    let cs = (az - str_).cos();
+pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_rad: f32, takeoff_rad: f32) -> (f32, f32) {
+    let sr = rake_rad.sin();
+    let vertical_slowness = rake_rad.cos();
+    let sd = dip_rad.sin();
+    let cd = dip_rad.cos();
+    let st = takeoff_rad.sin();
+    let ct = takeoff_rad.cos();
+    let ss = (azimuth_rad - strike_rad).sin();
+    let cs = (azimuth_rad - strike_rad).cos();
 
     // RDP is computed by the Fortran and then discarded -- the P radiation
     // coefficient is never returned or used. Kept so the two sources stay
@@ -56,13 +56,13 @@ pub fn radiation_pattern(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f3
 /// reasoning that the parameters are more likely to be near their nominal
 /// values than in an arbitrary orientation.
 ///
-/// Returns the clobbered `fr1` (see below). `rdna` receives the pattern per
+/// Returns the clobbered `fr1` (see below). `radiation` receives the pattern per
 /// frequency bin.
 ///
 /// # This is the dominant RNG consumer
 ///
 /// The averaging loop draws **five** deviates per iteration, in the order
-/// `th, fa, strX, dipX, rakX`, and runs `nr = 1000` times — so 5,000 draws per
+/// `th, fa, strX, dipX, rakX`, and runs `sample_count = 1000` times — so 5,000 draws per
 /// call, and it is called twice per subfault per ray. Any change to that order
 /// or count desynchronises the whole stream. See `PORTING_RULES.md` §5.
 ///
@@ -87,16 +87,16 @@ pub fn radiation_pattern(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f3
 #[allow(clippy::too_many_arguments)]
 pub fn horizontal_radiation_spectrum(
     rng: &mut crate::rng::Pcg32,
-    stra: f32,
-    dipa: f32,
-    raka: f32,
-    pa: f32,
-    thaa: f32,
-    dfr: &crate::fort::Array1<f32>,
-    nfold: usize,
-    cmp: f32,
-    nr: usize,
-    rdna: &mut crate::fort::Array1<f32>,
+    strike_rad: f32,
+    dip_rad: f32,
+    rake_rad: f32,
+    azimuth_rad: f32,
+    takeoff_rad: f32,
+    frequency_hz: &crate::fort::Array1<f32>,
+    fold_count: usize,
+    component_rad: f32,
+    sample_count: usize,
+    radiation: &mut crate::fort::Array1<f32>,
 ) -> f32 {
     let pu = 3.1415926 / 180.0;
 
@@ -109,17 +109,17 @@ pub fn horizontal_radiation_spectrum(
     // purely theoretical rad pattern" -- 2009-02-10.
     radmin = 1.0;
 
-    let (rdsha, rdsva) = radiation_pattern(stra, dipa, raka, pa, thaa);
+    let (rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
 
     // The Fortran computes RDX with a cos(THAA) factor and then immediately
     // recomputes it without. The first value is dead; kept so the two sources
     // line up.
     let _rdx_superseded =
-        rdsva * thaa.cos() * (cmp - pa).cos() + rdsha * (cmp - pa).sin();
+        rdsva * takeoff_rad.cos() * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
 
     // The 2004-03-19 "RADPAT FIX": take abs() after summing SV and SH, not
     // before, otherwise a negative cos or sin creates asymmetry.
-    let mut rdx = rdsva * (cmp - pa).cos() + rdsha * (cmp - pa).sin();
+    let mut rdx = rdsva * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
 
     // 2004-12-21: preserve the sign rather than taking abs().
     let mut polarity = 1.0f32;
@@ -130,33 +130,33 @@ pub fn horizontal_radiation_spectrum(
 
     let range = 10.0f32;
     let mut radv = 0.0f32;
-    for _k in 1..=nr {
+    for _k in 1..=sample_count {
         // Five draws, in this exact order. 9*range*pu is 90 degrees in radians.
-        let th = thaa + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let fa = pa + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let strx = stra + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let dipx = dipa + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let rakx = raka + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let th = takeoff_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let fa = azimuth_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let strx = strike_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let dipx = dip_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let rakx = rake_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
 
         let (rdsha, rdsva) = radiation_pattern(strx, dipx, rakx, fa, th);
-        let rads = rdsva * (cmp - fa).cos() + rdsha * (cmp - fa).sin();
+        let rads = rdsva * (component_rad - fa).cos() + rdsha * (component_rad - fa).sin();
         // Squared to remove the sign; polarity is applied at the end, hence
         // the sqrt below.
         radv = radv + rads * rads;
     }
 
-    let radvh = (radv / nr as f32).sqrt();
+    let radvh = (radv / sample_count as f32).sqrt();
 
-    for i in 1..=nfold {
-        let del = if dfr[i] <= fr1 {
+    for i in 1..=fold_count {
+        let del = if frequency_hz[i] <= fr1 {
             radmin
-        } else if dfr[i] > fr1 && dfr[i] <= fr2 {
-            let d = (dfr[i] / fr1).ln() / (fr2 / fr1).ln();
+        } else if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
+            let d = (frequency_hz[i] / fr1).ln() / (fr2 / fr1).ln();
             if d < radmin { radmin } else { d }
         } else {
             1.0
         };
-        rdna[i] = polarity * (rdx + (radvh - rdx) * del);
+        radiation[i] = polarity * (rdx + (radvh - rdx) * del);
     }
 
     fr1
@@ -165,7 +165,7 @@ pub fn horizontal_radiation_spectrum(
 /// `SUBROUTINE RADV_lin(...)` — `hb_high_ref.f:2140`.
 ///
 /// Vertical-component radiation coefficient. Unlike [`horizontal_radiation_spectrum`] this takes
-/// its random numbers from the caller-supplied `rna`/`rnb` arrays (filled once
+/// its random numbers from the caller-supplied `uniform_a`/`uniform_b` arrays (filled once
 /// per run by `RANU2`), so it consumes **no** draws from the shared stream.
 ///
 /// There is no `cmp` argument — the vertical component needs no horizontal
@@ -181,17 +181,17 @@ pub fn horizontal_radiation_spectrum(
 /// average. The take-off range is clamped to `[90, 180]` degrees.
 #[allow(clippy::too_many_arguments)]
 pub fn vertical_radiation_spectrum(
-    stra: f32,
-    dipa: f32,
-    raka: f32,
-    pa: f32,
-    thaa: f32,
-    dfr: &crate::fort::Array1<f32>,
-    nfold: usize,
-    rna: &crate::fort::Array1<f32>,
-    rnb: &crate::fort::Array1<f32>,
-    nr: usize,
-    rdna: &mut crate::fort::Array1<f32>,
+    strike_rad: f32,
+    dip_rad: f32,
+    rake_rad: f32,
+    azimuth_rad: f32,
+    takeoff_rad: f32,
+    frequency_hz: &crate::fort::Array1<f32>,
+    fold_count: usize,
+    uniform_a: &crate::fort::Array1<f32>,
+    uniform_b: &crate::fort::Array1<f32>,
+    sample_count: usize,
+    radiation: &mut crate::fort::Array1<f32>,
 ) -> f32 {
     let pu = 3.1415926 / 180.0;
 
@@ -200,12 +200,12 @@ pub fn vertical_radiation_spectrum(
     let fr2 = 0.01f32;
     let _radvh_superseded = 0.7f32;
 
-    let (_rdsha, rdsva) = radiation_pattern(stra, dipa, raka, pa, thaa);
-    let rdx = rdsva * thaa.sin();
+    let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
+    let rdx = rdsva * takeoff_rad.sin();
 
     let range = 40.0f32;
-    let mut tha1 = thaa - range * pu;
-    let mut tha2 = thaa + range * pu;
+    let mut tha1 = takeoff_rad - range * pu;
+    let mut tha2 = takeoff_rad + range * pu;
     if tha1 < 90.0 * pu {
         tha1 = 90.0 * pu;
     }
@@ -214,26 +214,26 @@ pub fn vertical_radiation_spectrum(
     }
 
     let mut radv = 0.0f32;
-    for k in 1..=nr {
+    for k in 1..=sample_count {
         // Uniform in cos(th) between the clamped limits.
-        let th = ((1.0 - rna[k]) * tha1.cos() + rna[k] * tha2.cos()).acos();
-        let fa = 360.0 * pu * rnb[k];
-        let (_rdsha, rdsva) = radiation_pattern(stra, dipa, raka, fa, th);
+        let th = ((1.0 - uniform_a[k]) * tha1.cos() + uniform_a[k] * tha2.cos()).acos();
+        let fa = 360.0 * pu * uniform_b[k];
+        let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
         let rads = rdsva * th.sin();
         radv = radv + rads.abs();
     }
 
-    let radvh = radv / nr as f32 / 2.0;
+    let radvh = radv / sample_count as f32 / 2.0;
 
-    for i in 1..=nfold {
-        rdna[i] = rdx;
-        if dfr[i] <= fr1 {
+    for i in 1..=fold_count {
+        radiation[i] = rdx;
+        if frequency_hz[i] <= fr1 {
             continue;
         }
-        if dfr[i] > fr1 && dfr[i] <= fr2 {
-            rdna[i] = rdna[i] + (radvh - rdx) * (dfr[i] - fr1) / (fr2 - fr1);
+        if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
+            radiation[i] = radiation[i] + (radvh - rdx) * (frequency_hz[i] - fr1) / (fr2 - fr1);
         } else {
-            rdna[i] = radvh;
+            radiation[i] = radvh;
         }
     }
 

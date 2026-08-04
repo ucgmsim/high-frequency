@@ -120,13 +120,13 @@ fn check(golden: &str, stoch_name: &str) {
     let want_nlskip = r.i32();
     assert_eq!(j0, want_j0, "j0 after Moho truncation and air layer");
     assert_eq!(nlskip, want_nlskip, "nlskip");
-    for i in 1..=j0 { eq32(&format!("depth0[{i}]"), v.depth0[i], r.f32()); }
-    for i in 1..=j0 { eq32(&format!("thic0[{i}]"), v.thic0[i], r.f32()); }
-    for i in 1..=j0 { eq64(&format!("vp0[{i}]"), v.vp0[i], r.f64()); }
-    for i in 1..=j0 { eq64(&format!("vsh0[{i}]"), v.vsh0[i], r.f64()); }
-    for i in 1..=j0 { eq64(&format!("rho0[{i}]"), v.rho0[i], r.f64()); }
-    for i in 1..=j0 { eq32(&format!("qp0[{i}]"), v.qp0[i], r.f32()); }
-    for i in 1..=j0 { eq32(&format!("qs0[{i}]"), v.qs0[i], r.f32()); }
+    for i in 1..=j0 { eq32(&format!("depth_km[{i}]"), v.depth_km[i], r.f32()); }
+    for i in 1..=j0 { eq32(&format!("thickness_km[{i}]"), v.thickness_km[i], r.f32()); }
+    for i in 1..=j0 { eq64(&format!("vp_km_s[{i}]"), v.vp_km_s[i], r.f64()); }
+    for i in 1..=j0 { eq64(&format!("vsh_km_s[{i}]"), v.vsh_km_s[i], r.f64()); }
+    for i in 1..=j0 { eq64(&format!("density_g_cm3[{i}]"), v.density_g_cm3[i], r.f64()); }
+    for i in 1..=j0 { eq32(&format!("attenuation_p[{i}]"), v.attenuation_p[i], r.f32()); }
+    for i in 1..=j0 { eq32(&format!("attenuation_s[{i}]"), v.attenuation_s[i], r.f32()); }
 
     // Station list.
     let st_text =

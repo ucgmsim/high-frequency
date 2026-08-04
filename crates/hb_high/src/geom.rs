@@ -23,12 +23,12 @@ pub struct DistanceAzimuth {
 /// `SUBROUTINE DELAZ5(...)` — `hb_high_ref.f:2673`. Geodetic distance and
 /// azimuths via direction cosines.
 ///
-/// `i <= 0` means the inputs are geographic degrees (converted here, including
-/// the 0.9931177 flattening correction); `i > 0` means geocentric radians.
+/// `coord_mode <= 0` means the inputs are geographic degrees (converted here, including
+/// the 0.9931177 flattening correction); `coord_mode > 0` means geocentric radians.
 /// The original selects this with an arithmetic `IF(I) 50,50,51`, so zero and
 /// negative both take the degrees path.
 ///
-/// **The `i > 0` path is dead code.** `subfault_geometry` assigns `i=0` immediately
+/// **The `coord_mode > 0` path is dead code.** `subfault_geometry` assigns `coord_mode=0` immediately
 /// before its first call (`:2626`) and passes the literal `0` at its second
 /// (`:2658`), and those are the only live call sites. The branch is kept for
 /// line-by-line comparability but is deliberately not covered by the goldens.
@@ -44,23 +44,23 @@ pub struct DistanceAzimuth {
 ///
 /// Three separation regimes avoid catastrophic cancellation near 0 and 180
 /// degrees, selected by arithmetic `IF`s on `C1-0.94` and `C1+0.94`.
-pub fn distance_azimuth(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> DistanceAzimuth {
+pub fn distance_azimuth(event_lat_deg: f32, event_lon_deg: f32, station_lat_deg: f32, station_lon_deg: f32, coord_mode: i32) -> DistanceAzimuth {
     let (the, ale, ths, als): (f32, f32, f32, f32);
 
-    if i <= 0 {
+    if coord_mode <= 0 {
         // Geographic degrees. 1.745329252E-2 is the source's own truncated
         // pi/180; do not replace it with a computed constant.
-        let mut the_ = 1.745329252E-2 * thei;
-        let ale_ = 1.745329252E-2 * alei;
-        let mut ths_ = 1.745329252E-2 * thsi;
-        let als_ = 1.745329252E-2 * alsi;
+        let mut the_ = 1.745329252E-2 * event_lat_deg;
+        let ale_ = 1.745329252E-2 * event_lon_deg;
+        let mut ths_ = 1.745329252E-2 * station_lat_deg;
+        let als_ = 1.745329252E-2 * station_lon_deg;
         let aaa = 0.9931177 * the_.tan();
         the_ = aaa.atan();
         let aaa = 0.9931177 * ths_.tan();
         ths_ = aaa.atan();
         (the, ale, ths, als) = (the_, ale_, ths_, als_);
     } else {
-        (the, ale, ths, als) = (thei, alei, thsi, alsi);
+        (the, ale, ths, als) = (event_lat_deg, event_lon_deg, station_lat_deg, station_lon_deg);
     }
 
     // Single-precision trig, widened into the double-precision cosines.
@@ -172,35 +172,35 @@ pub struct SubfaultGeometry {
 
 #[allow(clippy::too_many_arguments)]
 pub fn subfault_geometry(
-    xlonq: f32,
-    ylatq: f32,
-    slon: f32,
-    slat: f32,
-    azmq: f32,
-    dipangq: f32,
-    zm: f32,
-    astop: f32,
-    dx: f32,
-    dy: f32,
-    nx: usize,
-    nw: usize,
+    fault_lon_deg: f32,
+    fault_lat_deg: f32,
+    station_lon_deg: f32,
+    station_lat_deg: f32,
+    strike_deg: f32,
+    dip_deg: f32,
+    top_depth_km: f32,
+    along_strike_offset_km: f32,
+    subfault_length_km: f32,
+    subfault_width_km: f32,
+    along_strike_count: usize,
+    down_dip_count: usize,
 ) -> SubfaultGeometry {
     // Sized to the actual grid, not to the compile-time maximum. The Fortran
     // declares these `(nq, np)` = 600x100, i.e. 234 KB each and 1.14 MB for the
     // five, essentially all of it untouched -- and it allocates them per segment.
-    // Every access below and in every caller is `(i, j)` within `1..=nx`/`1..=nw`,
+    // Every access below and in every caller is `(i, j)` within `1..=along_strike_count`/`1..=down_dip_count`,
     // so the layout is not observable and compacting them changes no arithmetic.
     // This is the same argument `input::Segment` already makes for sddp/rist/rupt.
-    let mut rl = crate::fort::Array2::<f32>::new(nx, nw);
-    let mut ph = crate::fort::Array2::<f32>::new(nx, nw);
-    let mut th = crate::fort::Array2::<f32>::new(nx, nw);
-    let mut dst = crate::fort::Array2::<f32>::new(nx, nw);
-    let mut zet = crate::fort::Array2::<f32>::new(nx, nw);
+    let mut rl = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
+    let mut ph = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
+    let mut th = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
+    let mut dst = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
+    let mut zet = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
 
     let pi = 3.14159265f32;
     let alei = 0.0f32;
     let alsi = 0.0f32;
-    let thei = ylatq;
+    let thei = fault_lat_deg;
 
     // Degrees-to-km scale factors, one degree east and one degree north.
     let mut ddx = 0.0f32;
@@ -224,29 +224,29 @@ pub fn subfault_geometry(
         }
     }
 
-    let az = azmq * pi / 180.0;
-    let dip = dipangq * pi / 180.0;
+    let az = strike_deg * pi / 180.0;
+    let dip = dip_deg * pi / 180.0;
 
-    let ylat = ylatq;
-    let xlon = xlonq;
+    let ylat = fault_lat_deg;
+    let xlon = fault_lon_deg;
 
     // DO 20 I=1,NX / DO 20 J=1,NW share one terminator: i outer, j inner.
-    for i in 1..=nx {
-        for j in 1..=nw {
-            let down_dip = (j - 1) as f32 * dy + dy / 2.0;
+    for i in 1..=along_strike_count {
+        for j in 1..=down_dip_count {
+            let down_dip = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
             let a1 = down_dip * dip.cos();
             let b1 = down_dip * dip.sin();
 
-            let along = (i as f32 - 0.5) * dx - astop;
+            let along = (i as f32 - 0.5) * subfault_length_km - along_strike_offset_km;
             let dlon = along * az.sin() + a1 * az.cos();
             let dlat = along * az.cos() - a1 * az.sin();
 
             let stlon = xlon + dlon / ddx;
             let stlat = ylat + dlat / ddy;
 
-            let zm1 = zm + b1;
+            let zm1 = top_depth_km + b1;
 
-            let g = distance_azimuth(stlat, stlon, slat, slon, 0);
+            let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg, 0);
             let dis = g.deltkm;
 
             dst[(i, j)] = dis;

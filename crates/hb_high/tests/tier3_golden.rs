@@ -51,12 +51,12 @@ impl Reader {
                    self.name, self.pos, self.buf.len());
     }
 
-    /// `dump_state`: th, vp, vs (`f64`) then alp, als (`f32`), for `1..=ndeep`.
+    /// `dump_state`: th, vp_km_s, vs (`f64`) then alp, als (`f32`), for `1..=ndeep`.
     fn state(&mut self, ndeep: usize) -> (RayState, VelocityModel) {
         let mut vmod = VelocityModel::new();
-        for k in 1..=ndeep { vmod.thic[k] = self.f64(); }
-        for k in 1..=ndeep { vmod.vp[k] = self.f64(); }
-        for k in 1..=ndeep { vmod.vsh[k] = self.f64(); }
+        for k in 1..=ndeep { vmod.thickness_km[k] = self.f64(); }
+        for k in 1..=ndeep { vmod.vp_km_s[k] = self.f64(); }
+        for k in 1..=ndeep { vmod.vsh_km_s[k] = self.f64(); }
         let mut st = RayState::default();
         for k in 1..=ndeep { st.travel.alp[k] = self.f32(); }
         for k in 1..=ndeep { st.travel.als[k] = self.f32(); }
@@ -113,10 +113,10 @@ fn pnot_matches_fortran() {
         let mut v = 0.0f64;
         for i in 1..=ndeep {
             if st.travel.alp[i] > 0.0 {
-                v = v.max(vmod.vp[i]);
+                v = v.max(vmod.vp_km_s[i]);
             }
             if st.travel.als[i] > 0.0 {
-                v = v.max(vmod.vsh[i]);
+                v = v.max(vmod.vsh_km_s[i]);
             }
         }
         let mut eps = 1.0e-10f64;

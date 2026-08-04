@@ -4,14 +4,14 @@
 use crate::fft::fast;
 use crate::fort::{Array1, Complex32};
 
-/// `subroutine apply_radiation_and_invert(nf,mf,np2,cw1,stdd,rdna)` — `hb_high_ref.f:2234`.
+/// `subroutine apply_radiation_and_invert(fold_count,mirror_count,np2,spectrum,time_series,radiation)` — `hb_high_ref.f:2234`.
 ///
-/// Multiplies the spectrum in `cw1` by the signed radiation pattern `rdna`,
+/// Multiplies the spectrum in `spectrum` by the signed radiation pattern `radiation`,
 /// mirrors it over the negative-frequency half, inverse-transforms, scales by
-/// `1/(rp*prtitn*np2)`, and applies a raised-cosine taper over the final
-/// `np2/10` samples. `stdd` receives the resulting real time series.
+/// `1/(radiation_norm*partition_factor*np2)`, and applies a raised-cosine taper over the final
+/// `np2/10` samples. `time_series` receives the resulting real time series.
 ///
-/// `rp = 0.63` is the radiation-pattern normalisation and `prtitn = 0.71` the
+/// `radiation_norm = 0.63` is the radiation-pattern normalisation and `partition_factor = 0.71` the
 /// vector partition factor for two orthogonal components (nominally
 /// `1/sqrt(2)`, written as two digits).
 ///
@@ -28,39 +28,39 @@ use crate::fort::{Array1, Complex32};
 /// worth correcting, that is a Phase 3 re-baseline with a written justification,
 /// not a quiet cleanup. See `PORTING_RULES.md` §1.
 pub fn apply_radiation_and_invert(
-    nf: usize,
-    mf: usize,
+    fold_count: usize,
+    mirror_count: usize,
     np2: usize,
-    cw1: &mut Array1<Complex32>,
-    stdd: &mut Array1<f32>,
-    rdna: &Array1<f32>,
+    spectrum: &mut Array1<Complex32>,
+    time_series: &mut Array1<f32>,
+    radiation: &Array1<f32>,
 ) {
-    let rp = 0.63f32;
-    let prtitn = 0.71f32;
+    let radiation_norm = 0.63f32;
+    let partition_factor = 0.71f32;
 
     // Positive frequencies, signed radiation pattern (sign preserved since
     // 2004-12-21; the older code took abs()).
-    for i in 1..=nf {
-        cw1[i] = cw1[i] * rdna[i];
+    for i in 1..=fold_count {
+        spectrum[i] = spectrum[i] * radiation[i];
     }
 
-    // Negative-frequency half, mirrored about nf.
-    for i in nf + 1..=nf + mf {
-        let mm = 2 * nf - i;
-        cw1[i] = cw1[i] * rdna[mm];
+    // Negative-frequency half, mirrored about fold_count.
+    for i in fold_count + 1..=fold_count + mirror_count {
+        let mm = 2 * fold_count - i;
+        spectrum[i] = spectrum[i] * radiation[mm];
     }
 
-    fast(np2, cw1, 1);
+    fast(np2, spectrum, 1);
 
-    let fac = 1.0 / (rp * prtitn * np2 as f32);
+    let fac = 1.0 / (radiation_norm * partition_factor * np2 as f32);
     for i in 1..=np2 {
-        stdd[i] = fac * cw1[i].re;
+        time_series[i] = fac * spectrum[i].re;
     }
 
     let n0 = np2 / 10;
     let dd = 3.14159625 / (n0 as f32);
     for i in 1..=n0 {
         let arg = 0.5 * (1.0 + (i as f32 * dd).cos());
-        stdd[np2 - n0 + i] = stdd[np2 - n0 + i] * arg;
+        time_series[np2 - n0 + i] = time_series[np2 - n0 + i] * arg;
     }
 }

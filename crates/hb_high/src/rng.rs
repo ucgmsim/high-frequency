@@ -81,17 +81,17 @@ impl Pcg32 {
     }
 }
 
-/// `subroutine fill_normal_deviates(nr,acc)` — `hb_high_ref.f:4033`.
+/// `subroutine fill_normal_deviates(count,out)` — `hb_high_ref.f:4033`.
 ///
 /// Box-Muller pairs, then the whole vector is rescaled so that
-/// `sum(acc**2) == nr` exactly. That renormalisation is **not** cosmetic:
+/// `sum(out**2) == count` exactly. That renormalisation is **not** cosmetic:
 /// `stochastic_spectrum`'s amplitude calibration is tuned against a unit-RMS sequence, so
 /// substituting a plain N(0,1) generator changes the output level.
 ///
-/// Draw accounting, which the shared stream depends on: `2*ceil(nr/2)` draws
-/// plus one extra per rejected zero. When `nr` is odd the sine partner of the
+/// Draw accounting, which the shared stream depends on: `2*ceil(count/2)` draws
+/// plus one extra per rejected zero. When `count` is odd the sine partner of the
 /// final pair is generated and discarded.
-pub fn fill_normal_deviates(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
+pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>) {
     // x1 and x2 persist across iterations: the odd-numbered draw computes the
     // pair and returns the cosine component, the even-numbered one returns the
     // sine component from the *same* pair. In the Fortran they are ordinary
@@ -101,7 +101,7 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
     // The original's computed `goto (1,2),j`.
     let mut j = 1;
 
-    for n in 1..=nr {
+    for n in 1..=count {
         let w = if j == 1 {
             x1 = rng.next_f32();
             while x1 == 0.0 {
@@ -120,25 +120,25 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
             j = 1;
             x1 * x2.sin()
         };
-        acc[n] = w;
+        out[n] = w;
     }
 
     let mut s = 0.0f32;
-    for i in 1..=nr {
-        s += acc[i] * acc[i];
+    for i in 1..=count {
+        s += out[i] * out[i];
     }
-    // nr is promoted to real*4 for the division, and the sqrt is single
+    // count is promoted to real*4 for the division, and the sqrt is single
     // precision. Do not compute this in f64.
-    s = (nr as f32 / s).sqrt();
-    for i in 1..=nr {
-        acc[i] *= s;
+    s = (count as f32 / s).sqrt();
+    for i in 1..=count {
+        out[i] *= s;
     }
 }
 
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
-pub fn fill_uniform_deviates(rng: &mut Pcg32, nrr: usize, rn: &mut Array1<f32>) {
-    for i in 1..=nrr {
-        rn[i] = rng.next_f32();
+pub fn fill_uniform_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>) {
+    for i in 1..=count {
+        out[i] = rng.next_f32();
     }
 }
 

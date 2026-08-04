@@ -124,10 +124,10 @@ fn gf_amp_tt_matches_fortran() {
         let range = r.f32();
 
         let mut vmod = VelocityModel::new();
-        for k in 1..=j0 { vmod.thic[k] = r.f64(); }
-        for k in 1..=j0 { vmod.vp[k] = r.f64(); }
-        for k in 1..=j0 { vmod.vsh[k] = r.f64(); }
-        for k in 1..=j0 { vmod.qs[k] = r.f32(); }
+        for k in 1..=j0 { vmod.thickness_km[k] = r.f64(); }
+        for k in 1..=j0 { vmod.vp_km_s[k] = r.f64(); }
+        for k in 1..=j0 { vmod.vsh_km_s[k] = r.f64(); }
+        for k in 1..=j0 { vmod.attenuation_s[k] = r.f32(); }
 
         let want_nd = r.usize();
         let want_nh: Vec<i32> = (0..want_nd).map(|_| r.i32()).collect();
