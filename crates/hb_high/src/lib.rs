@@ -21,4 +21,5 @@ pub mod ray;
 pub mod rng;
 pub mod site;
 pub mod state;
+pub mod stoc;
 pub mod special;

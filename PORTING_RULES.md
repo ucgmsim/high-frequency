@@ -144,6 +144,53 @@ subtly different:
 | `conjg(z)` | `Complex32::conj` | |
 | `real(z)` / `dimag(z)` | `.re` / `.im` | note `cr`'s local named `pi` is `dimag(p)`, **not** π |
 
+### 4b. Constant exponents: check each one, do not generalise
+
+`**` appears 161 times. Integer exponents (`x**2`, `x**3`) expand to repeated
+multiplication and port as `x*x`, `x*x*x`. **Real** constant exponents are the
+trap, because gfortran folds some and not others, and Rust's `powf` agrees with
+neither folded form reliably. Measured over 200,000 values on gfortran 16.1.1 /
+rustc 1.92:
+
+| expression | agrees with | disagreement rate |
+| --- | --- | --- |
+| gfortran `x**(-1.0)` | `1.0/x` | **0** |
+| Rust `powf(x, -1.0)` | `1.0/x` | 126 / 200000 |
+| gfortran `x**0.5` | `sqrt(x)` | 108 / 200000 |
+| Rust `powf(x, 0.5)` | `sqrt(x)` | 108 / 200000 |
+
+So:
+
+- `x**(-1.0)` → write `1.0 / x`. gfortran folds it to a division; `powf(-1.0)`
+  does not match.
+- `x**e` with a **variable** exponent → `x.powf(e)`. Safe: LLVM cannot fold a
+  non-constant exponent, and the two libms agree — verified over 20,000 cases in
+  `tests/intrinsics.rs`.
+- `x**0.5` with a **constant** exponent → **cannot be expressed portably in
+  Rust.** gfortran emits a real `powf` call, but LLVM rewrites
+  `powf(x, 0.5)` into `sqrt(x)` at `-O2` and leaves it alone at `-O0`, so the
+  same Rust source compares against different functions in the two profiles.
+  If a live site ever needs this, wrap it in an `#[inline(never)]` helper to
+  force the libm call, and verify in **both** profiles.
+
+**Every constant-exponent `powf` must be justified, and there are currently
+none in the port.** `stoc_f`'s only `x**0.5` fed a dead store, so it is simply
+not computed.
+
+Two bugs came out of this, both worth remembering:
+
+1. `stoc_f`'s `a2 = (1.0+(omg/omgm)**1)**(-1.0)` written as `powf(-1.0)` gave a
+   one-ulp error in exactly one frequency bin out of 1025.
+2. Writing `powf(0.5)` passed in debug and **failed in release** — caught only
+   because the suite runs in both profiles. This is the concrete reason that
+   requirement exists.
+
+**Never verify a `powf` mapping without `#[inline(never)]`.** An inlined check
+silently tests the folded path, passes, and leaves the real libm call
+unverified. Three successive attempts to characterise this behaviour gave the
+wrong answer for exactly that reason — including one that produced a confident
+but false "verified bit-identical" claim.
+
 ## 5. Control flow
 
 `goto` becomes labelled `loop`/`break`/`continue`. Catalogue of what appears:

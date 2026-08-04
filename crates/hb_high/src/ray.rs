@@ -515,3 +515,180 @@ pub fn ttime(
     let t = cagcon(st, vmod, p, ir, r);
     (p1, t.re)
 }
+
+/// Value of a Fortran `DO j = lo, hi` variable after the loop, with step +1.
+///
+/// Two cases matter and they differ: a loop that runs to completion leaves
+/// `hi + 1`, while a loop whose range is empty leaves `lo` untouched.
+/// `gf_amp_tt` reads the loop variable after the loop (`kbot = j`), so getting
+/// this wrong silently changes the ray description.
+fn do_end(lo: usize, hi: usize) -> usize {
+    if lo > hi { lo } else { hi + 1 }
+}
+
+/// Outputs of [`gf_amp_tt`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GfAmp {
+    /// Ray parameter.
+    pub rp0: f32,
+    /// Travel time, seconds.
+    pub stime: f32,
+    /// Ray path length, km.
+    pub rpath: f32,
+    /// Path-integrated attenuation, `sum(t_i/Qs_i)`.
+    pub qbar: f32,
+}
+
+/// `subroutine gf_amp_tt(...)` — `hb_high_ref.f:3174`.
+///
+/// Builds the ray segment description for a given source depth and ray type,
+/// then drives [`trav`], [`pnot`], [`ttime`] and [`geom_terms`] to return ray
+/// parameter, travel time, path length and path attenuation.
+///
+/// Sole writer of `/rays/`. `md` is the wave mode (3 = SV, 4 = SH, 5 = P);
+/// production passes 4. `itype` odd means an upgoing ray, even means
+/// down-going then Moho-reflected, and values above 2 add Moho multiples —
+/// production passes 1, so the multiple loops never run.
+///
+/// The `sgc` argument is declared `complex` in the Fortran and never referenced;
+/// omitted here. `rcv`, `cp0` and `gc` are likewise declared and unused.
+///
+/// The Moho is taken to be above the first layer of zero thickness, or the
+/// deepest layer if none is zero.
+///
+/// # `ksrc` can come out as `j0 + 1`
+///
+/// The source-layer search is a `DO ksrc = 1, j0` that exits early via `goto`
+/// once the accumulated depth passes `hs`. If it never does — a source below the
+/// whole model — the loop runs to completion and Fortran leaves the loop variable
+/// at `j0 + 1`, which then becomes the first ray segment's layer index. That is
+/// a latent out-of-range read in the original. It is reproduced rather than
+/// clamped; in Rust it surfaces as a bounds panic instead of silently reading
+/// past the model. See `PORTING_RULES.md` §7.
+///
+/// Note also that if `ksrc < krec` (a source shallower than layer 2) the upgoing
+/// segment loop produces zero segments and `nd` is 0, which `trav` is not
+/// written to handle.
+///
+/// `hs_tol = 0.02` is an unsuffixed literal in an `implicit real*8` routine, so
+/// it carries only `f32` precision — see `PORTING_RULES.md` §1b.
+pub fn gf_amp_tt(
+    st: &mut RayState,
+    vmod: &Vmod,
+    j0: usize,
+    src_depth: f32,
+    range: f32,
+    itype: i32,
+    md: i32,
+) -> GfAmp {
+    let krec = 2usize;
+    let ir = 1usize;
+
+    st.rays.ndeg[ir] = 1;
+    let hr = vmod.thic[1];
+    let mut hs = src_depth as f64;
+    let rr = range as f64;
+
+    // Find the source layer, nudging hs off an interface by hs_tol either way
+    // so the ray does not start exactly on a boundary.
+    let hs_tol = 0.02f32 as f64;
+    let mut dep = 0.0f64;
+    // Loop-completion value: DO ksrc = 1, j0 leaves j0+1 if it never exits.
+    let mut ksrc = do_end(1, j0);
+    for k in 1..=j0 {
+        dep += vmod.thic[k];
+        if hs >= dep && (hs - dep) < hs_tol {
+            hs = dep + hs_tol;
+        }
+        if hs < dep {
+            if (dep - hs) < hs_tol {
+                hs = dep - hs_tol;
+            }
+            ksrc = k;
+            break;
+        }
+    }
+
+    let mut l = 0usize;
+    let push = |st: &mut RayState, l: &mut usize, layer: usize| {
+        *l += 1;
+        st.rays.nh[*l] = layer as i32;
+        st.rays.nm[*l] = md;
+    };
+
+    if itype % 2 == 1 {
+        // Upgoing: ksrc down to krec.
+        let mut j = ksrc as i64;
+        while j >= krec as i64 {
+            push(st, &mut l, j as usize);
+            j -= 1;
+        }
+        // Moho multiples, if any. ktn is 0 for itype == 1.
+        let ktn = (itype - 1) / 2;
+        for _kt in 1..=ktn {
+            let mut jv = do_end(krec, j0 - 1);
+            for jj in krec..=(j0 - 1) {
+                push(st, &mut l, jj);
+                if vmod.thic[jj + 1] == 0.0 {
+                    jv = jj;
+                    break;
+                }
+            }
+            let kbot = jv;
+            let mut j = kbot as i64;
+            while j >= krec as i64 {
+                push(st, &mut l, j as usize);
+                j -= 1;
+            }
+        }
+    } else {
+        // Down-going to the Moho, then back up.
+        let mut jv = do_end(ksrc, j0 - 1);
+        for jj in ksrc..=(j0 - 1) {
+            push(st, &mut l, jj);
+            if vmod.thic[jj + 1] == 0.0 {
+                jv = jj;
+                break;
+            }
+        }
+        let kbot = jv;
+        let mut j = kbot as i64;
+        while j >= krec as i64 {
+            push(st, &mut l, j as usize);
+            j -= 1;
+        }
+
+        let ktn = (itype - 2) / 2;
+        for _kt in 1..=ktn {
+            let mut jv = do_end(krec, j0 - 1);
+            for jj in krec..=(j0 - 1) {
+                push(st, &mut l, jj);
+                if vmod.thic[jj + 1] == 0.0 {
+                    jv = jj;
+                    break;
+                }
+            }
+            let kbot = jv;
+            let mut j = kbot as i64;
+            while j >= krec as i64 {
+                push(st, &mut l, j as usize);
+                j -= 1;
+            }
+        }
+    }
+    st.rays.nd[ir] = l as i32;
+
+    trav(st, vmod, ir, hs, hr);
+    let (p0, t0) = pnot(st, vmod, ir, rr);
+    // Outputs discarded by the Fortran; the call is kept for comparability.
+    let (_p1, _t1) = ttime(st, vmod, ir, p0, t0, rr);
+
+    let (rpd, qbar) = geom_terms(st, vmod, hs, p0, itype);
+
+    GfAmp {
+        rp0: p0 as f32,
+        stime: t0 as f32,
+        rpath: rpd as f32,
+        qbar,
+    }
+}
