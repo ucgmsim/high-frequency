@@ -3,7 +3,7 @@
 Measured on the current release build, which is bit-identical to the Fortran
 oracle. Two independent sources, and they agree:
 
-- **criterion microbenchmarks** — `harness/bench_baseline.csv`, 49 benchmarks,
+- **criterion microbenchmarks** — `harness/bench_baseline.csv`, 51 benchmarks,
   reproduce with `cargo bench`
 - **`perf record -F 999 --call-graph fp`** on the 112-subfault fault, built with
   `-C force-frame-pointers=yes`
@@ -39,7 +39,7 @@ number that justifies §2.1 of `REFACTOR.md`. The next largest self times are
 in `stochastic_spectrum` and three inverse in `apply_radiation_and_invert` per
 subfault.
 
-## Cost model, and it checks out
+## Cost model
 
 Built from the microbenchmarks alone, per subfault at `np2 = 16384`:
 
@@ -68,13 +68,13 @@ slow. Per subfault, per ray:
 
 | | count |
 | --- | --- |
-| FFTs of length `np2` | 6 (3 forward in `stoc_f`, 3 inverse in `highcor_f`) |
+| FFTs of length `np2` | 6 (3 forward in `stochastic_spectrum`, 3 inverse in `apply_radiation_and_invert`) |
 | normal deviates | 3 × `np2` |
-| `rdatn` calls | ~3000 (1000 each in two `radfrq_lin` and one `radv_lin`) |
-| uniform draws | ~10000 (5 per iteration × 1000 × 2 `radfrq_lin`) |
+| `radiation_pattern` calls | ~3000 (1000 each in two `horizontal_radiation_spectrum` and one `vertical_radiation_spectrum`) |
+| uniform draws | ~10000 (5 per iteration × 1000 × 2 `horizontal_radiation_spectrum`) |
 | `libm` calls for twiddles | 3 × (`np2` − 1) per FFT ≈ **295k per subfault** |
 
-That last row is the whole story of the 25% in libm. `fast` computes
+That last row is the whole story of the 27% in libm. `fast` computes
 `CEXP(THETA)` once per `(stage, k)` pair, which is `np2 − 1` times per transform,
 and each one is three libm calls: `expf`, `cosf`, `sinf`. At `np2 = 16384` over
 six transforms that is ~295k libm calls per subfault, ~33M for this fault.
@@ -84,10 +84,10 @@ count alone suggests. Per-butterfly cost from the FFT benchmarks:
 
 | `np2` | time | ns per element-stage |
 | --- | --- | --- |
-| 1024 | 19.9 µs | 1.95 |
-| 4096 | 85.1 µs | 1.73 |
-| 16384 | 611 µs | 2.67 |
-| 65536 | 3.66 ms | 3.49 |
+| 1024 | 19.2 µs | 1.85 |
+| 4096 | 83.5 µs | 1.68 |
+| 16384 | 608 µs | 2.64 |
+| 65536 | 3.60 ms | 3.43 |
 
 An `O(N log N)` algorithm should hold that column flat. It doubles from 4096 to
 65536 because 65536 complex `f32` is 512 KB, past L2 — so the alpine fault pays a
@@ -131,14 +131,14 @@ Worth doing even alongside item 1, since it also helps any future caller.
 and `sqrt(re² + im²)` differs in the last bits (`PORTING_RULES.md` §4). The 2.0%
 is real but the swap is **not** bit-identical, so it is tier C, not A.
 
-There is a tier-A version: `stoc_f` computes `cabs(ac(i))*cabs(ac(i))`, i.e.
+There is a tier-A version: `stochastic_spectrum` computes `cabs(ac(i))*cabs(ac(i))`, i.e.
 `hypot(re,im)²`. That is not equal to `re²+im²` in floating point, so it cannot be
 simplified — but it does call `hypot` twice where once would do. Hoisting to a
 single call is exact.
 
-### 4. `stoc_f`'s envelope and spectrum loops — tier C, ~9% self
+### 4. `stochastic_spectrum`'s envelope and spectrum loops — tier C, ~8% self
 
-`stoc_f`'s own 9% self time is two loops over `np2`/`nf` with a transcendental
+Its own 8.2% self time is two loops over `np2`/`nf` with a transcendental
 each: `t.powf(b) * exp(-c*t)` for the envelope, and `powf`/`exp` per frequency bin.
 
 `exp(-c*t)` over evenly spaced `t` is a geometric sequence and could be advanced
@@ -154,8 +154,8 @@ changes the order of operations. Only relevant to alpine-scale faults.
 
 **Do not strip the `Array1` 1-based wrapper from hot loops.** This was the
 obvious candidate and the measurement kills it: an indexed sum over 65536
-elements is **65.4 µs against 64.9 µs** for a plain slice sum — a 0.8% difference,
-inside the noise. LLVM already elides the bounds checks in these loops. Removing
+elements is **60.06 µs against 60.10 µs** for a plain slice sum — the wrapper is
+*marginally faster*, i.e. the difference is pure noise. LLVM already elides the bounds checks in these loops. Removing
 the wrapper would mean rewriting index arithmetic across every kernel, which
 `PORTING_RULES.md` §3 identifies as the single most likely way to introduce a
 silent off-by-one, in exchange for nothing measurable.
