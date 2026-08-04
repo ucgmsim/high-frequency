@@ -202,31 +202,23 @@ pub fn subfault_geometry(
 
     // Was the source's own 9-digit `3.14159265`; now the correctly rounded value.
     let pi = std::f32::consts::PI;
-    let alei = 0.0f32;
-    let alsi = 0.0f32;
     let thei = fault_lat_deg;
 
-    // Degrees-to-km scale factors, one degree east and one degree north.
-    let mut ddx = 0.0f32;
-    let mut ddy = 0.0f32;
-    for ii in 1..=2 {
-        let (thsi, alsi2) = if ii == 1 {
-            (thei, alei + 1.0)
-        } else {
-            (thei + 1.0, alsi)
-        };
-        let g = distance_azimuth(thei, alei, thsi, alsi2);
-        let az = g.azesdg;
-        let dis = g.deltkm;
-        let x = dis * (pi * az / 180.0).sin();
-        let y = dis * (pi * az / 180.0).cos();
-        if ii == 1 {
-            ddx = x;
-        }
-        if ii == 2 {
-            ddy = y;
-        }
-    }
+    // Degrees-to-km scale factors, obtained empirically: one geodesic solve a degree east,
+    // one a degree north.
+    //
+    // The Fortran writes this as `DO ii = 1, 2` whose body is an `if ii == 1 / else` on
+    // both the inputs and the outputs -- a two-iteration loop that branches on its own
+    // counter, which is two statements wearing a loop. Unrolled. Both `x` and `y` were
+    // computed on each pass and one discarded; only the surviving one is computed here,
+    // and the reference longitude (`alei`/`alsi`, both constant 0.0) is gone with it.
+    //
+    // Note the SCALE is what is wanted, not a position: both solves start from
+    // (thei, 0.0), so only the one-degree offset matters.
+    let east = distance_azimuth(thei, 0.0, thei, 1.0);
+    let north = distance_azimuth(thei, 0.0, thei + 1.0, 0.0);
+    let ddx = east.deltkm * (pi * east.azesdg / 180.0).sin();
+    let ddy = north.deltkm * (pi * north.azesdg / 180.0).cos();
 
     let az = strike_deg * pi / 180.0;
     let dip = dip_deg * pi / 180.0;

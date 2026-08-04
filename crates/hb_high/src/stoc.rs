@@ -121,10 +121,10 @@ pub fn stochastic_spectrum(
     let omgc = 2.0 * pai * corner_frequency_hz;
     let omgm = 2.0 * pai * fmax_hz;
 
+    // Bin 0 (DC) stays zero; bins 1..fold_count get the shape. Slicing both from 1 keeps
+    // the two arrays' correspondence in the types instead of in two matching `[i]`s.
     let mut as_ = vec![0.0f64; np2];
-    as_[0] = 0.0;
-    for i in 1..fold_count {
-        let fr = frequency_hz[i];
+    for (shape, &fr) in as_[1..fold_count].iter_mut().zip(&frequency_hz[1..]) {
         let fr2 = fr * fr;
 
         // The Q model qv = 150.0*fr**0.5 is computed by the Fortran but feeds
@@ -169,17 +169,21 @@ pub fn stochastic_spectrum(
 
         let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
 
-        as_[i] = a1 * a2a3 * frank as f64;
+        *shape = a1 * a2a3 * frank as f64;
     }
 
     let mut a = vec![0.0f32; np2];
     fill_normal_deviates(rng, np2, &mut a);
     remove_quadratic_trend(dt, &mut a);
 
-    let mut ac = vec![Complex32::ZERO; np2];
-    for (bin, (&deviate, &envelope)) in ac.iter_mut().zip(a.iter().zip(w.iter())) {
-        *bin = Complex32::new(deviate * envelope, 0.0);
-    }
+    // Built by collecting rather than zero-filling then overwriting every element: `ac` is
+    // np2 complex values allocated three times per subfault, and the zeroing pass was
+    // pure waste.
+    let mut ac: Vec<Complex32> = a
+        .iter()
+        .zip(&w)
+        .map(|(&deviate, &envelope)| Complex32::new(deviate * envelope, 0.0))
+        .collect();
 
     forward(&mut ac);
 
@@ -191,10 +195,9 @@ pub fn stochastic_spectrum(
     // `PORTING_RULES.md` §4 / `PROFILE.md` item 3 recorded that it could not be
     // simplified because `hypot(re,im)^2` and `re^2 + im^2` differ in the last bits.
     // Under Stage 2 it can: this is the same quantity, computed without the detour.
-    let mut fsa = 0.0f32;
-    for bin in &ac[..fold_count] {
-        fsa += bin.norm_sqr();
-    }
+    // `Sum for f32` folds left to right, matching the Fortran's `fsa = fsa + ..`. Any
+    // reassociating form (chunked, pairwise, parallel) would not -- see REFACTOR.md §1.3b.
+    let fsa: f32 = ac[..fold_count].iter().map(Complex32::norm_sqr).sum();
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
     // complex*8 * real*8 goes through complex*16; see the note above.

@@ -38,9 +38,10 @@ pub fn site_amplification_factors(
 ) {
     let vdsrc = (vmod.vsh_km_s[source_layer] * vmod.density_g_cm3[source_layer]) as f32;
 
-    // Both the frequency table and the velocity model are 0-based since §2.3.
-    for kf in 0..frequency_count {
-        let stt = 0.25 / log_frequency[kf].exp();
+    // Both the frequency table and the velocity model are 0-based since §2.3. The two
+    // tables are walked in lockstep, one factor per frequency.
+    for (factor, &log_freq) in factors[..frequency_count].iter_mut().zip(log_frequency) {
+        let stt = 0.25 / log_freq.exp();
 
         // Starts at the layer below the air layer: the Fortran's layer 2.
         let mut i = 1usize;
@@ -49,8 +50,9 @@ pub fn site_amplification_factors(
         let mut tt = 0.0f32;
         let mut ttp = (vmod.thickness_km[1] / vmod.vsh_km_s[1]) as f32;
 
-        // Label 6145: walk down until a quarter-period of travel time has
-        // accumulated, or the source layer is reached.
+        // Label 6145: walk down until a quarter-period of travel time has accumulated, or
+        // the source layer is reached. Genuinely sequential -- each step's `ttp` depends
+        // on the previous one's -- so this stays a loop.
         while !(ttp >= stt || i == source_layer) {
             zdep = (zdep as f64 + vmod.thickness_km[i]) as f32;
             pz = (pz as f64 + vmod.density_g_cm3[i] * vmod.thickness_km[i] / vmod.vsh_km_s[i]) as f32;
@@ -65,7 +67,7 @@ pub fn site_amplification_factors(
         let bz = ((zdep as f64 + (stt - tt) as f64 * vmod.vsh_km_s[i]) / stt as f64) as f32;
         let pz = ((pz as f64 + vmod.density_g_cm3[i] * (stt - tt) as f64) / stt as f64) as f32;
 
-        factors[kf] = 0.5 * (vdsrc / (bz * pz)).ln();
+        *factor = 0.5 * (vdsrc / (bz * pz)).ln();
     }
 }
 

@@ -47,6 +47,14 @@ use crate::stoc::stochastic_spectrum;
 /// `fill_normal_deviates(mmv, ...)` draws exactly this many deviates.
 const MMV: usize = params::MMV;
 
+/// Index of the vertical component in the three-element per-component arrays.
+///
+/// The three are ordered 090, 000, vertical throughout, and that order is load-bearing:
+/// the two horizontals draw 5,000 deviates each from the shared stream and the vertical
+/// draws none. A `Component` enum is the right home for this — §2.8 batch 5 — but the
+/// magic `3` it replaces was worth removing on its own.
+const VERTICAL: usize = 2;
+
 /// One station's synthetic record.
 pub struct Simulation {
     /// Samples per component.
@@ -126,20 +134,25 @@ pub fn simulate(
     let mut j0 = j0_in;
     let mut nlskip = config.nl_skip;
 
-    let nevnt = stoch.segments.len();
-
-    for (k, s) in stoch.segments.iter().enumerate() {
-        if s.subfault_length_km != stoch.segments[0].subfault_length_km {
-            return Err(SimError::InconsistentSegments(format!(
-                "dx({}) = {} not equal to dx(1) = {}, exiting...",
-                k + 1, s.subfault_length_km, stoch.segments[0].subfault_length_km
-            )));
-        }
-        if s.subfault_width_km != stoch.segments[0].subfault_width_km {
-            return Err(SimError::InconsistentSegments(format!(
-                "dw({}) = {} not equal to dw(1) = {}, exiting...",
-                k + 1, s.subfault_width_km, stoch.segments[0].subfault_width_km
-            )));
+    // Every segment must agree with the FIRST on subfault size, so the first is the
+    // reference and the rest are the candidates -- `split_first` says that, where
+    // re-indexing `segments[0]` inside a loop over `segments` left it to the reader to
+    // notice the index was constant. The reported numbers stay 1-based, matching the
+    // Fortran's message.
+    if let Some((reference, rest)) = stoch.segments.split_first() {
+        for (k, s) in rest.iter().enumerate() {
+            if s.subfault_length_km != reference.subfault_length_km {
+                return Err(SimError::InconsistentSegments(format!(
+                    "dx({}) = {} not equal to dx(1) = {}, exiting...",
+                    k + 2, s.subfault_length_km, reference.subfault_length_km
+                )));
+            }
+            if s.subfault_width_km != reference.subfault_width_km {
+                return Err(SimError::InconsistentSegments(format!(
+                    "dw({}) = {} not equal to dw(1) = {}, exiting...",
+                    k + 2, s.subfault_width_km, reference.subfault_width_km
+                )));
+            }
         }
     }
 
@@ -258,8 +271,7 @@ pub fn simulate(
         fill_normal_deviates(&mut rng, MMV, &mut normal_deviates);
     }
 
-    for iv in 0..nevnt {
-        let seg = &stoch.segments[iv];
+    for seg in &stoch.segments {
         let strike_rad = seg.strike_deg * deg_to_rad;
         let dip_rad = seg.dip_deg * deg_to_rad;
         let rake_rad = seg.rake_deg * deg_to_rad;
@@ -423,16 +435,17 @@ pub fn simulate(
                     sub_tstart = 0.7 * stime;
                 }
 
-                for kf in 1..=3 {
-                    let mut fmx1 = fmx;
-                    if fmx1 > 15.0 && kf == 3 {
-                        fmx1 = 15.0;
-                    }
+                // 0-based, so the vertical is component 2 rather than the Fortran's
+                // `kf == 3`. The three calls stay in this order: each draws `np2` normal
+                // deviates from the shared stream.
+                for (component, spec) in spectrum.iter_mut().enumerate() {
+                    // Only the vertical is capped at 15 Hz.
+                    let fmx1 = if component == VERTICAL { fmx.min(15.0) } else { fmx };
                     stochastic_spectrum(
                         &mut rng, np2, rpath, subfault_window_s, tw_eps, tw_eta,
                         shear_velocity_km_s, density_g_cm3, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
-                        &mut spectrum[kf - 1], &freq, qbar, qfexp,
+                        spec, &freq, qbar, qfexp,
                         moment_scale,
                     );
                 }
@@ -568,12 +581,17 @@ pub fn simulate(
     // BINMOD nothing writes the result -- the only consumer is the commented-out
     // `!WRITE(6,*) 'ACC.MAX='` at hb_high_ref.f:1423 -- so the scan is dropped.
     // Interleaved, component fastest: 090/000/ver per time sample.
-    let mut out = Vec::with_capacity(ndata * 3);
-    for sample in 0..ndata {
-        for component in &acc {
-            out.push(component[sample]);
-        }
-    }
+    // Interleaved, component fastest: 090/000/ver per time sample. Destructuring the
+    // three traces first is what lets this be a zip -- `acc[c][sample]` over a loop nest
+    // says the same thing while hiding that the three are walked in lockstep.
+    let [e090, n000, vertical] = &acc;
+    let out: Vec<f32> = e090
+        .iter()
+        .zip(n000)
+        .zip(vertical)
+        .flat_map(|((&e, &n), &v)| [e, n, v])
+        .collect();
+    debug_assert_eq!(out.len(), ndata * 3);
 
     Ok(Simulation { ndata, dt, acc: out, d10_km: d10 })
 }

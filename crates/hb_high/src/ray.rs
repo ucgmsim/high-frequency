@@ -87,20 +87,20 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     assert!(n >= 1, "build_ray_path needs at least one ray segment, got nd = 0");
 
     // DO 10 I=1,100 -- deliberately not NLAYMAX. See the note above. 0-based, so this is
-    // layers 0..100, the same hundred layers the Fortran zeroed.
-    for i in 0..100 {
-        state.travel.alp[i] = 0.0;
-        state.travel.als[i] = 0.0;
-    }
+    // layers 0..100, the same hundred layers the Fortran zeroed. The bound stays a
+    // visible 100 rather than becoming `.fill()` over the whole array, because the
+    // difference between 100 and NLAYMAX is the reproduced bug.
+    state.travel.alp[..100].fill(0.0);
+    state.travel.als[..100].fill(0.0);
 
     // Count how many times each layer is traversed, by wave mode. Both indices are
     // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
-    for i in 0..n {
-        let h = state.rays.nh[i] as usize;
-        if state.rays.nm[i] == 5 {
+    for (&layer, &mode) in state.rays.nh[..n].iter().zip(&state.rays.nm[..n]) {
+        let h = layer as usize;
+        if mode == 5 {
             state.travel.alp[h] += 1.0;
         }
-        if state.rays.nm[i] == 3 || state.rays.nm[i] == 4 {
+        if mode == 3 || mode == 4 {
             state.travel.als[h] += 1.0;
         }
     }
@@ -110,12 +110,8 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // layer.
     let lis = state.rays.nh[0] as usize;
     let lir = state.rays.nh[n - 1] as usize;
-    let mut nl = 1i32;
-    for i in 0..n {
-        if state.rays.nh[i] as usize == lis {
-            nl += 1;
-        }
-    }
+    // Starts at 1, not 0: the Fortran's `nl = 1` before the count.
+    let nl = 1 + state.rays.nh[..n].iter().filter(|&&h| h as usize == lis).count() as i32;
     let mut nup = (-1i32).pow(nl as u32);
     if lir > lis {
         nup = -nup;
@@ -157,10 +153,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // The Fortran sums layers 1..lir-1, which 0-based is indices 0..lir-1 -- so `0..lir`,
     // NOT `1..=lir - 1`. Getting this wrong drops the air layer from the sum and moves the
     // receiver, which is exactly the kind of silent one-layer error §2.3 is prone to.
-    let mut thtot = 0.0f64;
-    for i in 0..lir {
-        thtot += vmod.thickness_km[i];
-    }
+    // `Sum for f64` folds left to right, matching `thtot = th(i) + thtot`. (Operand order
+    // within each add differs and cannot matter -- IEEE addition is commutative.)
+    let thtot: f64 = vmod.thickness_km[..lir].iter().sum();
     let hrl = receiver_depth_km - thtot;
     let a1 = hrl / vmod.thickness_km[lir];
     let a2 = (vmod.thickness_km[lir] - hrl) / vmod.thickness_km[lir];
@@ -184,10 +179,7 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     }
 
     // Source position within its layer, same as the receiver block above.
-    let mut thtot = 0.0f64;
-    for i in 0..lis {
-        thtot += vmod.thickness_km[i];
-    }
+    let thtot: f64 = vmod.thickness_km[..lis].iter().sum();
     let hsl = source_depth_km - thtot;
     let a1 = hsl / vmod.thickness_km[lis];
     let a2 = (vmod.thickness_km[lis] - hsl) / vmod.thickness_km[lis];
@@ -210,11 +202,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     }
 
     // Deepest layer the ray penetrates.
-    let mut ndeep = 0i32;
-    for i in 0..n {
-        ndeep = ndeep.max(state.rays.nh[i]);
-    }
-    state.travel.ndeep = ndeep;
+    // Folded from 0 rather than `max().unwrap()`: the Fortran seeds `ndeep = 0`, so a ray
+    // whose layers were all negative would keep the 0. Unreachable, but preserved.
+    state.travel.ndeep = state.rays.nh[..n].iter().copied().fold(0i32, i32::max);
 }
 
 /// `subroutine geometric_spreading(source_depth_km,ray_parameter,ray_type,rp,qb)` — `hb_high_ref.f:3918`.
@@ -249,10 +239,7 @@ pub fn geometric_spreading(
     // Layers above the source layer, skipping the air layer at index 0. 0-based this is
     // `1..nh1`, not `1..=nh1 - 1`: same range, but the first spelling cannot underflow
     // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
-    let mut dep = 0.0f64;
-    for j in 1..nh1 {
-        dep += vmod.thickness_km[j];
-    }
+    let dep: f64 = vmod.thickness_km[1..nh1].iter().sum();
 
     let m = ray_type % 2;
     let th1 = if m == 1 {

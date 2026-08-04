@@ -129,6 +129,10 @@ pub fn horizontal_radiation_spectrum(
     }
 
     let range = 10.0f32;
+    // NOT an iterator chain. Each iteration draws five deviates from the shared stream in
+    // the order th, fa, strX, dipX, rakX, and the sum is a left-to-right f32 fold; a
+    // `map(..).sum()` would preserve both today but invites a later `rayon` or a
+    // reordering that would not. See PORTING_RULES.md §5.
     let mut radv = 0.0f32;
     for _k in 1..=sample_count {
         // Five draws, in this exact order. 9*range*pu is 90 degrees in radians.
@@ -147,16 +151,17 @@ pub fn horizontal_radiation_spectrum(
 
     let radvh = (radv / sample_count as f32).sqrt();
 
-    for i in 0..fold_count {
-        let del = if frequency_hz[i] <= fr1 {
+    for (gain, &freq) in radiation[..fold_count].iter_mut().zip(frequency_hz) {
+        let del = if freq <= fr1 {
             radmin
-        } else if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
-            let d = (frequency_hz[i] / fr1).ln() / (fr2 / fr1).ln();
+        } else if freq <= fr2 {
+            // The Fortran repeats `freq > fr1` here; the else-if already establishes it.
+            let d = (freq / fr1).ln() / (fr2 / fr1).ln();
             if d < radmin { radmin } else { d }
         } else {
             1.0
         };
-        radiation[i] = polarity * (rdx + (radvh - rdx) * del);
+        *gain = polarity * (rdx + (radvh - rdx) * del);
     }
 
     fr1
@@ -213,11 +218,15 @@ pub fn vertical_radiation_spectrum(
         tha2 = 180.0 * pu;
     }
 
+    // The two uniform arrays are consumed in lockstep, one pair per sample. They are
+    // FILLED by two separate sequential passes -- draws 1..nr into `a`, then nr+1..2nr
+    // into `b` -- and that must not become one interleaved pass, or every vertical
+    // component moves. Zipping the consumption is free; zipping the fill is not.
     let mut radv = 0.0f32;
-    for k in 0..sample_count {
+    for (&ua, &ub) in uniform_a[..sample_count].iter().zip(uniform_b) {
         // Uniform in cos(th) between the clamped limits.
-        let th = ((1.0 - uniform_a[k]) * tha1.cos() + uniform_a[k] * tha2.cos()).acos();
-        let fa = 360.0 * pu * uniform_b[k];
+        let th = ((1.0 - ua) * tha1.cos() + ua * tha2.cos()).acos();
+        let fa = 360.0 * pu * ub;
         let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
         let rads = rdsva * th.sin();
         radv += rads.abs();
@@ -225,16 +234,18 @@ pub fn vertical_radiation_spectrum(
 
     let radvh = radv / sample_count as f32 / 2.0;
 
-    for i in 0..fold_count {
-        radiation[i] = rdx;
-        if frequency_hz[i] <= fr1 {
-            continue;
-        }
-        if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
-            radiation[i] += (radvh - rdx) * (frequency_hz[i] - fr1) / (fr2 - fr1);
+    // Below `fr1` the theoretical pattern, above `fr2` the conical average, and a linear
+    // blend between. The Fortran writes `rdx` first and then overwrites or adds to it,
+    // which reads as three branches only once you notice the fall-through; written as
+    // one expression per bin it is visibly a piecewise function.
+    for (gain, &freq) in radiation[..fold_count].iter_mut().zip(frequency_hz) {
+        *gain = if freq <= fr1 {
+            rdx
+        } else if freq <= fr2 {
+            rdx + (radvh - rdx) * (freq - fr1) / (fr2 - fr1)
         } else {
-            radiation[i] = radvh;
-        }
+            radvh
+        };
     }
 
     fr1

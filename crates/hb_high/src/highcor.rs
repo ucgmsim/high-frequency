@@ -43,23 +43,26 @@ pub fn apply_radiation_and_invert(
     // `np2` was a separate argument and is the spectrum's length at every call site.
     let np2 = spectrum.len();
 
-    // 0-based since §2.3. Every index below is the Fortran's minus one; the loop bounds
-    // moved with them rather than a `- 1` being sprinkled at each access, since a
-    // half-converted expression is the thing that hides an off-by-one.
-
-    // Positive frequencies, signed radiation pattern (sign preserved since
-    // 2004-12-21; the older code took abs()).
-    for i in 0..fold_count {
-        spectrum[i] *= radiation[i];
+    // Positive frequencies, signed radiation pattern (sign preserved since 2004-12-21;
+    // the older code took abs()).
+    for (bin, &gain) in spectrum[..fold_count].iter_mut().zip(radiation) {
+        *bin *= gain;
     }
 
-    // Negative-frequency half, mirrored about `fold_count`. The Fortran computes
-    // `mm = 2*fold_count - i` from its 1-based `i`; with `j = i - 1` that is
-    // `2*fold_count - j - 2` 0-based. Checked against np2 = 16, fold_count = 9:
-    // Fortran i = 10 takes radiation(8), storage element 7; here j = 9 gives
-    // 18 - 9 - 2 = 7.
-    for j in fold_count..fold_count + mirror_count {
-        spectrum[j] *= radiation[2 * fold_count - j - 2];
+    // Negative-frequency half, mirrored about `fold_count`.
+    //
+    // The Fortran indexes this as `radiation(2*fold_count - i)`, which 0-based is
+    // `radiation[2*fold_count - j - 2]` -- an expression that needed a worked example on
+    // np2 = 16 to be believable. It is just the radiation array walked BACKWARDS: as `j`
+    // runs `fold_count ..< fold_count + mirror_count`, the index runs `fold_count - 2`
+    // down to `fold_count - mirror_count - 1`, which for the fixed
+    // `mirror_count = fold_count - 2` is `fold_count - 2` down to `1`. A reversed zip
+    // says that, and cannot be off by one.
+    let mirror = &radiation[1..fold_count - 1];
+    debug_assert_eq!(mirror.len(), mirror_count, "mirror_count is fold_count - 2");
+    for (bin, &gain) in spectrum[fold_count..][..mirror_count].iter_mut().zip(mirror.iter().rev())
+    {
+        *bin *= gain;
     }
 
     inverse(spectrum);
@@ -71,12 +74,13 @@ pub fn apply_radiation_and_invert(
 
     // Raised-cosine taper over the final np2/10 samples. The original's `dd` used
     // 3.14159625, a transposition of pi's digits; see the note above.
+    //
+    // The taper runs over the LAST `n0` samples, so the slice says which samples and the
+    // enumeration says how far into the taper each one is. `i + 1` keeps the Fortran's
+    // 1-based step number, which is what makes the final sample land on `cos(pi)`.
     let n0 = np2 / 10;
     let dd = std::f32::consts::PI / (n0 as f32);
-    for i in 1..=n0 {
-        let arg = 0.5 * (1.0 + (i as f32 * dd).cos());
-        // Fortran writes time_series(np2 - n0 + i) for i = 1..=n0, i.e. the last n0
-        // samples; 0-based that is index np2 - n0 + i - 1.
-        time_series[np2 - n0 + i - 1] *= arg;
+    for (i, sample) in time_series[np2 - n0..np2].iter_mut().enumerate() {
+        *sample *= 0.5 * (1.0 + ((i + 1) as f32 * dd).cos());
     }
 }
