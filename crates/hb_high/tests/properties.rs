@@ -496,7 +496,7 @@ proptest! {
     fn uniform_deviates_lie_in_the_unit_interval(seed in any::<i32>(), count in 1usize..2048) {
         let (mut rng, _) = Pcg32::seed(seed);
         let mut out = Array1::<f32>::new(count);
-        fill_uniform_deviates(&mut rng, count, &mut out);
+        fill_uniform_deviates(&mut rng, count, out.as_mut_slice());
         for i in 1..=count {
             prop_assert!((0.0..1.0).contains(&out[i]), "deviate {i} = {}", out[i]);
         }
@@ -512,7 +512,7 @@ proptest! {
         let count = 1usize << exponent;
         let (mut rng, _) = Pcg32::seed(seed);
         let mut out = Array1::<f32>::new(count);
-        fill_normal_deviates(&mut rng, count, &mut out);
+        fill_normal_deviates(&mut rng, count, out.as_mut_slice());
 
         let mean_square =
             (1..=count).map(|i| (out[i] as f64) * (out[i] as f64)).sum::<f64>() / count as f64;

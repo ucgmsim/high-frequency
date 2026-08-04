@@ -211,8 +211,8 @@ pub fn simulate(
     // the other 99.6% of each array was reserved, zeroed and never touched.
     let mut radv_rand_a = Array1::<f32>::new(nr);
     let mut radv_rand_b = Array1::<f32>::new(nr);
-    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_a);
-    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_b);
+    fill_uniform_deviates(&mut rng, nr, radv_rand_a.as_mut_slice());
+    fill_uniform_deviates(&mut rng, nr, radv_rand_b.as_mut_slice());
 
     let mut vmod = VelocityModel::new();
     // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
@@ -245,7 +245,7 @@ pub fn simulate(
 
     if config.draws_normal_deviates() {
         // mmv deviates, not np2: this is the full 262144 under VERSION1.
-        fill_normal_deviates(&mut rng, MMV, &mut normal_deviates);
+        fill_normal_deviates(&mut rng, MMV, normal_deviates.as_mut_slice());
     }
 
     for iv in 0..nevnt {

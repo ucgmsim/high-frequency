@@ -188,12 +188,12 @@ fn bench_rng(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("normal", n), &n, |b, &n| {
             let (mut g, _) = Pcg32::seed(1);
             let mut acc = Array1::<f32>::new(n);
-            b.iter(|| fill_normal_deviates(&mut g, black_box(n), &mut acc))
+            b.iter(|| fill_normal_deviates(&mut g, black_box(n), acc.as_mut_slice()))
         });
         group.bench_with_input(BenchmarkId::new("uniform_deviates", n), &n, |b, &n| {
             let (mut g, _) = Pcg32::seed(1);
             let mut rn = Array1::<f32>::new(n);
-            b.iter(|| fill_uniform_deviates(&mut g, black_box(n), &mut rn))
+            b.iter(|| fill_uniform_deviates(&mut g, black_box(n), rn.as_mut_slice()))
         });
     }
     group.finish();
@@ -244,8 +244,8 @@ fn bench_radiation(c: &mut Criterion) {
     let (mut g, _) = Pcg32::seed(3);
     let mut rna = Array1::<f32>::new(NR);
     let mut rnb = Array1::<f32>::new(NR);
-    fill_uniform_deviates(&mut g, NR, &mut rna);
-    fill_uniform_deviates(&mut g, NR, &mut rnb);
+    fill_uniform_deviates(&mut g, NR, rna.as_mut_slice());
+    fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
     group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
         b.iter(|| {
             vertical_radiation_spectrum(1.2, 0.9, -0.4, 2.1, 2.6, &dfr, nfold, &rna, &rnb, NR, &mut rdna)

@@ -92,7 +92,7 @@ fn ranu2_matches_fortran() {
         let want = read_f32s(&format!("ranu2_{seed}.bin"));
         let (mut g, _) = Pcg32::seed(seed);
         let mut rn = Array1::<f32>::new(want.len());
-        fill_uniform_deviates(&mut g, want.len(), &mut rn);
+        fill_uniform_deviates(&mut g, want.len(), rn.as_mut_slice());
         assert_f32_bit_identical(
             &format!("uniform_deviates seed {seed}"),
             rn.as_slice(),
@@ -110,7 +110,7 @@ fn normal_random_number_matches_fortran() {
         assert_eq!(want.len(), n);
         let (mut g, _) = Pcg32::seed(123456789);
         let mut acc = Array1::<f32>::new(n);
-        fill_normal_deviates(&mut g, n, &mut acc);
+        fill_normal_deviates(&mut g, n, acc.as_mut_slice());
         assert_f32_bit_identical(&format!("normal nr={n}"), acc.as_slice(), &want);
     }
 }

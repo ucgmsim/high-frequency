@@ -171,7 +171,7 @@ pub fn stochastic_spectrum(
     }
 
     let mut a = Array1::<f32>::new(np2);
-    fill_normal_deviates(rng, np2, &mut a);
+    fill_normal_deviates(rng, np2, a.as_mut_slice());
     remove_quadratic_trend(dt, a.as_mut_slice());
 
     let mut ac = Array1::<Complex32>::filled(np2, Complex32::ZERO);

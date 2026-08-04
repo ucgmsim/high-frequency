@@ -9,7 +9,6 @@
 //! *number* of draws each routine consumes matters as much as their values.
 //! See `PORTING_RULES.md` §5 on iteration order.
 
-use crate::fort::Array1;
 
 const PCG_MULT: u64 = 6364136223846793005;
 const PCG_INC_DEFAULT: u64 = 1442695040888963407;
@@ -91,7 +90,14 @@ impl Pcg32 {
 /// Draw accounting, which the shared stream depends on: `2*ceil(count/2)` draws
 /// plus one extra per rejected zero. When `count` is odd the sine partner of the
 /// final pair is generated and discarded.
-pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>) {
+pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
+    // `count` is the DRAW count and stays an explicit argument, deliberately not
+    // inferred from `out.len()`. The number of deviates drawn is part of the RNG
+    // stream -- every later draw depends on where the generator ended up -- so it is a
+    // numerical decision, not a buffer property. Inferring it would mean a future
+    // resize of the buffer silently moved every waveform, which is the §2.6b trap in a
+    // new costume. Asserted rather than assumed:
+    assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
     // x1 and x2 persist across iterations: the odd-numbered draw computes the
     // pair and returns the cosine component, the even-numbered one returns the
     // sine component from the *same* pair. In the Fortran they are ordinary
@@ -101,7 +107,7 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>
     // The original's computed `goto (1,2),j`.
     let mut j = 1;
 
-    for n in 1..=count {
+    for n in 0..count {
         let w = if j == 1 {
             x1 = rng.next_f32();
             while x1 == 0.0 {
@@ -124,20 +130,22 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>
     }
 
     let mut s = 0.0f32;
-    for i in 1..=count {
+    for i in 0..count {
         s += out[i] * out[i];
     }
     // count is promoted to real*4 for the division, and the sqrt is single
     // precision. Do not compute this in f64.
     s = (count as f32 / s).sqrt();
-    for i in 1..=count {
+    for i in 0..count {
         out[i] *= s;
     }
 }
 
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
-pub fn fill_uniform_deviates(rng: &mut Pcg32, count: usize, out: &mut Array1<f32>) {
-    for i in 1..=count {
+pub fn fill_uniform_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
+    // Explicit `count` for the same reason as `fill_normal_deviates`.
+    assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
+    for i in 0..count {
         out[i] = rng.next_f32();
     }
 }
@@ -169,9 +177,9 @@ mod tests {
     fn normal_random_number_has_unit_rms() {
         let (mut g, _) = Pcg32::seed(42);
         for nr in [1usize, 2, 3, 15, 16, 1000] {
-            let mut a = Array1::<f32>::new(nr);
+            let mut a = vec![0.0f32; nr];
             fill_normal_deviates(&mut g, nr, &mut a);
-            let ss: f32 = (1..=nr).map(|i| a[i] * a[i]).sum();
+            let ss: f32 = a.iter().map(|v| v * v).sum();
             // Renormalised so sum of squares == nr, to f32 rounding.
             assert!((ss / nr as f32 - 1.0).abs() < 1e-4,
                     "nr={nr}: sum of squares {ss} != {nr}");
@@ -185,7 +193,7 @@ mod tests {
         // routine: the stream position must match.
         for nr in [1usize, 2, 3, 4, 7, 8] {
             let (mut a, _) = Pcg32::seed(7);
-            let mut acc = Array1::<f32>::new(nr);
+            let mut acc = vec![0.0f32; nr];
             fill_normal_deviates(&mut a, nr, &mut acc);
 
             let (mut b, _) = Pcg32::seed(7);
