@@ -99,8 +99,7 @@ pub fn simulate(
     j0_in: usize,
     station: crate::input::Station,
 ) -> Result<Simulation, SimError> {
-    let pu = 3.1415926f32 / 180.0;
-    let pai = 3.1415926f32;
+    let (pu, pai) = (crate::config::PU, crate::config::PAI);
 
     let tw_eps = 0.2f32; // 0.4 first, then 0.2
     let tw_eta = 0.05f32;

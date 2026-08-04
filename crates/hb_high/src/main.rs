@@ -14,7 +14,7 @@
 use std::io::Write;
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
+    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, PU,
 };
 use hb_high::deck::ListReader;
 use hb_high::input::{read_stations, read_stoch, read_velocity_model};
@@ -230,12 +230,6 @@ fn main() -> std::process::ExitCode {
         }
     }
 }
-
-/// Degrees to radians, and pi, exactly as the Fortran spells them at `:150`.
-///
-/// `read_stoch` needs the same constant the original used, so it is passed in
-/// rather than taken from `std::f32::consts`.
-const PU: f32 = 3.1415926f32 / 180.0;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdin = String::new();

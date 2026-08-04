@@ -11,9 +11,10 @@
 //! feature.
 //!
 //! This module is the replacement: named fields, enums instead of magic integers,
-//! and `Option` instead of out-of-band sentinel values. `deck::to_config` remains
-//! the bridge from the old format, because the parity gate drives the binary with
-//! decks and that is the only remaining tie to the Fortran oracle.
+//! and `Option` instead of out-of-band sentinel values. `read_deck` in the binary
+//! remains the bridge from the old format, because the parity gate drives that
+//! binary with generated decks and it is the only remaining tie to the Fortran
+//! oracle.
 //!
 //! # Sentinels become `Option`
 //!
@@ -21,6 +22,16 @@
 //! negative, which is the sort of distinction that is invisible at a call site and
 //! obvious in a type. Each such field is an `Option` here, with an accessor that
 //! resolves it, so the resolved value is computed in exactly one place.
+
+/// The Fortran's pi, spelled exactly as it appears at `hb_high_ref.f:150`.
+///
+/// **Not** `std::f32::consts::PI`, which differs in the last bits. Both the slip
+/// model reader and the simulation convert degrees with this, so it lives in one
+/// place to keep them from drifting.
+pub const PAI: f32 = 3.1415926;
+
+/// Degrees to radians.
+pub const PU: f32 = PAI / 180.0;
 
 /// Built-in defaults for the fields the deck can leave unset.
 ///
