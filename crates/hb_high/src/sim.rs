@@ -45,7 +45,6 @@ use crate::stoc::stochastic_spectrum;
 /// 262144 — not the 32769/180000 that every subroutine gets from `params.h`.
 /// This matters here because `ndata` is clamped to `mmv` and
 /// `fill_normal_deviates(mmv, ...)` draws exactly this many deviates.
-const MM: usize = params::MM;
 const MMV: usize = params::MMV;
 
 /// One station's synthetic record.
@@ -68,10 +67,6 @@ pub struct Simulation {
 /// Why a simulation could not be produced.
 #[derive(Debug)]
 pub enum SimError {
-    /// The transform length the fault needs exceeds the compiled array bound. The
-    /// Fortran prints two lines and jumps to `9555`, which exits *without* closing
-    /// the output unit — so it is a clean exit having written nothing, not a crash.
-    TransformTooLong { np2: usize, mm: usize },
     /// Segment dimensions disagree, which the Fortran refuses.
     InconsistentSegments(String),
 }
@@ -79,11 +74,6 @@ pub enum SimError {
 impl std::fmt::Display for SimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SimError::TransformTooLong { np2, mm } => write!(
-                f,
-                "np2= {np2} > array dimension mm= {mm}\nneed to recompile with larger \
-                 array size, exiting..."
-            ),
             SimError::InconsistentSegments(m) => write!(f, "{m}"),
         }
     }
@@ -205,10 +195,11 @@ pub fn simulate(
     let moment_scale = sm / (subevent_moment * (1.0 * nstot as f32).sqrt());
 
     // ------------------------------------------------------------ stations ---
-    let ndata = {
-        let n = (duration / dt) as i32 as usize;
-        n.min(MMV)
-    };
+    // No ceiling. The Fortran clamped this to `mmv`, which SILENTLY TRUNCATED a record
+    // longer than the compiled array rather than reporting anything -- arguably worse
+    // than the `np2 > mm` abort below it, which at least said something. Both are gone;
+    // the buffers are sized from the deck.
+    let ndata = (duration / dt) as i32 as usize;
 
     let (mut rng, irand_after) = Pcg32::seed(irand);
     // init_random_seed mutates its argument, and the mutated value gates the
@@ -322,14 +313,6 @@ pub fn simulate(
         while np2 < ntmax {
             np2 *= 2;
         }
-        if np2 > MM {
-            // `go to 9555` in the original: it prints and exits WITHOUT closing the
-            // output unit, i.e. a clean exit having written nothing for this station.
-            // The driver reproduces that from this error rather than doing it here,
-            // because "print and exit successfully" is a driver decision.
-            return Err(SimError::TransformTooLong { np2, mm: MM });
-        }
-
         let nfold = np2 / 2 + 1;
         let mfold = np2 / 2 - 1;
         // Sized from `np2` and allocated here rather than at `mm` before the loop:

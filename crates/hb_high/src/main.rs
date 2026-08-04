@@ -18,7 +18,7 @@ use hb_high::config::{
 };
 use hb_high::deck::ListReader;
 use hb_high::input::{read_stations, read_stoch, read_velocity_model};
-use hb_high::sim::{simulate, SimError};
+use hb_high::sim::simulate;
 use hb_high::state::VelocityModelInput;
 
 
@@ -306,17 +306,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stderr = std::io::stderr();
     for station in stations {
-        let sim = match simulate(&config, &slip, &vmod_in, j0, station) {
-            Ok(sim) => sim,
-            // The Fortran prints and jumps to 9555, exiting WITHOUT closing the
-            // output unit: a clean exit having written nothing. Reproduced here,
-            // including the exit status, because the parity gate compares both.
-            Err(e @ SimError::TransformTooLong { .. }) => {
-                eprintln!("{e}");
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        };
+        // The Fortran's "np2 > mm, need to recompile with larger array size" exit is
+        // gone: §2.6b sizes the buffers from the deck, so there is no compiled ceiling
+        // left to exceed.
+        let sim = simulate(&config, &slip, &vmod_in, j0, station)?;
 
         let mut bytes = Vec::with_capacity(sim.acc.len() * 4);
         for v in &sim.acc {

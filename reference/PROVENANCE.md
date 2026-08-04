@@ -67,6 +67,36 @@ multiplication by a real factor or an explicit conjugate-symmetric mirror, so
 the flip is expected to cancel and leave the real part of the output unchanged
 to within rounding. `harness/ab_fft.sh` measures this rather than assuming it.
 
+## Deliberate improvements over the original
+
+Distinct from the two divergences above, which exist to make bit-identity *achievable*.
+These are places where Stage 2 concluded the original is wrong and the port should not
+follow it. Each changes behaviour on inputs the original mishandled, and none affects the
+production configuration.
+
+### The record-length ceiling, and the silent truncation behind it
+
+The Fortran carries two compiled limits on record length:
+
+- `np2 > mm` prints `need to recompile with larger array size` and exits.
+- `ndata` is **clamped** to `mmv = 262144` with no message at all.
+
+The second is the worse of the two, and it is not hypothetical. Given a 1600 s record at
+`dt = 0.005` — `ndata = 320000` — measured behaviour:
+
+| | samples written | exit |
+| --- | --- | --- |
+| `hb_ref` (oracle) | **262144, silently truncated** | 0 |
+| this port, from §2.6b | 320000 | 0 |
+
+The oracle produces a short file and reports success. Nothing downstream is told the
+record was cut, and `hf_sim.py` does not check the length it got back.
+
+`REFACTOR.md` §2.6b sizes the buffers from the deck, so both limits are gone rather than
+raised — there is no compiled ceiling left to exceed. Verified bit-identical on all 22
+parity decks, none of which reaches either limit, so this changes nothing for production
+and fixes a data-loss bug outside it.
+
 ## Reference build flags
 
 ```
