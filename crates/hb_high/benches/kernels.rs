@@ -22,7 +22,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::hint::black_box;
 
 use hb_high::fft::{fast, flzero};
-use hb_high::fort::{Array1, Array2, Complex32, Complex64};
+use hb_high::fort::{Array1, Complex32, Complex64};
 use hb_high::geom::even_dist2;
 use hb_high::highcor::highcor_f;
 use hb_high::radiation::{radfrq_lin, radv_lin, rdatn};
@@ -400,17 +400,17 @@ fn bench_geom(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("even_dist2", format!("{nx}x{nw}")),
             &(nx, nw),
+            // `even_dist2` now allocates its five (nq, np) arrays itself and returns
+            // them, so this timing INCLUDES ~1.2 MB of allocation per call where it
+            // previously hoisted them out of the loop. That is the honest number:
+            // the driver allocates per segment too, so the old form was
+            // under-measuring real use. Expect a step change against baselines
+            // recorded before this.
             |b, &(nx, nw)| {
-                let mut rl = Array2::<f32>::new(params::NQ, params::NP);
-                let mut ph = Array2::<f32>::new(params::NQ, params::NP);
-                let mut th = Array2::<f32>::new(params::NQ, params::NP);
-                let mut dst = Array2::<f32>::new(params::NQ, params::NP);
-                let mut zet = Array2::<f32>::new(params::NQ, params::NP);
                 b.iter(|| {
                     even_dist2(
                         173.0, -43.0, 173.1, -43.0, 220.0, 70.0, 5.0,
                         0.5 * nx as f32 * 1.5, 1.5, 1.5, nx, nw,
-                        &mut rl, &mut ph, &mut th, &mut dst, &mut zet,
                     )
                 })
             },

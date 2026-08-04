@@ -30,7 +30,7 @@ use hb_high::stoc::stoc_f;
 /// Under `VERSION1` the main program includes `params_no_window.h`, so both are
 /// 262144 — not the 32769/180000 that every subroutine gets from `params.h`.
 /// This matters here because `ndata` is clamped to `mmv` and
-/// `normal_random_number(mmv, fgrand)` draws exactly this many deviates.
+/// `normal_random_number(mmv, normal_deviates)` draws exactly this many deviates.
 const MM: usize = params::MM;
 const MMV: usize = params::MMV;
 
@@ -305,7 +305,11 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Read `stdd` column `l` at Fortran index `idx`.
+/// Read one subfault's accumulated trace, component `l`, at Fortran index `idx`,
+/// reproducing the original's out-of-bounds read at `idx == 0`.
+///
+/// Names below are the **Fortran's** (`stdd`), not this port's, because the whole
+/// point of the function is to model what the original does to its own storage.
 ///
 /// The accumulation loop runs `li = k2, kend` and reads `stdd(li-k2, l)`, so the
 /// first iteration reads **index 0** — one before the column. `highcor_f` fills
@@ -318,13 +322,14 @@ fn main() -> std::process::ExitCode {
 ///
 /// The observable effect is that each subfault's contribution is delayed one
 /// sample: `DS(l,k2)` gets nothing and `DS(l,k2+1)` gets `stdd(1)`.
-/// See `PORTING_RULES.md` §7.
+/// See `PORTING_RULES.md` §7 — and `REFACTOR.md` §2.6, which asks whether this
+/// bug should be kept for production compatibility or fixed.
 #[inline]
-fn stdd_at(stdd: &[Array1<f32>; 3], l: usize, idx: usize) -> f32 {
+fn subfault_acc_at(subfault_acc: &[Array1<f32>; 3], l: usize, idx: usize) -> f32 {
     if idx == 0 {
         0.0
     } else {
-        stdd[l - 1][idx]
+        subfault_acc[l - 1][idx]
     }
 }
 
@@ -356,9 +361,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70,
         1.00, 2.00, 3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let mut fn_ = Array1::<f32>::new(params::NLAYMAX);
+    let mut siteamp_log_freq = Array1::<f32>::new(params::NLAYMAX);
     for i in 1..=nsfac {
-        fn_[i] = fn_hz[i - 1].ln();
+        siteamp_log_freq[i] = fn_hz[i - 1].ln();
     }
 
     // ---------------------------------------------------------------- deck ---
@@ -452,17 +457,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     stress_average *= spar_fac;
 
     // Seismic moment of the subevent, from the average stress on the fault.
-    let smoe = stress_average * dlm * dlm * dlm * 1.0e+21;
+    let subevent_moment = stress_average * dlm * dlm * dlm * 1.0e+21;
     // nsum is computed from `ratio` and then forced to 1 (2004-04-20), which is
     // why the Frankel operator in stoc_f carries the scaling instead.
     let nsum = 1usize;
-    let bigc1 = sm / (smoe * (nstot * nsum) as f32);
-    let bigc1b = sm / (smoe * (1.0 * nstot as f32).sqrt());
-    let bigc2 = ((2.0 / 3.0) * (sm / smoe).ln()).exp();
-    let bigc3 = (fce_avg / fcmain) * (fce_avg / fcmain);
-    // Assigned five times; the last one wins.
-    let _ = (bigc1, bigc2, bigc3);
-    let bigc = bigc1b;
+
+    // The Fortran computes four candidate moment scalings in a row and lets the
+    // last assignment win, leaving the other three as documentation of what was
+    // tried. Reproduced with the names attached to their formulae rather than to
+    // their order, and only the surviving one bound.
+    //
+    //   by_count      sm / (subevent_moment * nstot)          -- linear in subfault count
+    //   by_sqrt_count sm / (subevent_moment * sqrt(nstot))    -- THE LIVE ONE
+    //   by_two_thirds (sm/subevent_moment)^(2/3)
+    //   by_corner_sq  (fce_avg / fcmain)^2
+    //
+    // `1.0 *` in by_sqrt_count is the Fortran's, and it matters: it forces the
+    // integer nstot through a real multiply before the sqrt.
+    let _by_count = sm / (subevent_moment * (nstot * nsum) as f32);
+    let _by_two_thirds = ((2.0 / 3.0) * (sm / subevent_moment).ln()).exp();
+    let _by_corner_sq = (fce_avg / fcmain) * (fce_avg / fcmain);
+    let moment_scale = sm / (subevent_moment * (1.0 * nstot as f32).sqrt());
 
     // ------------------------------------------------------------ stations ---
     let ndata = {
@@ -476,10 +491,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // rupture-time jitter below.
     irand = irand_after;
 
-    let mut rna = Array1::<f32>::new(MMV);
-    let mut rnb = Array1::<f32>::new(MMV);
-    ranu2(&mut rng, nr, &mut rna);
-    ranu2(&mut rng, nr, &mut rnb);
+    let mut radv_rand_a = Array1::<f32>::new(MMV);
+    let mut radv_rand_b = Array1::<f32>::new(MMV);
+    ranu2(&mut rng, nr, &mut radv_rand_a);
+    ranu2(&mut rng, nr, &mut radv_rand_b);
 
     let station_text = std::fs::read_to_string(&asite)
         .map_err(|e| format!("opening station file {asite}: {e}"))?;
@@ -498,16 +513,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::io::Seek::seek(&mut out, std::io::SeekFrom::Start(seek_bytes as u64))?;
 
     let mut vmod = Vmod::new();
-    let mut ds = Array2::<f32>::new(3, MMV);
-    let mut fgrand = Array1::<f32>::new(MMV);
-    let mut dfr = Array1::<f32>::new(MM);
-    let mut rdna = Array1::<f32>::new(MM);
-    let mut an = Array1::<f32>::new(params::NLAYMAX);
+    let mut acc = Array2::<f32>::new(3, MMV);
+    let mut normal_deviates = Array1::<f32>::new(MMV);
+    let mut freq = Array1::<f32>::new(MM);
+    let mut radiation = Array1::<f32>::new(MM);
+    let mut siteamp_factors = Array1::<f32>::new(params::NLAYMAX);
     let mut stderr = std::io::stderr();
 
     for station in &stations {
         let mut d10 = 1000.0f32;
-        ds.fill(0.0);
+        acc.fill(0.0);
 
         if nlskip >= 0 {
             unreachable!("grandvel is dead under the production deck (nl_skip < 0)");
@@ -525,7 +540,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         if fasig1 > 0.0 || fasig2 > 0.0 || rvsig1 > 0.0 {
             // mmv deviates, not np2: this is the full 262144 under VERSION1.
-            normal_random_number(&mut rng, MMV, &mut fgrand);
+            normal_random_number(&mut rng, MMV, &mut normal_deviates);
         }
 
         for iv in 0..nevnt {
@@ -545,7 +560,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Re-initialised per segment, which is why the stderr distance below
             // reports only the last segment. Reproduced.
             d10 = 10000.0;
-            let mut twin = Array2::<f32>::new(params::NQ, params::NP);
+            let mut window_s = Array2::<f32>::new(params::NQ, params::NP);
             let mut bet = 0.0f32;
             // Depth-major: j slowest. The subfault pass below goes the other way.
             for (i, j) in seg.depth_major() {
@@ -559,7 +574,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                 let rvf = rv.factor(geom.depth_km[(i, j)]);
                 let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
-                let zz = czero * (1.0 + fcfac) / alphat;
+                let fc_coeff = czero * (1.0 + fcfac) / alphat;
 
                 // Path duration bin. Strict `>` means r0/d0/slp stay unset
                 // if rlsu is exactly rdur(1) = 0.0; zero here rather than
@@ -575,15 +590,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let fce = zz * rvf * bet / (dlm * pai);
+                let fce = fc_coeff * rvf * bet / (dlm * pai);
                 let tw0 = 1.0 / fce;
-                let tw0 = bigc.sqrt() * tw0;
+                let tw0 = moment_scale.sqrt() * tw0;
                 let dpath = d0 + slp * (geom.slant_km[(i, j)] - r0);
                 // VERSION1: no 81.92 s cap.
-                twin[(i, j)] = 2.12 * (tw0 + dpath);
+                window_s[(i, j)] = 2.12 * (tw0 + dpath);
 
-                if twin[(i, j)] > tmax {
-                    tmax = twin[(i, j)];
+                if window_s[(i, j)] > tmax {
+                    tmax = window_s[(i, j)];
                 }
                 d10 = d10.min(geom.slant_km[(i, j)]);
             }
@@ -604,15 +619,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mfold = np2 / 2 - 1;
             let df = 1.0 / (np2 as f32 * dt);
             for i in 1..=nfold {
-                dfr[i] = df * (i - 1) as f32;
+                freq[i] = df * (i - 1) as f32;
             }
 
-            let mut cs: [Array1<Complex32>; 3] = [
+            let mut spectrum: [Array1<Complex32>; 3] = [
                 Array1::filled(np2, Complex32::ZERO),
                 Array1::filled(np2, Complex32::ZERO),
                 Array1::filled(np2, Complex32::ZERO),
             ];
-            let mut stdd: [Array1<f32>; 3] = [
+            let mut subfault_acc: [Array1<f32>; 3] = [
                 Array1::new(np2), Array1::new(np2), Array1::new(np2),
             ];
             let mut ray = RayState::default();
@@ -627,9 +642,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 for il in 1..=np2 {
-                    stdd[0][il] = 0.0;
-                    stdd[1][il] = 0.0;
-                    stdd[2][il] = 0.0;
+                    subfault_acc[0][il] = 0.0;
+                    subfault_acc[1][il] = 0.0;
+                    subfault_acc[2][il] = 0.0;
                 }
 
                 // This pass DOES default bet/ro before the lookup.
@@ -654,15 +669,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let mut rvf = rvf0;
                 if rvsig1 > 0.0 {
                     irandcnt += 1;
-                    rvf = rvf0 * (fgrand[irandcnt] * rvsig1).exp();
+                    rvf = rvf0 * (normal_deviates[irandcnt] * rvsig1).exp();
                     if rvf > rvfmax {
                         rvf = rvfmax;
                     }
                 }
 
                 let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
-                let zz = czero * (1.0 + fcfac) / alphat;
-                let fce = zz * rvf * bet / dlm / pai;
+                let fc_coeff = czero * (1.0 + fcfac) / alphat;
+                let fce = fc_coeff * rvf * bet / dlm / pai;
                 let rise = seg.rist[(i, j)];
 
                 let mode = 4; // hardwired SH
@@ -679,7 +694,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let mut stime = g.stime;
                     let mut rpath = g.rpath;
                     let mut qbar = g.qbar;
-                    let mut sub_tstart = stime - tw_eps * twin[(i, j)];
+                    let mut sub_tstart = stime - tw_eps * window_s[(i, j)];
 
                     if kind == RayKind::StraightRay {
                         rpath = geom.slant_km[(i, j)];
@@ -688,7 +703,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         sub_tstart = 0.7 * stime;
                     }
 
-                    let tw = twin[(i, j)];
+                    let tw = window_s[(i, j)];
                     for kf in 1..=3 {
                         let mut fmx1 = fmx;
                         if fmx1 > 15.0 && kf == 3 {
@@ -696,15 +711,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         stoc_f(
                             &mut rng, np2, rpath, tw, tw_eps, tw_eta, bet, ro, dt,
-                            smoe, dlm, fce, fmx1, akapp,
-                            &mut cs[kf - 1], &dfr, qbar, qfexp, bigc,
+                            subevent_moment, dlm, fce, fmx1, akapp,
+                            &mut spectrum[kf - 1], &freq, qbar, qfexp, moment_scale,
                         );
                     }
 
                     if isite_amp != 0 {
-                        get_sitefacs(&vmod, ksrc, nsfac, &fn_, &mut an);
+                        get_sitefacs(&vmod, ksrc, nsfac, &siteamp_log_freq, &mut siteamp_factors);
                         for k in 0..3 {
-                            siteamp(np2, &mut cs[k], &dfr, nsfac, &fn_, &an);
+                            siteamp(np2, &mut spectrum[k], &freq, nsfac, &siteamp_log_freq, &siteamp_factors);
                         }
                     }
                     // famprand is dead: fasig1 = fasig2 = 0.
@@ -724,15 +739,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let pa = geom.azimuth_rad[(i, j)];
 
                     let cmp = -90.0 * pu;
-                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
-                    highcor_f(nfold, mfold, np2, &mut cs[0], &mut stdd[0], &rdna);
+                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
+                    highcor_f(nfold, mfold, np2, &mut spectrum[0], &mut subfault_acc[0], &radiation);
 
                     let cmp = 0.0f32;
-                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
-                    highcor_f(nfold, mfold, np2, &mut cs[1], &mut stdd[1], &rdna);
+                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
+                    highcor_f(nfold, mfold, np2, &mut spectrum[1], &mut subfault_acc[1], &radiation);
 
-                    radv_lin(stra, dipa, raka, pa, th, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
-                    highcor_f(nfold, mfold, np2, &mut cs[2], &mut stdd[2], &rdna);
+                    radv_lin(stra, dipa, raka, pa, th, &freq, nfold, &radv_rand_a, &radv_rand_b, nr, &mut radiation);
+                    highcor_f(nfold, mfold, np2, &mut spectrum[2], &mut subfault_acc[2], &radiation);
 
                     // Rupture time at this subfault.
                     let mut ratim;
@@ -770,9 +785,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if li >= 1 {
                                 let idx = (li - k2) as usize;
                                 let lu = li as usize;
-                                ds[(1, lu)] += sd * stdd_at(&stdd, 1, idx);
-                                ds[(2, lu)] += sd * stdd_at(&stdd, 2, idx);
-                                ds[(3, lu)] += sd * stdd_at(&stdd, 3, idx);
+                                acc[(1, lu)] += sd * subfault_acc_at(&subfault_acc, 1, idx);
+                                acc[(2, lu)] += sd * subfault_acc_at(&subfault_acc, 2, idx);
+                                acc[(3, lu)] += sd * subfault_acc_at(&subfault_acc, 3, idx);
                             }
                             li += 1;
                         }
@@ -790,7 +805,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut amx = [0.0f32; 3];
         for i in 1..=ndata {
             for l in 0..3 {
-                amx[l] = amx[l].max(ds[(l + 1, i)].abs());
+                amx[l] = amx[l].max(acc[(l + 1, i)].abs());
             }
         }
         let _ = amx;
@@ -800,7 +815,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut bytes = Vec::with_capacity(ndata * 3 * 4);
         for i in 1..=ndata {
             for l in 1..=3 {
-                bytes.extend_from_slice(&ds[(l, i)].to_le_bytes());
+                bytes.extend_from_slice(&acc[(l, i)].to_le_bytes());
             }
         }
         out.write_all(&bytes)?;
@@ -842,7 +857,7 @@ struct SourceScale {
 /// 3. re-count only the subfaults above 0.001 and rescale so their mean weight is 1
 ///
 /// The two counts are different and both matter: pass 2's count normalises the
-/// averages, pass 3's is the one that reaches `bigc`. The Fortran shadows one
+/// averages, pass 3's is the one that reaches `moment_scale`. The Fortran shadows one
 /// `nstot` with the other, so only the second survives — hence only that one is
 /// returned.
 #[allow(clippy::too_many_arguments)]
@@ -909,8 +924,8 @@ fn normalise_source(
                 let rvf = rv.factor(zdep);
                 let alphat =
                     alpha_t(stoch.segments[iv].dipq, stoch.segments[iv].rakeq, calpha);
-                let zz = czero * (1.0 + fcfac) / alphat;
-                let mut fce = zz * rvf * bet / (dlm * pai);
+                let fc_coeff = czero * (1.0 + fcfac) / alphat;
+                let mut fce = fc_coeff * rvf * bet / (dlm * pai);
                 let mut trise = stoch.segments[iv].rist[(i, j)];
                 if islip_weight_avg == 1 {
                     fce = stoch.segments[iv].sddp[(i, j)] * fce;
