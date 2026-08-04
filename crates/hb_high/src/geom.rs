@@ -185,12 +185,17 @@ pub fn even_dist2(
     nx: usize,
     nw: usize,
 ) -> SubfaultGeometry {
-    use crate::state::params;
-    let mut rl = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
-    let mut ph = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
-    let mut th = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
-    let mut dst = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
-    let mut zet = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+    // Sized to the actual grid, not to the compile-time maximum. The Fortran
+    // declares these `(nq, np)` = 600x100, i.e. 234 KB each and 1.14 MB for the
+    // five, essentially all of it untouched -- and it allocates them per segment.
+    // Every access below and in every caller is `(i, j)` within `1..=nx`/`1..=nw`,
+    // so the layout is not observable and compacting them changes no arithmetic.
+    // This is the same argument `input::Segment` already makes for sddp/rist/rupt.
+    let mut rl = crate::fort::Array2::<f32>::new(nx, nw);
+    let mut ph = crate::fort::Array2::<f32>::new(nx, nw);
+    let mut th = crate::fort::Array2::<f32>::new(nx, nw);
+    let mut dst = crate::fort::Array2::<f32>::new(nx, nw);
+    let mut zet = crate::fort::Array2::<f32>::new(nx, nw);
 
     let pi = 3.14159265f32;
     let alei = 0.0f32;

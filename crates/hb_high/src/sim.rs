@@ -26,7 +26,7 @@
 //! Python wrapper starts looping over stations.
 
 use crate::config::{
-    HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
+    HfConfig, PathDurationModel, RayKind, StressParamAdjust,
 };
 use crate::fort::{nint, Array1, Array2, Complex32};
 use crate::geom::even_dist2;
@@ -105,7 +105,6 @@ pub fn simulate(
     let tw_eta = 0.05f32;
 
     let nr = 1000usize;
-    let delay = 0.0f32;
     let nsfac = 20usize;
 
     // Site-amplification frequency table, log-transformed in place (:196-218).
@@ -167,8 +166,8 @@ pub fn simulate(
     let rv = config.rupture_velocity.resolve(stoch.zhyp_max);
 
     // ------------------------------------------------ source normalisation ---
-    let SourceScale { dlm, sm, fce_avg, fcmain, nstot } =
-        normalise_source(&mut stoch, j0, &vmod_in, &rv, pu, pai, czero, calpha, fcfac, config.moment);
+    let SourceScale { dlm, sm, nstot } =
+        normalise_source(&mut stoch, j0, &vmod_in, pu, config.moment);
 
     // ---------------------------------------- stress parameter adjustment ----
     let targ_mag = config
@@ -203,9 +202,6 @@ pub fn simulate(
     //
     // `1.0 *` in by_sqrt_count is the Fortran's, and it matters: it forces the
     // integer nstot through a real multiply before the sqrt.
-    let _by_count = sm / (subevent_moment * (nstot * nsum) as f32);
-    let _by_two_thirds = ((2.0 / 3.0) * (sm / subevent_moment).ln()).exp();
-    let _by_corner_sq = (fce_avg / fcmain) * (fce_avg / fcmain);
     let moment_scale = sm / (subevent_moment * (1.0 * nstot as f32).sqrt());
 
     // ------------------------------------------------------------ stations ---
@@ -214,7 +210,6 @@ pub fn simulate(
         n.min(MMV)
     };
 
-    let _ifu = irand;
     let (mut rng, irand_after) = Pcg32::seed(irand);
     // init_random_seed mutates its argument, and the mutated value gates the
     // rupture-time jitter below.
@@ -512,16 +507,9 @@ pub fn simulate(
     // (`ift`) is a driver-level deck field, and it is dead under production. The
     // driver refuses a non-zero value rather than passing it through.
 
-    // Peak amplitudes: computed and, under BINMOD, not written anywhere.
-    let mut amx = [0.0f32; 3];
-    for i in 1..=ndata {
-        for l in 0..3 {
-            amx[l] = amx[l].max(acc[(l + 1, i)].abs());
-        }
-    }
-    let _ = amx;
-    let _ = delay;
-
+    // The Fortran scans all three components for their peak amplitude here. Under
+    // BINMOD nothing writes the result -- the only consumer is the commented-out
+    // `!WRITE(6,*) 'ACC.MAX='` at hb_high_ref.f:1423 -- so the scan is dropped.
     // Interleaved, component fastest: 090/000/ver per time sample.
     let mut out = Vec::with_capacity(ndata * 3);
     for i in 1..=ndata {
@@ -631,10 +619,6 @@ struct SourceScale {
     /// Total seismic moment. Derived from the summed subfault moments when the
     /// deck asked for it with a negative value.
     sm: f32,
-    /// Mean subfault corner frequency, normalised. Feeds `bigc3`.
-    fce_avg: f32,
-    /// Corner frequency of the whole event, from the mean rise time.
-    fcmain: f32,
     /// Count of subfaults whose relative moment exceeds 0.001 — the same
     /// threshold the subfault pass uses to skip a subfault entirely.
     nstot: usize,
@@ -659,37 +643,37 @@ fn normalise_source(
     stoch: &mut StochModel,
     j0: usize,
     vmod_in: &VmodIn,
-    rv: &RuptureVelocityTaper,
     pu: f32,
-    pai: f32,
-    czero: f32,
-    calpha: f32,
-    fcfac: f32,
     moment: Option<f32>,
 ) -> SourceScale {
     let nevnt = stoch.segments.len();
 
-    // --- pass 1: average subfault size, and a max slip that goes nowhere ------
+    // --- pass 1: average subfault size ----------------------------------------
+    // The Fortran also accumulates `slip_max` over every subfault here. Nothing
+    // reads it: its only consumer is the commented-out `!print*,'Maximum slip '`
+    // at hb_high_ref.f:683. Dropped, along with the O(nstot) loop that fed it.
     let mut dlm = 0.0f32;
-    let mut amx2 = 0.0f32;
     for s in &stoch.segments {
         dlm = (s.dx * s.dw).sqrt() + dlm;
-        for (i, j) in s.depth_major() {
-            amx2 = amx2.max(s.sddp[(i, j)].abs());
-        }
     }
-    let _slip_max = amx2;
     dlm /= nevnt as f32;
 
-    // --- pass 2: relative slip to relative moment; average fc and rise time ---
-    // Frozen switch: the Fortran sets this to 1 and then to 0, so 0 wins and both
-    // slip-weighted branches below are unreachable. Kept because collapsing it
-    // bakes in a decision someone once left adjustable -- see REFACTOR.md §2.6.
-    let islip_weight_avg = 0;
-    let mut nstot = 0usize;
+    // --- pass 2: relative slip to relative moment -----------------------------
+    // The Fortran also accumulates `fce_avg` and `trise_avg` in this loop, doing a
+    // rupture-velocity taper, an `alphaT` evaluation (with a sine and a square root)
+    // and four more arithmetic ops PER SUBFAULT. All of it is dead:
+    //
+    //   fce_avg, trise_avg -> fcmain -> bigC3  (hb_high_ref.f:805)
+    //
+    // and `bigC` is assigned five times at :807-811 with `bigC = bigC1b` last, so
+    // bigC3 never survives. Their only other consumers are the commented-out prints
+    // at :684-685 and :817. Dropping them also removes `xnorm`, this pass's own
+    // `nstot` count (which only normalised them), and `islip_weight_avg` -- a frozen
+    // switch whose two branches only ever weighted these dead quantities.
+    //
+    // What remains live: the in-place slip-to-moment conversion, and `xsum`, which
+    // supplies the total moment when the deck asks for it to be derived.
     let mut xsum = 0.0f32;
-    let mut fce_avg = 0.0f32;
-    let mut trise_avg = 0.0f32;
 
     for iv in 0..nevnt {
         let dwdj = stoch.segments[iv].dw * (stoch.segments[iv].dipq * pu).sin();
@@ -701,7 +685,6 @@ fn normalise_source(
             // model, which the Fortran then indexes -- so the fall-through is
             // load-bearing, not an error path.
             let k = (1..=j0).find(|&kk| zdep <= vmod_in.depth0[kk]).unwrap_or(j0 + 1);
-            let bet = vmod_in.vsh0[k] as f32;
             // vsh0 and rho0 are real*8 and dx/dw are real*4, so the WHOLE
             // product is computed in double (dx/dw promoted) and narrows only on
             // assignment to xmu, which is implicit real*4. Narrowing earlier
@@ -714,20 +697,6 @@ fn normalise_source(
                 let v = xmu * stoch.segments[iv].sddp[(i, j)];
                 stoch.segments[iv].sddp[(i, j)] = v;
                 xsum += v;
-
-                let rvf = rv.factor(zdep);
-                let alphat =
-                    alpha_t(stoch.segments[iv].dipq, stoch.segments[iv].rakeq, calpha);
-                let fc_coeff = czero * (1.0 + fcfac) / alphat;
-                let mut fce = fc_coeff * rvf * bet / (dlm * pai);
-                let mut trise = stoch.segments[iv].rist[(i, j)];
-                if islip_weight_avg == 1 {
-                    fce = stoch.segments[iv].sddp[(i, j)] * fce;
-                    trise = stoch.segments[iv].sddp[(i, j)] * trise;
-                }
-                fce_avg += fce;
-                trise_avg += trise;
-                nstot += 1;
             }
         }
     }
@@ -735,12 +704,6 @@ fn normalise_source(
     // `None` means the deck asked for the moment to be derived from the summed
     // subfault moments.
     let sm = moment.unwrap_or(1.0e+20 * xsum);
-    let xnorm = if islip_weight_avg == 1 { 1.0 / xsum } else { 1.0 / nstot as f32 };
-    fce_avg *= xnorm;
-    trise_avg *= xnorm;
-
-    let fcoef = czero / (2.0 * pai);
-    let fcmain = fcoef / trise_avg;
 
     // --- pass 3: normalise relative moments to average weight unity -----------
     let mut wsum = 0.0f32;
@@ -760,7 +723,7 @@ fn normalise_source(
         }
     }
 
-    SourceScale { dlm, sm, fce_avg, fcmain, nstot }
+    SourceScale { dlm, sm, nstot }
 }
 
 /// The `alphaT` corner-frequency adjustment (2013-11-20).
