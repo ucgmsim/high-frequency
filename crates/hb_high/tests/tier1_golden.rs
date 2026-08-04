@@ -13,7 +13,7 @@
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
 use hb_high::geom::subfault_geometry;
-use hb_high::ray::{geometric_spreading, build_ray_path};
+use hb_high::ray::{geometric_spreading, build_ray_path, Takeoff};
 use hb_high::site::site_amplification_factors;
 use hb_high::state::{RayState, VelocityModel};
 
@@ -157,7 +157,7 @@ fn geom_terms_matches_fortran() {
         let w_rp = r.f64();
         let w_qb = r.f32();
 
-        let (rp, qb) = geometric_spreading(&st, &vmod, hs, p0, itype);
+        let (rp, qb) = geometric_spreading(&st, &vmod, hs, p0, Takeoff::from_ray_type(itype));
         let tag = format!("geometric_spreading case {cases} (itype={itype} p0={p0})");
         eq64(&format!("{tag} rp"), rp, w_rp);
         // The single-precision accumulation of qb is exactly what this pins.

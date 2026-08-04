@@ -2,7 +2,7 @@
 //! tiers 2-4.
 
 use crate::fort::Complex64;
-use crate::state::{Direction, Interaction, RayState, VelocityModel, WaveMode};
+use crate::state::{Direction, Interaction, Rays, RayState, VelocityModel, WaveMode};
 
 /// `function vertical_slowness(ray_parameter,velocity_km_s)` — `hb_high_ref.f:3349`. Complex vertical slowness
 /// `eta = sqrt(1/velocity_km_s^2 - ray_parameter^2)`, with an explicit branch-cut choice.
@@ -195,8 +195,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
 /// Returns `(rp, qb)`: total ray path length in km, and the path-integrated
 /// attenuation operator `sum(t_i / Qs_i)`.
 ///
-/// `ray_type` odd means upgoing, even means downgoing/Moho-reflected — the source
-/// comments call this "hardwired to direct and 1 down-going Moho".
+/// Takes only the take-off direction, not the whole `itype`: the parity is the only
+/// thing it ever read. The source comments call this "hardwired to direct and 1
+/// down-going Moho".
 ///
 /// # Precision
 ///
@@ -215,7 +216,7 @@ pub fn geometric_spreading(
     vmod: &VelocityModel,
     source_depth_km: f64,
     ray_parameter: f64,
-    ray_type: i32,
+    takeoff: Takeoff,
 ) -> (f64, f32) {
     let nh1 = state.rays.nh[0] as usize;
 
@@ -224,15 +225,12 @@ pub fn geometric_spreading(
     // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
     let dep: f64 = vmod.layers()[1..nh1].iter().map(|l| l.thickness_km).sum();
 
-    let m = ray_type % 2;
-    let th1 = if m == 1 {
-        source_depth_km - dep
-    } else if m == 0 {
-        dep + vmod[nh1].thickness_km - source_depth_km
-    } else {
-        // The Fortran has two IFs and no else, so a negative odd ray_type would
-        // leave th1 undefined. Every call site passes ray_type >= 1.
-        panic!("geometric_spreading: ray_type {ray_type} gives mod {m}, leaving th1 undefined");
+    // The Fortran has two IFs and no else here, so a negative odd `itype` left `th1`
+    // undefined and the port needed a `panic!` to say so. Taking the direction instead of
+    // the raw integer makes that case unrepresentable.
+    let th1 = match takeoff {
+        Takeoff::Up => source_depth_km - dep,
+        Takeoff::Down => dep + vmod[nh1].thickness_km - source_depth_km,
     };
 
     let clamp = 0.999999f32 as f64;
@@ -496,14 +494,123 @@ pub fn travel_time(
     (p1, t.re)
 }
 
-/// Value of a Fortran `DO j = lo, hi` variable after the loop, with step +1.
+/// Take-off direction from the source — the parity of the Fortran's `itype`.
 ///
-/// Two cases matter and they differ: a loop that runs to completion leaves
-/// `hi + 1`, while a loop whose range is empty leaves `lo` untouched.
-/// `green_function` reads the loop variable after the loop (`kbot = j`), so getting
-/// this wrong silently changes the ray description.
-fn do_end(low: usize, high: usize) -> usize {
-    if low > high { low } else { high + 1 }
+/// The only thing [`geometric_spreading`] reads out of `itype`, which is why it takes
+/// this rather than the whole integer. That narrowing deletes a `panic!`: the Fortran
+/// has two `IF`s and no `else`, so a *negative odd* `itype` would leave `th1` undefined,
+/// and the port had to guard it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Takeoff {
+    /// Odd `itype` — the ray leaves the source upward.
+    Up,
+    /// Even `itype` — down to the Moho, then back up.
+    Down,
+}
+
+impl Takeoff {
+    /// Every call site passes `itype >= 1`; a negative value is what the Fortran leaves
+    /// undefined, so it is rejected at the boundary rather than deep inside a formula.
+    pub fn from_ray_type(ray_type: i32) -> Self {
+        assert!(ray_type >= 0, "ray type {ray_type} is negative; th1 would be undefined");
+        if ray_type % 2 == 1 { Self::Up } else { Self::Down }
+    }
+}
+
+/// The ray topology `green_function` builds.
+///
+/// The Fortran encodes two independent facts in one integer: the *parity* is the take-off
+/// direction, and the *magnitude* is how many Moho bounces to add on top. That is why
+/// `geometric_spreading` used to take the whole integer in order to read one bit of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RayShape {
+    /// Odd. `multiples = (itype - 1) / 2`.
+    Upgoing { multiples: i32 },
+    /// Even. `multiples = (itype - 2) / 2`.
+    DownToMoho { multiples: i32 },
+}
+
+impl RayShape {
+    fn from_ray_type(ray_type: i32) -> Self {
+        match Takeoff::from_ray_type(ray_type) {
+            Takeoff::Up => Self::Upgoing { multiples: (ray_type - 1) / 2 },
+            Takeoff::Down => Self::DownToMoho { multiples: (ray_type - 2) / 2 },
+        }
+    }
+}
+
+/// The ray segment list under construction.
+///
+/// Replaces a `push` closure plus a loose `l` counter, and gives the four copy-pasted
+/// descending loops and three copy-pasted Moho descents one home. `green_function`'s
+/// segment-building block was 60 lines of which roughly 45 were duplicates.
+struct RayPath<'a> {
+    rays: &'a mut Rays,
+    len: usize,
+    mode: WaveMode,
+}
+
+impl<'a> RayPath<'a> {
+    fn new(rays: &'a mut Rays, mode: WaveMode) -> Self {
+        Self { rays, len: 0, mode }
+    }
+
+    /// 0-based: write at the current count, then advance it. The Fortran pre-increments,
+    /// so `l` ends at the same segment count either way.
+    fn push(&mut self, layer: usize) {
+        self.rays.nh[self.len] = layer as i32;
+        self.rays.nm[self.len] = self.mode;
+        self.len += 1;
+    }
+
+    /// Segments from `from` up to `receiver` inclusive, shallowing.
+    ///
+    /// The Fortran spells this `j = from; while (j >= receiver) ... j = j - 1`, which the
+    /// port carried as an `i64` counter purely so it could go negative at the bottom.
+    /// A reversed inclusive range needs no such thing, and yields nothing when
+    /// `from < receiver` — the same as the while loop failing its first test.
+    fn ascend_to(&mut self, from: usize, receiver: usize) {
+        for layer in (receiver..=from).rev() {
+            self.push(layer);
+        }
+    }
+
+    /// Segments from `from` down to the layer above the Moho, deepening. Returns the
+    /// deepest layer pushed, which the caller ascends back from.
+    ///
+    /// The Moho is above the first layer of zero thickness; `read_velocity_model` forces
+    /// the bottom layer to zero thickness, so the scan always terminates.
+    ///
+    /// The return value carries the Fortran's `DO` post-loop semantics, which is why this
+    /// is a method and not an inlined loop: a range that runs to completion leaves
+    /// `high + 1`, an EMPTY range leaves `low` untouched, and `green_function` reads the
+    /// loop variable afterwards as `kbot`. Getting that wrong silently changes the ray.
+    fn descend_to_moho(&mut self, vmod: &VelocityModel, from: usize, bottom_layer: usize) -> usize {
+        let last = bottom_layer - 1;
+        // The empty-range case: `low > high` leaves the Fortran's loop variable at `low`.
+        if from > last {
+            return from;
+        }
+        for layer in from..=last {
+            self.push(layer);
+            if vmod[layer + 1].thickness_km == 0.0 {
+                return layer;
+            }
+        }
+        // Ran to completion: `high + 1`.
+        last + 1
+    }
+
+    /// One Moho bounce: down from the receiver layer, then back up to it.
+    fn moho_multiple(&mut self, vmod: &VelocityModel, receiver: usize, bottom_layer: usize) {
+        let kbot = self.descend_to_moho(vmod, receiver, bottom_layer);
+        self.ascend_to(kbot, receiver);
+    }
+
+    /// Segment count, for `/rays/nd`.
+    fn finish(self) -> usize {
+        self.len
+    }
 }
 
 /// Outputs of [`green_function`].
@@ -579,7 +686,11 @@ pub fn green_function(
     // Loop-completion value. The Fortran's DO ksrc = 1, layer_count leaves layer_count+1;
     // 0-based that is `layer_count`, one past the last layer. It is READ in that state --
     // see the doc comment -- which is why the arrays stay NLAYMAX-sized.
-    let mut ksrc = do_end(0, layer_count - 1);
+    // The Fortran's `DO ksrc = 1, layer_count` leaves the loop variable at
+    // `layer_count + 1` when it runs to completion; 0-based that is `layer_count`, one
+    // past the last layer. It is READ in that state -- see the doc comment -- which is
+    // why the arrays stay NLAYMAX-sized.
+    let mut ksrc = layer_count;
     for k in 0..layer_count {
         dep += vmod[k].thickness_km;
         if hs >= dep && (hs - dep) < hs_tol {
@@ -594,83 +705,34 @@ pub fn green_function(
         }
     }
 
-    let mut l = 0usize;
-    // 0-based: write at the current count, then advance it. The Fortran pre-increments,
-    // so `l` ends at the same segment count either way.
-    let push = |state: &mut RayState, l: &mut usize, layer: usize| {
-        state.rays.nh[*l] = layer as i32;
-        state.rays.nm[*l] = wave_mode;
-        *l += 1;
-    };
-
-    if ray_type % 2 == 1 {
-        // Upgoing: ksrc down to krec.
-        let mut j = ksrc as i64;
-        while j >= krec as i64 {
-            push(state, &mut l, j as usize);
-            j -= 1;
-        }
-        // Moho multiples, if any. ktn is 0 for ray_type == 1.
-        let ktn = (ray_type - 1) / 2;
-        for _kt in 1..=ktn {
-            let mut jv = do_end(krec, bottom_layer - 1);
-            for jj in krec..=(bottom_layer - 1) {
-                push(state, &mut l, jj);
-                if vmod[jj + 1].thickness_km == 0.0 {
-                    jv = jj;
-                    break;
-                }
-            }
-            let kbot = jv;
-            let mut j = kbot as i64;
-            while j >= krec as i64 {
-                push(state, &mut l, j as usize);
-                j -= 1;
+    let mut path = RayPath::new(&mut state.rays, wave_mode);
+    // Both arms are the same two operations in a different order, plus the same Moho
+    // bounce repeated `multiples` times. Production passes itype = 1, so `multiples` is
+    // 0 and the bounce loops never run.
+    match RayShape::from_ray_type(ray_type) {
+        RayShape::Upgoing { multiples } => {
+            path.ascend_to(ksrc, krec);
+            for _ in 0..multiples {
+                path.moho_multiple(vmod, krec, bottom_layer);
             }
         }
-    } else {
-        // Down-going to the Moho, then back up.
-        let mut jv = do_end(ksrc, bottom_layer - 1);
-        for jj in ksrc..=(bottom_layer - 1) {
-            push(state, &mut l, jj);
-            if vmod[jj + 1].thickness_km == 0.0 {
-                jv = jj;
-                break;
-            }
-        }
-        let kbot = jv;
-        let mut j = kbot as i64;
-        while j >= krec as i64 {
-            push(state, &mut l, j as usize);
-            j -= 1;
-        }
-
-        let ktn = (ray_type - 2) / 2;
-        for _kt in 1..=ktn {
-            let mut jv = do_end(krec, bottom_layer - 1);
-            for jj in krec..=(bottom_layer - 1) {
-                push(state, &mut l, jj);
-                if vmod[jj + 1].thickness_km == 0.0 {
-                    jv = jj;
-                    break;
-                }
-            }
-            let kbot = jv;
-            let mut j = kbot as i64;
-            while j >= krec as i64 {
-                push(state, &mut l, j as usize);
-                j -= 1;
+        RayShape::DownToMoho { multiples } => {
+            let kbot = path.descend_to_moho(vmod, ksrc, bottom_layer);
+            path.ascend_to(kbot, krec);
+            for _ in 0..multiples {
+                path.moho_multiple(vmod, krec, bottom_layer);
             }
         }
     }
-    state.rays.nd = l as i32;
+    state.rays.nd = path.finish() as i32;
 
     build_ray_path(state, vmod, hs, hr);
     let (p0, t0) = stationary_ray_parameter(state, vmod, rr);
     // Outputs discarded by the Fortran; the call is kept for comparability.
     let (_p1, _t1) = travel_time(state, vmod, p0, t0, rr);
 
-    let (rpd, qbar) = geometric_spreading(state, vmod, hs, p0, ray_type);
+    let (rpd, qbar) =
+        geometric_spreading(state, vmod, hs, p0, Takeoff::from_ray_type(ray_type));
 
     GreenFunction {
         rp0: p0 as f32,

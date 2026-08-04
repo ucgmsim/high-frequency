@@ -26,7 +26,7 @@ use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::subfault_geometry;
 use hb_high::highcor::apply_radiation_and_invert;
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern};
-use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time};
+use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time, Takeoff};
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::{site_amplification_factors, apply_site_amplification};
 use hb_high::state::{params, RayState, VelocityModel};
@@ -288,7 +288,7 @@ fn bench_ray(c: &mut Criterion) {
         b.iter(|| black_box(travel_time(&st, &v, black_box(0.15), 0.0, black_box(60.0))))
     });
     group.bench_function("geometric_spreading", |b| {
-        b.iter(|| black_box(geometric_spreading(&st, &v, black_box(30.0), black_box(0.15), 1)))
+        b.iter(|| black_box(geometric_spreading(&st, &v, black_box(30.0), black_box(0.15), Takeoff::Up)))
     });
     group.bench_function("build_ray_path", |b| {
         b.iter_batched_ref(
