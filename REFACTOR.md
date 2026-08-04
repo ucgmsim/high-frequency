@@ -222,17 +222,20 @@ Current transliteration artifacts: `stdd`, `dfr`, `rdna`, `cs`, `ds`, `amx2`,
 
 Free under Tier A, and it makes every later stage cheaper to review.
 
-### 1.5 `special.rs` — delete it, and it is *still* Stage 1
+### 1.5 `special.rs` — NOT Stage 1 after all; moved to §2.2b
 
-This starts as an obvious Stage 2 item and turns out not to be. `dgamm` is called
-once per `stoc_f` with `gsa = 2b+1`, where
+An earlier draft of this plan claimed `special.rs` could be deleted
+bit-identically, on the grounds that `dgamm`'s argument is a compile-time
+constant. **That was wrong, and the correction is instructive.**
+
+`dgamm` is called once per `stoc_f` with `gsa = 2b+1`, where
 
 ```
 b = -eps * ln(eta) / (1 + eps*(ln(eps) - 1))
 ```
 
-and `eps = 0.2`, `eta = 0.05` are **hardcoded constants in `main.rs`**. So the
-argument is a compile-time constant. Measured:
+On the production path `eps = 0.2` and `eta = 0.05` are hardcoded in `main.rs`, so
+the argument really is constant there:
 
 ```
 b   = 1.2531499
@@ -241,17 +244,21 @@ dgamm(gsa)      = 3.346549271566832
 accurate Γ(gsa) = 3.3465492715668317   (relative difference 1.3e-16)
 ```
 
-The Fortran's 20-term Chebyshev form is already accurate to double precision at
-this argument. `aa = sqrt((2c)^(2b+1) / gm)` then **narrows to `f32`**, and a
-1-ulp double perturbation is ~2^-53 relative against f32's 2^-24 resolution — so
-`aa` is unchanged unless it lands exactly on a rounding boundary.
+But `eps` and `eta` are *parameters of `stoc_f`*, not constants of the program, and
+`harness/kernels/tier4_driver.f:75-76` exercises the kernel with **`eta = 0.2`**,
+giving a different `gsa`. Hardcoding one value would break the tier-4 golden, and
+worse, would leave `stoc_f` honouring its `eta` argument for the envelope terms `b`
+and `c` while silently ignoring it for the gamma normalisation. That is a
+correctness landmine dressed as a simplification.
 
-**Therefore 155 lines delete bit-identically**, replaced by a named constant (or a
-`const fn`). Verify with `run_parity.sh`, don't assume. If it does shift a bit,
-demote this item to Stage 2 where it costs nothing extra.
+So the constant is a fact about the *call site*, not the function, and exploiting
+it would couple `stoc_f` to one caller's configuration. `special.rs` stays intact
+through Stage 1 and is replaced in Stage 2 by a real gamma — see §2.2b.
 
-The `1.0e75` error sentinel and the `x > 57` guard disappear with it, along with
-the only reason `stoc_f` needed a comment about unchecked error propagation.
+The measurement above is still worth keeping: it says the Stage 2 swap will move
+`gm` by ~1 ulp of a double, which then narrows to `f32` in
+`aa = sqrt((2c)^(2b+1) / gm)`. So the swap is very likely to be invisible in the
+output even though it is not bit-identical by construction.
 
 ---
 
@@ -286,6 +293,21 @@ Two things to pin explicitly, because they are where this goes wrong:
 Expect this to be the one Stage 2 item with a *visible* Tier B delta that is
 nonetheless correct. Budget time for reading the Tier B output rather than
 reacting to it.
+
+### 2.2b `special.rs` → a real gamma
+
+Deletes all 155 lines, plus the `dgamm` golden (1003 cases) that validates an
+implementation which no longer exists. `statrs 0.19`, `puruspe 0.4.4` and
+`libm::tgamma` all supply gamma; `libm` is the lightest if nothing else needs
+`statrs`.
+
+Expect this to be nearly invisible: the measurement in §1.5 shows `gm` moving by
+about one double ulp at the production argument, and `aa` narrows to `f32`
+afterwards. Verify with Tier B rather than assuming — that is exactly what Tier B
+is for.
+
+Gone with it: the `1.0e75` error sentinel, the `x > 57` guard, and the reason
+`stoc_f` needed a comment about unchecked error propagation into the spectrum.
 
 ### 2.2 `fort::Complex` → `num-complex`
 
@@ -372,7 +394,7 @@ Current `crates/hb_high/src` is **4,336 lines**. Rough targets:
 | `state.rs` | 224 | ~180 | 1.2 |
 | `rng.rs` | 199 | 199 | keep — see Tier D finding |
 | `stoc.rs` | 180 | ~150 | 2.4 |
-| `special.rs` | 155 | **0** | 1.5 |
+| `special.rs` | 155 | **0** | 2.2b |
 | `site.rs` | 135 | ~130 | — |
 | `fft.rs` | 100 | **0** | 2.1 |
 | `highcor.rs` | 66 | ~50 | 2.1 |
@@ -408,11 +430,13 @@ code does.
 Stage 1, each with `run_parity.sh` green in both profiles:
 
 1. Delete dead items (1.2). Smallest possible first commit, proves the gate works.
-2. `special.rs` → constant (1.5). Verify bit-identity; demote to Stage 2 if it moves.
-3. Split `main.rs` (1.3), no renaming yet — pure code motion, easy to review.
-4. Naming pass (1.4).
-5. `HfConfig` + `simulate()` + deck shim (1.1). Largest Stage 1 commit; consider
+   — **done**, `d0e8720`, 56 lines, 22/22 in both profiles.
+2. Split `main.rs` (1.3), no renaming yet — pure code motion, easy to review.
+3. Naming pass (1.4).
+4. `HfConfig` + `simulate()` + deck shim (1.1). Largest Stage 1 commit; consider
    splitting into "add typed config alongside deck" then "move the binary onto it".
+
+(`special.rs` was originally item 2 here and has moved to Stage 2 — see §1.5.)
 
 Then re-baseline: `cargo bench`, regenerate `bench_baseline.csv` (it is currently
 missing the two `whole_program` rows), and run the full campaign to confirm Stage 1
@@ -420,6 +444,9 @@ changed nothing.
 
 Stage 2, each with Tier B then C:
 
+5. `special.rs` → real gamma (2.2b). Smallest Stage 2 change, so it is the right
+   one to exercise Tier B on first — a near-invisible delta is easier to read than
+   a large one.
 6. FFT (2.1) — expect a real Tier B delta; verify it is the one you intended.
 7. `num-complex` (2.2).
 8. `powf` cleanup (2.4).
