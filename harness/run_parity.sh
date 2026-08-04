@@ -7,6 +7,14 @@
 # PRODUCTION deck never takes (see the comments per tier).
 #
 # Usage: harness/run_parity.sh [--release|--debug]
+#
+# Two env hooks, added in Stage 2:
+#   REF_BIN          reference binary to compare against. Defaults to the Fortran
+#                    oracle. harness/run_selfparity.sh points this at a Rust binary
+#                    built from an earlier commit, which is the only cheap per-commit
+#                    gate left now that bit-identity to the Fortran is gone.
+#   PARITY_MAX_REL   if set, compare within this relative tolerance instead of
+#                    bit-exactly (max |diff| / waveform peak).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,7 +25,11 @@ case "$PROFILE" in
   *) echo "usage: $0 [--release|--debug]" >&2; exit 2 ;;
 esac
 
-[ -x reference/build/hb_ref ] || harness/build_ref.sh >/dev/null
+REF_BIN=${REF_BIN:-reference/build/hb_ref}
+if [ "$REF_BIN" = "reference/build/hb_ref" ]; then
+    [ -x reference/build/hb_ref ] || harness/build_ref.sh >/dev/null
+fi
+[ -x "$REF_BIN" ] || { echo "reference binary $REF_BIN is missing" >&2; exit 2; }
 
 O=${PARITY_OUT:-harness/out/parity}
 F=harness/fixtures
@@ -33,10 +45,19 @@ run_case() {
     sed 's|f\.bin|r.bin|' "$O/df.txt" > "$O/dr.txt"
 
     local fe re
-    fe=$(./reference/build/hb_ref < "$O/df.txt" 2>&1 >/dev/null) || true
+    fe=$("$REF_BIN" < "$O/df.txt" 2>&1 >/dev/null) || true
     re=$(./"$RUST"        < "$O/dr.txt" 2>&1 >/dev/null) || true
 
-    if ! cmp -s "$O/f.bin" "$O/r.bin"; then
+    if [ -n "${PARITY_MAX_REL:-}" ]; then
+        # Tolerance mode: report the actual deviation, not just pass/fail, so a
+        # per-commit run says HOW FAR the change moved the waveform.
+        if ! python3 harness/compare.py "$O/f.bin" "$O/r.bin" \
+                --max-rel "$PARITY_MAX_REL" --quiet; then
+            fail=$((fail+1)); failed_cases+=("$name")
+            printf '  FAIL  %s (beyond %s relative)\n' "$name" "$PARITY_MAX_REL"
+            return
+        fi
+    elif ! cmp -s "$O/f.bin" "$O/r.bin"; then
         fail=$((fail+1)); failed_cases+=("$name")
         printf '  FAIL  %s\n' "$name"
         python3 harness/compare.py "$O/f.bin" "$O/r.bin" --quiet || true
@@ -107,7 +128,11 @@ fi
 
 echo
 if [ "$fail" -eq 0 ]; then
-    echo "PASS: $pass/$pass decks bit-identical ($PROFILE)"
+    if [ -n "${PARITY_MAX_REL:-}" ]; then
+        echo "PASS: $pass/$pass decks within $PARITY_MAX_REL relative ($PROFILE, ref $REF_BIN)"
+    else
+        echo "PASS: $pass/$pass decks bit-identical ($PROFILE, ref $REF_BIN)"
+    fi
 else
     echo "FAIL: $fail of $((pass+fail)) decks differ ($PROFILE)"
     for c in "${failed_cases[@]}"; do echo "  - $c"; done
