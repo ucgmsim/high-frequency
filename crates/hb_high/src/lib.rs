@@ -19,4 +19,5 @@ pub mod radiation;
 pub mod ray;
 pub mod rng;
 pub mod site;
+pub mod state;
 pub mod special;

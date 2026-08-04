@@ -35,6 +35,35 @@ The same applies to every other magic number: `rp=0.63`, `prtitn=0.71`,
 `fs=2.0`, `radmin=1.0`, `radvh=0.7`, `range=10.`/`40.`, `1.5707965`. Copy the
 digits that are there.
 
+### 1b. An unsuffixed literal in a `real*8` context carries only `f32` precision
+
+A Fortran literal without a `d0`/`_8` suffix is **default real**, i.e. `real*4`,
+*even when it is immediately assigned to or combined with a `real*8`*. It is
+rounded to `f32` first and then widened. Verified on gfortran 16.1.1:
+
+```fortran
+real*8 :: a, b
+a = 0.999999      ! -> 3FEFFFFDE0000000   (the f32 value, widened)
+b = 0.999999d0    ! -> 3FEFFFFDE7210BE9   (the true f64 value)
+```
+
+So in a `real*8` routine, `sini = 0.999999` must be ported as
+`0.999999f32 as f64`, **not** `0.999999f64`. Writing the natural Rust literal
+silently changes the value in the 30th bit.
+
+This only bites when the decimal is not exactly representable in `f32`.
+`0.0`, `1.0`, `2.0`, `0.5`, `0.25` and similar are exact and can be written
+plainly. Known affected sites so far:
+
+| routine | literal | context |
+| --- | --- | --- |
+| `geom_terms` | `0.999999` | `sini` clamp, `real*8` |
+| `geom_terms` | `0.001` | `rsum` floor, `real*8` |
+
+When porting any `implicit real*8` routine, check every unsuffixed literal
+against this rule. The ray cluster (`cagcon`, `dtdp`, `pnot`, `trav`, `ttime`)
+mostly uses explicit `d0` suffixes, but do not assume it.
+
 ## 2. Types and precision
 
 | Fortran | Rust |

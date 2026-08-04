@@ -127,3 +127,105 @@ pub fn delaz5(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> Delaz5 {
 
     Delaz5 { delt, deltdg, deltkm, azes, azesdg, azse, azsedg }
 }
+
+/// `subroutine even_dist2(...)` — `hb_high_ref.f:2593`.
+///
+/// Per-subfault source-to-receiver geometry for a single planar fault segment.
+/// Fills five `(nq, np)` arrays, indexed `(i, j)` for along-strike and down-dip:
+///
+/// * `dst` — horizontal epicentral distance, km
+/// * `rl`  — slant range from subfault centre to station, km
+/// * `th`  — take-off angle, radians, measured as `pi - atan2(dis, depth)`
+/// * `ph`  — azimuth, radians (`azes` straight from `DELAZ5`)
+/// * `zet` — subfault depth, km
+///
+/// `astop` is half the fault length along strike, so `(i-0.5)*dx - astop`
+/// centres the along-strike coordinate on the reference point.
+///
+/// The degree-to-km scale factors `ddx`/`ddy` are obtained empirically: two
+/// `DELAZ5` calls one degree apart in longitude and in latitude respectively.
+/// Both `x` and `y` are computed on each pass but only one is kept, matching the
+/// Fortran.
+///
+/// `pi` is the source's own 9-digit `3.14159265`, not `std::f32::consts::PI`.
+/// Everything here is `f32`; there is no double-precision arithmetic.
+#[allow(clippy::too_many_arguments)]
+pub fn even_dist2(
+    xlonq: f32,
+    ylatq: f32,
+    slon: f32,
+    slat: f32,
+    azmq: f32,
+    dipangq: f32,
+    zm: f32,
+    astop: f32,
+    dx: f32,
+    dy: f32,
+    nx: usize,
+    nw: usize,
+    rl: &mut crate::fort::Array2<f32>,
+    ph: &mut crate::fort::Array2<f32>,
+    th: &mut crate::fort::Array2<f32>,
+    dst: &mut crate::fort::Array2<f32>,
+    zet: &mut crate::fort::Array2<f32>,
+) {
+    let pi = 3.14159265f32;
+    let alei = 0.0f32;
+    let alsi = 0.0f32;
+    let thei = ylatq;
+
+    // Degrees-to-km scale factors, one degree east and one degree north.
+    let mut ddx = 0.0f32;
+    let mut ddy = 0.0f32;
+    for ii in 1..=2 {
+        let (thsi, alsi2) = if ii == 1 {
+            (thei, alei + 1.0)
+        } else {
+            (thei + 1.0, alsi)
+        };
+        let g = delaz5(thei, alei, thsi, alsi2, 0);
+        let az = g.azesdg;
+        let dis = g.deltkm;
+        let x = dis * (pi * az / 180.0).sin();
+        let y = dis * (pi * az / 180.0).cos();
+        if ii == 1 {
+            ddx = x;
+        }
+        if ii == 2 {
+            ddy = y;
+        }
+    }
+
+    let az = azmq * pi / 180.0;
+    let dip = dipangq * pi / 180.0;
+
+    let ylat = ylatq;
+    let xlon = xlonq;
+
+    // DO 20 I=1,NX / DO 20 J=1,NW share one terminator: i outer, j inner.
+    for i in 1..=nx {
+        for j in 1..=nw {
+            let down_dip = (j - 1) as f32 * dy + dy / 2.0;
+            let a1 = down_dip * dip.cos();
+            let b1 = down_dip * dip.sin();
+
+            let along = (i as f32 - 0.5) * dx - astop;
+            let dlon = along * az.sin() + a1 * az.cos();
+            let dlat = along * az.cos() - a1 * az.sin();
+
+            let stlon = xlon + dlon / ddx;
+            let stlat = ylat + dlat / ddy;
+
+            let zm1 = zm + b1;
+
+            let g = delaz5(stlat, stlon, slat, slon, 0);
+            let dis = g.deltkm;
+
+            dst[(i, j)] = dis;
+            rl[(i, j)] = (dis * dis + zm1 * zm1).sqrt();
+            th[(i, j)] = pi - dis.atan2(zm1);
+            ph[(i, j)] = g.azes;
+            zet[(i, j)] = zm1;
+        }
+    }
+}

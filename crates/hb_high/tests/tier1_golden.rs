@@ -1,0 +1,261 @@
+//! Bit-identity gate for the tier-1 kernels.
+//!
+//! These routines communicate through common blocks, so each golden record
+//! carries the input state, the arguments, **and** the emitted state — the
+//! golden is a specification of the whole seam, not just of return values.
+//!
+//! Regenerate with `harness/kernels/gen_tier1_golden.sh`.
+
+use hb_high::fort::{Array1, Array2};
+use hb_high::geom::even_dist2;
+use hb_high::ray::{geom_terms, trav};
+use hb_high::site::get_sitefacs;
+use hb_high::state::{params, RayState, Vmod};
+use std::path::PathBuf;
+
+struct Reader {
+    buf: Vec<u8>,
+    pos: usize,
+    name: String,
+}
+
+impl Reader {
+    fn open(name: &str) -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../harness/golden/tier1")
+            .join(name);
+        let buf = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("reading {}: {e}. Run harness/kernels/gen_tier1_golden.sh", path.display())
+        });
+        Self { buf, pos: 0, name: name.to_string() }
+    }
+
+    fn take<const N: usize>(&mut self) -> [u8; N] {
+        assert!(
+            self.pos + N <= self.buf.len(),
+            "{}: ran off the end at byte {} of {}",
+            self.name, self.pos, self.buf.len()
+        );
+        let out = self.buf[self.pos..self.pos + N].try_into().unwrap();
+        self.pos += N;
+        out
+    }
+
+    fn f32(&mut self) -> f32 {
+        f32::from_le_bytes(self.take::<4>())
+    }
+    fn f64(&mut self) -> f64 {
+        f64::from_le_bytes(self.take::<8>())
+    }
+    fn i32(&mut self) -> i32 {
+        i32::from_le_bytes(self.take::<4>())
+    }
+    fn usize(&mut self) -> usize {
+        self.i32() as usize
+    }
+    fn done(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+    fn assert_exhausted(&self) {
+        assert_eq!(
+            self.pos, self.buf.len(),
+            "{}: consumed {} of {} bytes; record layout disagrees with the driver",
+            self.name, self.pos, self.buf.len()
+        );
+    }
+
+    /// Read `th`, `vsh`, `rho` for layers `1..=j0` into a fresh `Vmod`,
+    /// matching the driver's `dump_vmod`.
+    fn vmod(&mut self, j0: usize) -> Vmod {
+        let mut v = Vmod::new();
+        for k in 1..=j0 {
+            v.thic[k] = self.f64();
+        }
+        for k in 1..=j0 {
+            v.vsh[k] = self.f64();
+        }
+        for k in 1..=j0 {
+            v.rho[k] = self.f64();
+        }
+        v
+    }
+}
+
+#[track_caller]
+fn eq32(what: &str, got: f32, want: f32) {
+    assert_eq!(
+        got.to_bits(), want.to_bits(),
+        "{what}: rust {got:?} (0x{:08x}) vs fortran {want:?} (0x{:08x})",
+        got.to_bits(), want.to_bits()
+    );
+}
+
+#[track_caller]
+fn eq64(what: &str, got: f64, want: f64) {
+    assert_eq!(
+        got.to_bits(), want.to_bits(),
+        "{what}: rust {got:?} (0x{:016x}) vs fortran {want:?} (0x{:016x})",
+        got.to_bits(), want.to_bits()
+    );
+}
+
+#[test]
+fn get_sitefacs_matches_fortran() {
+    let mut r = Reader::open("get_sitefacs.bin");
+    let mut cases = 0;
+    while !r.done() {
+        let j0 = r.usize();
+        let nfreq = r.usize();
+        let vmod = r.vmod(j0);
+        let mut fn_ = Array1::<f32>::new(nfreq);
+        for k in 1..=nfreq {
+            fn_[k] = r.f32();
+        }
+        let want: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
+
+        let mut an = Array1::<f32>::new(nfreq);
+        get_sitefacs(&vmod, j0, nfreq, &fn_, &mut an);
+        for k in 1..=nfreq {
+            eq32(&format!("get_sitefacs j0={j0} an[{k}]"), an[k], want[k - 1]);
+        }
+        cases += 1;
+    }
+    r.assert_exhausted();
+    assert_eq!(cases, 4);
+}
+
+#[test]
+fn trav_matches_fortran() {
+    let mut r = Reader::open("trav.bin");
+
+    // ONE state across every case, mirroring the Fortran's persistent common
+    // block. This is deliberate: `trav` zeroes only alp(1:100) of 500, so
+    // whether higher indices carry values from a previous ray is part of the
+    // behaviour under test. A fresh state per case would not exercise it.
+    let mut st = RayState::default();
+
+    let mut cases = 0;
+    while !r.done() {
+        let j0 = r.usize();
+        let n = r.usize();
+        let ir = r.usize();
+        let ndeg = r.i32();
+        let hs = r.f64();
+        let hr = r.f64();
+        let vmod = r.vmod(j0);
+
+        for k in 1..=n {
+            st.rays.nh[k] = r.i32();
+        }
+        for k in 1..=n {
+            st.rays.nm[k] = r.i32();
+        }
+        st.rays.nd[ir] = n as i32;
+        st.rays.ndeg[ir] = ndeg;
+
+        let (w_love, w_nup, w_ndeep) = (r.i32(), r.i32(), r.i32());
+        let w_it: Vec<i32> = (0..n).map(|_| r.i32()).collect();
+        let w_nup1: Vec<i32> = (0..n).map(|_| r.i32()).collect();
+        let w_alp: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
+        let w_als: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
+
+        trav(&mut st, &vmod, ir, hs, hr);
+
+        let tag = format!("trav case {cases} (j0={j0} n={n} ndeg={ndeg})");
+        assert_eq!(st.love, w_love, "{tag} love");
+        assert_eq!(st.travel.nup, w_nup, "{tag} nup");
+        assert_eq!(st.travel.ndeep, w_ndeep, "{tag} ndeep");
+        for k in 1..=n {
+            assert_eq!(st.coff.it[k], w_it[k - 1], "{tag} it[{k}]");
+            assert_eq!(st.coff.nup1[k], w_nup1[k - 1], "{tag} nup1[{k}]");
+        }
+        for k in 1..=j0 {
+            eq32(&format!("{tag} alp[{k}]"), st.travel.alp[k], w_alp[k - 1]);
+            eq32(&format!("{tag} als[{k}]"), st.travel.als[k], w_als[k - 1]);
+        }
+        cases += 1;
+    }
+    r.assert_exhausted();
+    assert_eq!(cases, 8);
+}
+
+#[test]
+fn geom_terms_matches_fortran() {
+    let mut r = Reader::open("geom_terms.bin");
+    let mut cases = 0;
+    while !r.done() {
+        let j0 = r.usize();
+        let n = r.usize();
+        let itype = r.i32();
+        let hs = r.f64();
+        let p0 = r.f64();
+
+        let mut vmod = Vmod::new();
+        for k in 1..=j0 {
+            vmod.thic[k] = r.f64();
+        }
+        for k in 1..=j0 {
+            vmod.vsh[k] = r.f64();
+        }
+        for k in 1..=j0 {
+            vmod.qs[k] = r.f32();
+        }
+
+        let mut st = RayState::default();
+        for k in 1..=n {
+            st.rays.nh[k] = r.i32();
+        }
+        st.rays.nd[1] = n as i32;
+
+        let w_rp = r.f64();
+        let w_qb = r.f32();
+
+        let (rp, qb) = geom_terms(&st, &vmod, hs, p0, itype);
+        let tag = format!("geom_terms case {cases} (itype={itype} p0={p0})");
+        eq64(&format!("{tag} rp"), rp, w_rp);
+        // The single-precision accumulation of qb is exactly what this pins.
+        eq32(&format!("{tag} qb"), qb, w_qb);
+        cases += 1;
+    }
+    r.assert_exhausted();
+    assert_eq!(cases, 6);
+}
+
+#[test]
+fn even_dist2_matches_fortran() {
+    let mut r = Reader::open("even_dist2.bin");
+    let mut cases = 0;
+    while !r.done() {
+        let nx = r.usize();
+        let nw = r.usize();
+        let (xlonq, ylatq, slon, slat) = (r.f32(), r.f32(), r.f32(), r.f32());
+        let (azmq, dipangq, zm, astop) = (r.f32(), r.f32(), r.f32(), r.f32());
+        let (dx, dy) = (r.f32(), r.f32());
+
+        let mut rl = Array2::<f32>::new(params::NQ, params::NP);
+        let mut ph = Array2::<f32>::new(params::NQ, params::NP);
+        let mut th = Array2::<f32>::new(params::NQ, params::NP);
+        let mut dst = Array2::<f32>::new(params::NQ, params::NP);
+        let mut zet = Array2::<f32>::new(params::NQ, params::NP);
+
+        even_dist2(
+            xlonq, ylatq, slon, slat, azmq, dipangq, zm, astop, dx, dy, nx, nw,
+            &mut rl, &mut ph, &mut th, &mut dst, &mut zet,
+        );
+
+        // Driver dump order: ((dst,rl,th,ph,zet), j=1,nw), i=1,nx)
+        for i in 1..=nx {
+            for j in 1..=nw {
+                let tag = format!("even_dist2 case {cases} ({i},{j})");
+                eq32(&format!("{tag} dst"), dst[(i, j)], r.f32());
+                eq32(&format!("{tag} rl"), rl[(i, j)], r.f32());
+                eq32(&format!("{tag} th"), th[(i, j)], r.f32());
+                eq32(&format!("{tag} ph"), ph[(i, j)], r.f32());
+                eq32(&format!("{tag} zet"), zet[(i, j)], r.f32());
+            }
+        }
+        cases += 1;
+    }
+    r.assert_exhausted();
+    assert_eq!(cases, 5);
+}
