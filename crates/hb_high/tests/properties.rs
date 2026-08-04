@@ -33,11 +33,13 @@
 //! of headroom, so ordinary rounding differences from a reimplementation pass and a
 //! genuine break fails.
 
-use hb_high::config::RuptureVelocity;
+use hb_high::config::{
+    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
+};
 use hb_high::fft::{fast, remove_quadratic_trend};
 use hb_high::fort::{Array1, Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry};
-use hb_high::input::read_stoch;
+use hb_high::input::{read_stoch, read_velocity_model, Station};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
@@ -769,4 +771,119 @@ proptest! {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// End to end — simulate
+// ---------------------------------------------------------------------------
+
+// These exist because of a gap this suite had. §2.3 once left a loop bound at
+// `1..=np2` against a 0-based buffer of length `np2`; the binary panicked on every deck
+// and `cargo test` still reported 120 of 120 passing, because nothing here drove
+// `simulate`. The only end-to-end coverage was a shell script outside the test suite.
+//
+// Nothing below asserts a value, so none of it constrains further refactoring — they are
+// the coarsest possible statements that a simulation happened at all.
+
+/// A plausible layered velocity model: thin slow layers near the surface, thickening and
+/// speeding up with depth, zero-thickness base as the reader expects.
+fn velocity_model_text(layers: usize) -> String {
+    let mut out = format!("{layers}\n");
+    for k in 0..layers {
+        let frac = k as f64 / (layers - 1) as f64;
+        let thickness = if k == layers - 1 { 0.0 } else { 0.05 + 3.0 * frac };
+        let vsh = 0.5 + 4.1 * frac;
+        let vp = vsh * 1.75;
+        let density = 1.81 + 1.5 * frac;
+        let qs = 50.0 + 150.0 * frac;
+        out.push_str(&format!("{thickness} {vp} {vsh} {density} {} {qs}\n", 2.0 * qs));
+    }
+    out
+}
+
+/// Production-shaped configuration, with the seed left to the caller.
+fn config(seed: i32) -> HfConfig {
+    HfConfig {
+        stress_drop: 50.0,
+        rayset: vec![RayType(1)],
+        site_amp: true,
+        seed,
+        duration: 20.0,
+        dt: 0.005,
+        fmax: 10.0,
+        kappa: 0.045,
+        qfexp: 0.6,
+        rupture_velocity: RuptureVelocity {
+            frac: Some(0.8),
+            shallow: Some(0.7),
+            deep: Some(0.7),
+        },
+        czero: Some(2.1),
+        calpha: None,
+        moment: None,
+        rupture_velocity_override: None,
+        vs_moho: None,
+        nl_skip: -99,
+        fa_sig1: 0.0,
+        fa_sig2: 0.0,
+        rv_sig1: 0.1,
+        path_duration: PathDurationModel::Bt2014Wus,
+        stress_param_adjust: StressParamAdjust::None,
+        target_magnitude: None,
+        fault_area: None,
+    }
+}
+
+/// Run one station through the whole simulation.
+fn run(seed: i32) -> hb_high::sim::Simulation {
+    let slip = read_stoch(&stoch_text(&[(4, 3, 1.5, 1.5)]), hb_high::config::DEG_TO_RAD)
+        .expect("valid stoch");
+    let mut vmod = hb_high::state::VelocityModelInput::new();
+    let layer_count = read_velocity_model(&velocity_model_text(20), &mut vmod, 999.9)
+        .expect("valid velocity model");
+    let station = Station { stlon: 173.4, stlat: -43.1, cap: "TEST".to_string() };
+    hb_high::sim::simulate(&config(seed), &slip, &vmod, layer_count, station)
+        .expect("simulation should succeed")
+}
+
+#[test]
+fn simulate_produces_a_record_of_the_requested_length() {
+    let sim = run(123456789);
+    // duration / dt, interleaved over three components.
+    assert_eq!(sim.ndata, 4000, "ndata should be duration/dt");
+    assert_eq!(sim.acc.len(), sim.ndata * 3, "acc is ndata*3 interleaved");
+    assert_eq!(sim.dt, 0.005);
+}
+
+#[test]
+fn simulate_produces_finite_non_zero_ground_motion() {
+    let sim = run(123456789);
+    assert!(sim.acc.iter().all(|v| v.is_finite()), "every sample must be finite");
+    let peak = sim.acc.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+    assert!(peak > 0.0, "the record is entirely zero -- nothing was simulated");
+    // Every component carries signal, which a mis-indexed accumulation could break for
+    // one and not the others.
+    for component in 0..3 {
+        let component_peak = sim
+            .acc
+            .iter()
+            .skip(component)
+            .step_by(3)
+            .fold(0.0f32, |a, v| a.max(v.abs()));
+        assert!(component_peak > 0.0, "component {component} is entirely zero");
+    }
+    assert!(sim.d10_km.is_finite() && sim.d10_km > 0.0, "d10 = {}", sim.d10_km);
+}
+
+#[test]
+fn simulate_is_deterministic_and_seed_dependent() {
+    let first = run(123456789);
+    let again = run(123456789);
+    assert_eq!(first.acc, again.acc, "same seed must give the same record");
+    assert_eq!(first.d10_km, again.d10_km);
+
+    let other = run(987654321);
+    assert_ne!(first.acc, other.acc, "a different seed must give a different record");
+    // Geometry is unchanged, so the closest-subfault distance must not move.
+    assert_eq!(first.d10_km, other.d10_km, "d10 is geometric, not stochastic");
 }
