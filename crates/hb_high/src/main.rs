@@ -553,49 +553,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             d10 = 10000.0;
             let mut twin = Array2::<f32>::new(params::NQ, params::NP);
             let mut bet = 0.0f32;
-            for j in 1..=seg.nw {
-                for i in 1..=seg.nx {
-                    // No `bet = vsh(1)` default here, unlike the subfault pass
-                    // below: if zet exceeds every depth, bet keeps its previous
-                    // value. Undefined on the very first subfault of the first
-                    // station in the Fortran; zero here.
-                    for ksrc in 1..=j0 {
-                        if vmod.depth[ksrc] >= zet[(i, j)] as f64 {
-                            bet = vmod.vsh[ksrc] as f32;
-                            break;
-                        }
-                    }
-
-                    let rvf = rv.factor(zet[(i, j)]);
-                    let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
-                    let zz = czero * (1.0 + fcfac) / alphat;
-
-                    // Path duration bin. Strict `>` means r0/d0/slp stay unset
-                    // if rlsu is exactly rdur(1) = 0.0; zero here rather than
-                    // the Fortran's undefined.
-                    let mut r0 = 0.0f32;
-                    let mut d0 = 0.0f32;
-                    let mut slp = 0.0f32;
-                    for kk in 1..=ndur {
-                        if rlsu[(i, j)] > rdur[kk] {
-                            r0 = rdur[kk];
-                            d0 = dpth[kk];
-                            slp = dpdr[kk];
-                        }
-                    }
-
-                    let fce = zz * rvf * bet / (dlm * pai);
-                    let tw0 = 1.0 / fce;
-                    let tw0 = bigc.sqrt() * tw0;
-                    let dpath = d0 + slp * (rlsu[(i, j)] - r0);
-                    // VERSION1: no 81.92 s cap.
-                    twin[(i, j)] = 2.12 * (tw0 + dpath);
-
-                    if twin[(i, j)] > tmax {
-                        tmax = twin[(i, j)];
-                    }
-                    d10 = d10.min(rlsu[(i, j)]);
+            // Depth-major: j slowest. The subfault pass below goes the other way.
+            for (i, j) in seg.depth_major() {
+                // No `bet = vsh(1)` default here, unlike the subfault pass
+                // below: if zet exceeds every depth, bet keeps its previous
+                // value. Undefined on the very first subfault of the first
+                // station in the Fortran; zero here.
+                if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth[k] >= zet[(i, j)] as f64) {
+                    bet = vmod.vsh[ksrc] as f32;
                 }
+
+                let rvf = rv.factor(zet[(i, j)]);
+                let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
+                let zz = czero * (1.0 + fcfac) / alphat;
+
+                // Path duration bin. Strict `>` means r0/d0/slp stay unset
+                // if rlsu is exactly rdur(1) = 0.0; zero here rather than
+                // the Fortran's undefined.
+                let mut r0 = 0.0f32;
+                let mut d0 = 0.0f32;
+                let mut slp = 0.0f32;
+                for kk in 1..=ndur {
+                    if rlsu[(i, j)] > rdur[kk] {
+                        r0 = rdur[kk];
+                        d0 = dpth[kk];
+                        slp = dpdr[kk];
+                    }
+                }
+
+                let fce = zz * rvf * bet / (dlm * pai);
+                let tw0 = 1.0 / fce;
+                let tw0 = bigc.sqrt() * tw0;
+                let dpath = d0 + slp * (rlsu[(i, j)] - r0);
+                // VERSION1: no 81.92 s cap.
+                twin[(i, j)] = 2.12 * (tw0 + dpath);
+
+                if twin[(i, j)] > tmax {
+                    tmax = twin[(i, j)];
+                }
+                d10 = d10.min(rlsu[(i, j)]);
             }
 
             let ntmax = (2.0 * tmax / dt) as i32 as usize;
@@ -631,164 +627,162 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // --- subfault pass. NOTE: i outer, j inner -- the OPPOSITE order to
             // the window pass above. irandcnt is consumed in THIS order. -------
-            for i in 1..=seg.nx {
-                for j in 1..=seg.nw {
-                    if seg.sddp[(i, j)] < 0.001 {
-                        continue; // goto 4 lands on the inner loop's terminator
+            for (i, j) in seg.strike_major() {
+                if seg.sddp[(i, j)] < 0.001 {
+                    continue; // goto 4 lands on the inner loop's terminator
+                }
+
+                for il in 1..=np2 {
+                    stdd[0][il] = 0.0;
+                    stdd[1][il] = 0.0;
+                    stdd[2][il] = 0.0;
+                }
+
+                // This pass DOES default bet/ro before the lookup.
+                let mut bet = vmod.vsh[1] as f32;
+                let mut ro = vmod.rho[1] as f32;
+                let ksrc = match (1..=j0).find(|&k| vmod.depth[k] >= zet[(i, j)] as f64) {
+                    Some(k) => {
+                        bet = vmod.vsh[k] as f32;
+                        ro = vmod.rho[k] as f32;
+                        k
+                    }
+                    // bet and ro keep the layer-1 defaults set just above.
+                    None => j0 + 1,
+                };
+                if ksrc == j0 + 1 {
+                    // The Fortran prints 'wrong!' and carries on with
+                    // ksrc = j0+1, which it then passes to get_sitefacs.
+                    println!(" wrong!");
+                }
+
+                let rvf0 = rv.factor(zet[(i, j)]);
+                let mut rvf = rvf0;
+                if rvsig1 > 0.0 {
+                    irandcnt += 1;
+                    rvf = rvf0 * (fgrand[irandcnt] * rvsig1).exp();
+                    if rvf > rvfmax {
+                        rvf = rvfmax;
+                    }
+                }
+
+                let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
+                let zz = czero * (1.0 + fcfac) / alphat;
+                let fce = zz * rvf * bet / dlm / pai;
+                let rise = seg.rist[(i, j)];
+
+                let mode = 4; // hardwired SH
+                for ir in 1..=nrtyp {
+                    let mut irtyp = irtype[ir];
+                    if irtyp == 0 {
+                        irtyp = 1;
                     }
 
-                    for il in 1..=np2 {
-                        stdd[0][il] = 0.0;
-                        stdd[1][il] = 0.0;
-                        stdd[2][il] = 0.0;
+                    let g = gf_amp_tt(
+                        &mut ray, &vmod, j0, zet[(i, j)], dst[(i, j)], irtyp, mode,
+                    );
+                    let mut stime = g.stime;
+                    let mut rpath = g.rpath;
+                    let mut qbar = g.qbar;
+                    let mut sub_tstart = stime - tw_eps * twin[(i, j)];
+
+                    if irtype[ir] == 0 {
+                        rpath = rlsu[(i, j)];
+                        qbar = rpath / (bet * 150.0);
+                        stime = rpath / 3.7;
+                        sub_tstart = 0.7 * stime;
                     }
 
-                    // This pass DOES default bet/ro before the lookup.
-                    let mut bet = vmod.vsh[1] as f32;
-                    let mut ro = vmod.rho[1] as f32;
-                    let mut ksrc = j0 + 1;
-                    for k in 1..=j0 {
-                        if vmod.depth[k] >= zet[(i, j)] as f64 {
-                            bet = vmod.vsh[k] as f32;
-                            ro = vmod.rho[k] as f32;
-                            ksrc = k;
-                            break;
+                    let tw = twin[(i, j)];
+                    for kf in 1..=3 {
+                        let mut fmx1 = fmx;
+                        if fmx1 > 15.0 && kf == 3 {
+                            fmx1 = 15.0;
                         }
-                    }
-                    if ksrc == j0 + 1 {
-                        // The Fortran prints 'wrong!' and carries on with
-                        // ksrc = j0+1, which it then passes to get_sitefacs.
-                        println!(" wrong!");
-                    }
-
-                    let rvf0 = rv.factor(zet[(i, j)]);
-                    let mut rvf = rvf0;
-                    if rvsig1 > 0.0 {
-                        irandcnt += 1;
-                        rvf = rvf0 * (fgrand[irandcnt] * rvsig1).exp();
-                        if rvf > rvfmax {
-                            rvf = rvfmax;
-                        }
-                    }
-
-                    let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
-                    let zz = czero * (1.0 + fcfac) / alphat;
-                    let fce = zz * rvf * bet / dlm / pai;
-                    let rise = seg.rist[(i, j)];
-
-                    let mode = 4; // hardwired SH
-                    for ir in 1..=nrtyp {
-                        let mut irtyp = irtype[ir];
-                        if irtyp == 0 {
-                            irtyp = 1;
-                        }
-
-                        let g = gf_amp_tt(
-                            &mut ray, &vmod, j0, zet[(i, j)], dst[(i, j)], irtyp, mode,
+                        stoc_f(
+                            &mut rng, np2, rpath, tw, tw_eps, tw_eta, bet, ro, dt,
+                            smoe, dlm, fce, fmx1, akapp,
+                            &mut cs[kf - 1], &dfr, qbar, qfexp, bigc,
                         );
-                        let mut stime = g.stime;
-                        let mut rpath = g.rpath;
-                        let mut qbar = g.qbar;
-                        let mut sub_tstart = stime - tw_eps * twin[(i, j)];
+                    }
 
-                        if irtype[ir] == 0 {
-                            rpath = rlsu[(i, j)];
-                            qbar = rpath / (bet * 150.0);
-                            stime = rpath / 3.7;
-                            sub_tstart = 0.7 * stime;
+                    if isite_amp != 0 {
+                        get_sitefacs(&vmod, ksrc, nsfac, &fn_, &mut an);
+                        for k in 0..3 {
+                            siteamp(np2, &mut cs[k], &dfr, nsfac, &fn_, &an);
                         }
+                    }
+                    // famprand is dead: fasig1 = fasig2 = 0.
 
-                        let tw = twin[(i, j)];
-                        for kf in 1..=3 {
-                            let mut fmx1 = fmx;
-                            if fmx1 > 15.0 && kf == 3 {
-                                fmx1 = 15.0;
-                            }
-                            stoc_f(
-                                &mut rng, np2, rpath, tw, tw_eps, tw_eta, bet, ro, dt,
-                                smoe, dlm, fce, fmx1, akapp,
-                                &mut cs[kf - 1], &dfr, qbar, qfexp, bigc,
-                            );
+                    // Incidence angle from the ray parameter: sin(i)/vs = p0.
+                    // th = i for a downgoing ray, pi - i for upgoing.
+                    let p0 = g.rp0;
+                    let mut th = if bet * p0 > 1.0 {
+                        0.5 * pai
+                    } else {
+                        (bet * p0).asin()
+                    };
+                    if irtype[ir] == 0 {
+                        // Straight-ray approximation uses the geometric
+                        // take-off angle instead.
+                        th = thsu[(i, j)];
+                    } else if irtype[ir] % 2 == 1 {
+                        th = pai - th;
+                    }
+                    let pa = phsu[(i, j)];
+
+                    let cmp = -90.0 * pu;
+                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
+                    highcor_f(nfold, mfold, np2, &mut cs[0], &mut stdd[0], &rdna);
+
+                    let cmp = 0.0f32;
+                    radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
+                    highcor_f(nfold, mfold, np2, &mut cs[1], &mut stdd[1], &rdna);
+
+                    radv_lin(stra, dipa, raka, pa, th, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
+                    highcor_f(nfold, mfold, np2, &mut cs[2], &mut stdd[2], &rdna);
+
+                    // Rupture time at this subfault.
+                    let mut ratim;
+                    if vr <= 0.0 {
+                        ratim = seg.rupt[(i, j)];
+                    } else {
+                        let xra = seg.shyp - (i as f32 - 0.5 * (seg.nx as f32 + 1.0)) * seg.dx;
+                        let yra = seg.dhyp - (j as f32 - 0.5) * seg.dw;
+                        ratim = (xra * xra + yra * yra).sqrt() / vr;
+                        if irand > 0 {
+                            ratim += (rng.rand_numb() - 0.5) * 0.1 * ratim;
                         }
+                    }
 
-                        if isite_amp != 0 {
-                            get_sitefacs(&vmod, ksrc, nsfac, &fn_, &mut an);
-                            for k in 0..3 {
-                                siteamp(np2, &mut cs[k], &dfr, nsfac, &fn_, &an);
-                            }
+                    // int() truncates toward zero, so a negative
+                    // sub_tstart makes kst smaller, possibly negative.
+                    let kst = (ratim / dt) as i32 + (sub_tstart / dt) as i32;
+
+                    for _k in 1..=nsum {
+                        let si = rng.rand_numb();
+                        let dris = si * rise / dt;
+                        let mut k2 = nint(dris);
+                        if nsum == 1 {
+                            k2 = 0;
                         }
-                        // famprand is dead: fasig1 = fasig2 = 0.
+                        let k2 = k2 + kst;
+                        let kend = (k2 + np2 as i32).min(ndata as i32);
 
-                        // Incidence angle from the ray parameter: sin(i)/vs = p0.
-                        // th = i for a downgoing ray, pi - i for upgoing.
-                        let p0 = g.rp0;
-                        let mut th = if bet * p0 > 1.0 {
-                            0.5 * pai
-                        } else {
-                            (bet * p0).asin()
-                        };
-                        if irtype[ir] == 0 {
-                            // Straight-ray approximation uses the geometric
-                            // take-off angle instead.
-                            th = thsu[(i, j)];
-                        } else if irtype[ir] % 2 == 1 {
-                            th = pai - th;
-                        }
-                        let pa = phsu[(i, j)];
-
-                        let cmp = -90.0 * pu;
-                        radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
-                        highcor_f(nfold, mfold, np2, &mut cs[0], &mut stdd[0], &rdna);
-
-                        let cmp = 0.0f32;
-                        radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);
-                        highcor_f(nfold, mfold, np2, &mut cs[1], &mut stdd[1], &rdna);
-
-                        radv_lin(stra, dipa, raka, pa, th, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
-                        highcor_f(nfold, mfold, np2, &mut cs[2], &mut stdd[2], &rdna);
-
-                        // Rupture time at this subfault.
-                        let mut ratim;
-                        if vr <= 0.0 {
-                            ratim = seg.rupt[(i, j)];
-                        } else {
-                            let xra = seg.shyp - (i as f32 - 0.5 * (seg.nx as f32 + 1.0)) * seg.dx;
-                            let yra = seg.dhyp - (j as f32 - 0.5) * seg.dw;
-                            ratim = (xra * xra + yra * yra).sqrt() / vr;
-                            if irand > 0 {
-                                ratim += (rng.rand_numb() - 0.5) * 0.1 * ratim;
+                        let sd = seg.sddp[(i, j)];
+                        let mut li = k2;
+                        while li <= kend {
+                            // Writes below index 1 go before DS in the
+                            // Fortran and are never read back, since the
+                            // output reads DS(1..ndata). Discarded.
+                            if li >= 1 {
+                                let idx = (li - k2) as usize;
+                                let lu = li as usize;
+                                ds[(1, lu)] += sd * stdd_at(&stdd, 1, idx);
+                                ds[(2, lu)] += sd * stdd_at(&stdd, 2, idx);
+                                ds[(3, lu)] += sd * stdd_at(&stdd, 3, idx);
                             }
-                        }
-
-                        // int() truncates toward zero, so a negative
-                        // sub_tstart makes kst smaller, possibly negative.
-                        let kst = (ratim / dt) as i32 + (sub_tstart / dt) as i32;
-
-                        for _k in 1..=nsum {
-                            let si = rng.rand_numb();
-                            let dris = si * rise / dt;
-                            let mut k2 = nint(dris);
-                            if nsum == 1 {
-                                k2 = 0;
-                            }
-                            let k2 = k2 + kst;
-                            let kend = (k2 + np2 as i32).min(ndata as i32);
-
-                            let sd = seg.sddp[(i, j)];
-                            let mut li = k2;
-                            while li <= kend {
-                                // Writes below index 1 go before DS in the
-                                // Fortran and are never read back, since the
-                                // output reads DS(1..ndata). Discarded.
-                                if li >= 1 {
-                                    let idx = (li - k2) as usize;
-                                    let lu = li as usize;
-                                    ds[(1, lu)] += sd * stdd_at(&stdd, 1, idx);
-                                    ds[(2, lu)] += sd * stdd_at(&stdd, 2, idx);
-                                    ds[(3, lu)] += sd * stdd_at(&stdd, 3, idx);
-                                }
-                                li += 1;
-                            }
+                            li += 1;
                         }
                     }
                 }
@@ -879,10 +873,8 @@ fn normalise_source(
     let mut amx2 = 0.0f32;
     for s in &stoch.segments {
         dlm = (s.dx * s.dw).sqrt() + dlm;
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                amx2 = amx2.max(s.sddp[(i, j)].abs());
-            }
+        for (i, j) in s.depth_major() {
+            amx2 = amx2.max(s.sddp[(i, j)].abs());
         }
     }
     let _slip_max = amx2;
@@ -907,13 +899,7 @@ fn normalise_source(
             // Layer lookup. Falls through with k = j0+1 if zdep is below the
             // model, which the Fortran then indexes -- so the fall-through is
             // load-bearing, not an error path.
-            let mut k = j0 + 1;
-            for kk in 1..=j0 {
-                if zdep <= vmod_in.depth0[kk] {
-                    k = kk;
-                    break;
-                }
-            }
+            let k = (1..=j0).find(|&kk| zdep <= vmod_in.depth0[kk]).unwrap_or(j0 + 1);
             let bet = vmod_in.vsh0[k] as f32;
             // vsh0 and rho0 are real*8 and dx/dw are real*4, so the WHOLE
             // product is computed in double (dx/dw promoted) and narrows only on
@@ -957,21 +943,17 @@ fn normalise_source(
     let mut wsum = 0.0f32;
     let mut nstot = 0usize;
     for s in &stoch.segments {
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                if s.sddp[(i, j)] > 0.001 {
-                    wsum += s.sddp[(i, j)];
-                    nstot += 1;
-                }
+        for (i, j) in s.depth_major() {
+            if s.sddp[(i, j)] > 0.001 {
+                wsum += s.sddp[(i, j)];
+                nstot += 1;
             }
         }
     }
     let scale = nstot as f32 / wsum;
     for s in &mut stoch.segments {
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                s.sddp[(i, j)] *= scale;
-            }
+        for (i, j) in s.depth_major() {
+            s.sddp[(i, j)] *= scale;
         }
     }
 

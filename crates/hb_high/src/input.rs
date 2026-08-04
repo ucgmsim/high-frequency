@@ -40,6 +40,34 @@ pub struct Segment {
     pub rupt: Array2<f32>,
 }
 
+impl Segment {
+    /// Subfault indices `(i, j)` with the **depth** index outermost: `j` varies
+    /// slowest, `i` fastest.
+    ///
+    /// This is the order the time-window pass walks the grid.
+    pub fn depth_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
+        let (nx, nw) = (self.nx, self.nw);
+        (1..=nw).flat_map(move |j| (1..=nx).map(move |i| (i, j)))
+    }
+
+    /// Subfault indices `(i, j)` with the **strike** index outermost: `i` varies
+    /// slowest, `j` fastest.
+    ///
+    /// This is the order the subfault pass walks the grid, and the fact that it is
+    /// the *opposite* of [`Segment::depth_major`] is load-bearing rather than
+    /// incidental: the subfault pass advances `irandcnt` once per surviving
+    /// subfault and uses it to index `fgrand`, so walking the grid the other way
+    /// would pair a different normal deviate with each subfault's rupture-velocity
+    /// perturbation, and every waveform would change.
+    ///
+    /// Neither iterator borrows the segment — they capture `nx` and `nw` by value —
+    /// so a caller can mutate `sddp` while iterating.
+    pub fn strike_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
+        let (nx, nw) = (self.nx, self.nw);
+        (1..=nx).flat_map(move |i| (1..=nw).map(move |j| (i, j)))
+    }
+}
+
 /// The whole slip model.
 #[derive(Clone, Debug)]
 pub struct StochModel {
@@ -286,6 +314,34 @@ mod tests {
   6.64584e-01  6.61278e-01
   6.37069e-01  5.81083e-01
 ";
+
+    #[test]
+    fn the_two_subfault_orders_are_transposes_of_each_other() {
+        // A 3x2 grid: same set of indices, opposite traversal. The orders are not
+        // interchangeable at the call sites -- see Segment::strike_major -- so this
+        // pins which is which.
+        let s = Segment {
+            elonq: 0.0, elatq: 0.0, nx: 3, nw: 2, dx: 1.0, dw: 1.0,
+            strq: 0.0, dipq: 90.0, rakeq: 0.0, dtop: 0.0, shyp: 0.0, dhyp: 0.0,
+            astop: 0.0,
+            sddp: Array2::new(3, 2), rist: Array2::new(3, 2), rupt: Array2::new(3, 2),
+        };
+        assert_eq!(
+            s.depth_major().collect::<Vec<_>>(),
+            [(1, 1), (2, 1), (3, 1), (1, 2), (2, 2), (3, 2)],
+            "depth_major must vary i fastest"
+        );
+        assert_eq!(
+            s.strike_major().collect::<Vec<_>>(),
+            [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)],
+            "strike_major must vary j fastest"
+        );
+        // Same index set either way.
+        let mut a: Vec<_> = s.depth_major().collect();
+        let mut b: Vec<_> = s.strike_major().collect();
+        a.sort(); b.sort();
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn reads_the_minimal_stoch_fixture() {
