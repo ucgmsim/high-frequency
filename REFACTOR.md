@@ -219,6 +219,9 @@ job, and `Deck` is the scaffold §1.1 needs.
 
 ### 1.3b Rustify the control flow — iterators, enums, and grouped state
 
+**Done** — see `700399f`, `d3af03a`, `c5b1dcd`. The accumulation-order constraint
+held: every conversion stayed bit-identical in both profiles on the first attempt.
+
 Still Stage 1: **tier A gates this, and that is precisely what makes it safe to
 attempt.** Converting a Fortran loop to an iterator chain is exactly the kind of
 change where a subtle mistake is invisible to inspection and instantly visible to
@@ -495,21 +498,33 @@ code does.
 
 Stage 1, each with `run_parity.sh` green in both profiles:
 
-1. Delete dead items (1.2). Smallest possible first commit, proves the gate works.
-   — **done**, `d0e8720`, 56 lines, 22/22 in both profiles.
-2. Split `main.rs` (1.3), no renaming yet — pure code motion, easy to review.
-   — **in progress**: `c29e40b` did the deck, path-duration table and rupture
-   velocity taper; the station loop and the two subfault passes remain.
-3. Rustify control flow (1.3b) — iterators and enums, watching accumulation order.
-4. Naming pass (1.4). Cheapest after 1.3b, since 1.3b deletes some of the names.
-5. `HfConfig` + `simulate()` + deck shim (1.1). Largest Stage 1 commit; consider
-   splitting into "add typed config alongside deck" then "move the binary onto it".
+1. Delete dead items (1.2) — **done**, `d0e8720`, 56 lines removed.
+2. Split `main.rs` (1.3) — **done**, `c29e40b` (deck, path-duration table,
+   rupture-velocity taper) and `48f1d11` (source normalisation). `run()` 730 → 486.
+3. Rustify control flow (1.3b) — **done**, `700399f` (grid iterators, layer lookups
+   as `find`), `d3af03a` (`RayKind` enum), `c5b1dcd` (`SubfaultGeometry`).
+4. Naming pass (1.4) — **done**, `c012812`.
+5. `HfConfig` + `simulate()` + deck shim (1.1) — **remaining**, and it is the whole
+   of what is left in Stage 1. Largest commit; split into "add typed config
+   alongside the deck" then "move the binary onto it".
+
+Still to extract from `run()` when 1.1 lands: the per-station model setup, and the
+station loop body itself, which is now the bulk of the remaining 486 lines.
 
 (`special.rs` was originally item 2 here and has moved to Stage 2 — see §1.5.)
 
-Then re-baseline: `cargo bench`, regenerate `bench_baseline.csv` (it is currently
-missing the two `whole_program` rows), and run the full campaign to confirm Stage 1
-changed nothing.
+Then re-baseline: `cargo bench`, regenerate `bench_baseline.csv`, and run the full
+campaign to confirm Stage 1 changed nothing.
+
+`bench_baseline.csv` is stale in two known ways, both to be fixed by that
+regeneration rather than piecemeal:
+
+- it is missing `whole_program/mini/4` and `whole_program/medium/112`, which were
+  measured *after* the CSV was written;
+- `geom/even_dist2` will step, because `even_dist2` now allocates its five
+  `(nq, np)` arrays internally instead of taking them as out-parameters, and the
+  bench no longer hoists them out of `b.iter()`. The new number is the honest one —
+  the driver allocates per segment too — but it is not comparable to the old.
 
 Stage 2, each with Tier B then C:
 
