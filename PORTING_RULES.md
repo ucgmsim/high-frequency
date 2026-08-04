@@ -266,9 +266,11 @@ one at the call site. **Default disposition: reproduce.**
 Fixing any of these is Stage 2 work, done as a deliberate re-baseline with a written
 justification. Never silently re-baseline a golden.
 
-Two of them are flagged for an explicit fix-or-keep decision in `REFACTOR.md` §2.6:
-the `stdd(0,l)` sample shift and the `siteamp` convention split. The rest keep the
-default disposition.
+Two of them are **decided: fix, in Stage 2** — the `stdd(0,l)` sample shift and the
+`siteamp` convention split. See `REFACTOR.md` §2.6. They stay reproduced through
+Stage 1 only because fixing them changes output, which would confound the
+bit-reproducibility gate Stage 1 is verified against. The rest keep the default
+disposition.
 
 ## 8. Input parsing
 

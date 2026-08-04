@@ -489,15 +489,17 @@ passes 0. A modern geodesic (`geographiclib-rs`) is both smaller at the call sit
 and more accurate. Tier C, since it moves distances by metres and distance feeds
 the path-duration branch selection.
 
-### 2.6 Defects flagged for a Stage 2 decision
+### 2.6 Defects: both are to be FIXED, in Stage 2
 
-Two genuine defects in the original, both faithfully reproduced by the port, both
-needing a **fix-or-keep** decision that is a science call rather than an engineering
-one. Neither can be resolved under Stage 1's bit-identity gate, so both wait here.
+Two genuine defects in the original, both faithfully reproduced by the port.
 
-They are registered alongside the rest in `PORTING_RULES.md` §7, whose standing
-disposition is *reproduce, do not fix*. This section is where that default gets
-revisited.
+**Decided: fix both.** They are deferred to Stage 2 rather than fixed now for one
+reason — fixing either changes output, which would confound the bit-reproducibility
+gate that everything in Stage 1 is verified against. Stage 1 needs `cmp` to mean
+something; a deliberate output change and an accidental one look identical to it.
+
+So the disposition in `PORTING_RULES.md` §7 — *reproduce, do not fix* — holds through
+Stage 1 and is overridden here. These are scheduled work, not open questions.
 
 #### Defect 1 — `stdd(0, l)`: every subfault's contribution is delayed one sample
 
@@ -532,9 +534,14 @@ is a real phase error at high frequency — half a cycle at 100 Hz, a tenth of a
 at 10 Hz. That is the question to answer before deciding, and it is answered by
 looking at how the two are combined downstream, not by anything in this repository.
 
-**Recommendation: fix it**, in its own commit, with the Tier C delta recorded. Expect
-Tier C to show no change, and say so explicitly rather than treating the null result
-as confirmation the fix was unnecessary.
+**Fix, in its own commit, with the Tier C delta recorded.** Expect Tier C to show no
+change, and say so explicitly rather than treating the null result as confirmation the
+fix was unnecessary — the gates are blind to this defect by construction, which is
+exactly why it needs the downstream-summation argument above rather than a green
+dashboard.
+
+Do it *after* §2.1: the FFT swap will move the spectrum slightly, and it is easier to
+read one deliberate change at a time than two superimposed.
 
 #### Defect 2 — site amplification applies two different conventions
 
@@ -576,9 +583,14 @@ So this is a real inconsistency with negligible numerical consequence. It is wor
 fixing because it is *confusing* — two conventions in one routine, with nothing
 saying so — not because it moves any waveform.
 
-**Recommendation: fix it** as part of §2.2b or the site-amplification cleanup, and
-delete the property test that pins it. That test asserts the two conventions visibly
-disagree, so it fails the moment they are reconciled, which is the intended trigger.
+**Fix**, and delete the property test that pins it. That test asserts the two
+conventions visibly disagree, so it fails the moment they are reconciled — which is
+the intended trigger, not a regression.
+
+Reconcile *towards the exponential*: the interior convention is the one the table is
+built for (`site_amplification_factors` produces log amplitudes) and the one 8191 of
+8193 bins already use. Changing the interior to match the ends would be the wrong
+direction and would move every waveform.
 
 #### Not defects: frozen switches
 
@@ -696,7 +708,8 @@ Stage 2, each with Tier B then C:
 8. `num-complex` (2.2).
 9. `powf` cleanup (2.4).
 10. `delaz5` (2.5).
-11. The two science decisions (2.6), separately, each with its Tier C delta recorded.
+11. The two defect fixes (2.6), separately, each with its Tier C delta recorded:
+    the `siteamp` convention split, then the `stdd(0,l)` sample shift.
 12. `Array1`/`Array2` (2.3), module by module, last.
 13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
