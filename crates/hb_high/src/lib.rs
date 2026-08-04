@@ -12,9 +12,11 @@
 //! The single hard rule: **output must be byte-identical to
 //! `reference/hb_high_ref.f`** on every deck in `harness/decks/`.
 
+pub mod deck;
 pub mod fft;
 pub mod fort;
 pub mod geom;
+pub mod input;
 pub mod highcor;
 pub mod radiation;
 pub mod ray;

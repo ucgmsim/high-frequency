@@ -39,12 +39,9 @@ Copy it verbatim anyway. Confirmed with the gate: "fixing" it to `3.14159265`
 changes `stdd` in the taper region. If it is ever worth correcting, that is a
 Phase 3 re-baseline with a written justification.
 
-Do not write `3.1415926 / 180` as a single pre-divided decimal either — the
-division is part of the arithmetic and rounds once.
-
 **Never** substitute `std::f32::consts::PI`, `TAU`, or a "more accurate" value.
-Never fold `3.1415926/180` into a single decimal literal — the division is part
-of the arithmetic.
+Never fold `3.1415926/180` into a single pre-divided decimal either — the
+division is part of the arithmetic and rounds once.
 
 The same applies to every other magic number: `rp=0.63`, `prtitn=0.71`,
 `fs=2.0`, `radmin=1.0`, `radvh=0.7`, `range=10.`/`40.`, `1.5707965`. Copy the
@@ -74,6 +71,9 @@ plainly. Known affected sites so far:
 | --- | --- | --- |
 | `geom_terms` | `0.999999` | `sini` clamp, `real*8` |
 | `geom_terms` | `0.001` | `rsum` floor, `real*8` |
+| `gf_amp_tt` | `0.02` | `hs_tol`, `real*8` |
+| air-layer insert | `0.001` | `vp0(1)`, `rho0(1)`, `real*8` |
+| air-layer insert | `0.0005` | `vsh0(1)`, `real*8` |
 
 When porting any `implicit real*8` routine, check every unsuffixed literal
 against this rule. The ray cluster (`cagcon`, `dtdp`, `pnot`, `trav`, `ttime`)
