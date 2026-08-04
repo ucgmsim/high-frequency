@@ -102,10 +102,10 @@ pub fn simulate(
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70,
         1.00, 2.00, 3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let mut siteamp_log_freq = vec![0.0f32; params::NLAYMAX];
-    for (slot, hz) in siteamp_log_freq.iter_mut().zip(fn_hz.iter()).take(nsfac) {
-        *slot = hz.ln();
-    }
+    // `nsfac` entries, not `NLAYMAX` = 500. The Fortran declared this and `siteamp_factors`
+    // over the layer ceiling because they sat in a common block sized for the velocity
+    // model, but both are indexed `0..nsfac` -- a frequency table, not a layer table.
+    let siteamp_log_freq: Vec<f32> = fn_hz[..nsfac].iter().map(|hz| hz.ln()).collect();
 
     // Resolved-default accessors are called once, here; the body below then reads
     // under the Fortran's names as the transliteration it still largely is.
@@ -232,7 +232,7 @@ pub fn simulate(
     // the allocation without shrinking the draw would be a buffer overrun; shrinking the
     // draw would change every waveform. See REFACTOR.md §2.6b.
     let mut normal_deviates = vec![0.0f32; MMV];
-    let mut siteamp_factors = vec![0.0f32; params::NLAYMAX];
+    let mut siteamp_factors = vec![0.0f32; nsfac];
 
     // ------------------------------------------------- the single station ---
     let mut d10 = 1000.0f32;

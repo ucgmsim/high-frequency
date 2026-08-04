@@ -18,15 +18,15 @@ use crate::fort::Array1;
 pub mod params {
     /// Maximum layers in the velocity model.
     pub const NLAYMAX: usize = 500;
-    /// Maximum subfaults along strike.
-    pub const NQ: usize = 600;
-    /// Maximum subfaults down dip.
-    pub const NP: usize = 100;
-    /// Maximum fault segments.
-    pub const LV: usize = 1000;
-    /// `mm` from `params_no_window.h` (main program under VERSION1).
-    pub const MM: usize = 262144;
     /// `mmv` from `params_no_window.h`.
+    ///
+    /// The last compile-time ceiling in the port, and it is not a ceiling on capability:
+    /// it is the number of normal deviates `simulate` draws per station, which is part of
+    /// the RNG stream and therefore load-bearing rather than a size. See §2.6b.
+    ///
+    /// `NQ` (600 subfaults along strike), `NP` (100 down dip), `LV` (1000 segments) and
+    /// `MM` (262144 samples) were deleted in §2.3/§2.6b: every buffer they sized is now
+    /// sized from the deck, so a longer record no longer needs a recompile.
     pub const MMV: usize = 262144;
 }
 
