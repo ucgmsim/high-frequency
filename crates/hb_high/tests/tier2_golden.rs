@@ -205,7 +205,7 @@ fn radfrq_lin_matches_fortran() {
 
         let (mut rng, _) = Pcg32::seed(seed);
         let mut rdna = Array1::<f32>::new(nfold);
-        let fr1 = horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, thaa, &dfr, nfold, cmp, nr, &mut rdna);
+        let fr1 = horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, thaa, dfr.as_slice(), nfold, cmp, nr, rdna.as_mut_slice());
 
         let tag = format!("horizontal_radiation_spectrum case {cases} (cmp={cmp})");
         eq32(&format!("{tag} fr1 (clobbered)"), fr1, want_fr1);
@@ -244,7 +244,7 @@ fn radv_lin_matches_fortran() {
         let want_rdna: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
 
         let mut rdna = Array1::<f32>::new(nfold);
-        let fr1 = vertical_radiation_spectrum(stra, dipa, raka, pa, thaa, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
+        let fr1 = vertical_radiation_spectrum(stra, dipa, raka, pa, thaa, dfr.as_slice(), nfold, rna.as_slice(), rnb.as_slice(), nr, rdna.as_mut_slice());
 
         let tag = format!("vertical_radiation_spectrum case {cases}");
         eq32(&format!("{tag} fr1 (clobbered to 0.001)"), fr1, want_fr1);

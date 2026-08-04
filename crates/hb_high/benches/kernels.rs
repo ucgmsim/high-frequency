@@ -235,8 +235,8 @@ fn bench_radiation(c: &mut Criterion) {
         let (mut g, _) = Pcg32::seed(7);
         b.iter(|| {
             horizontal_radiation_spectrum(
-                &mut g, 1.2, 0.9, -0.4, 2.1, 2.6, &dfr, nfold,
-                black_box(-90.0 * (3.1415926 / 180.0)), NR, &mut rdna,
+                &mut g, 1.2, 0.9, -0.4, 2.1, 2.6, dfr.as_slice(), nfold,
+                black_box(-90.0 * (3.1415926 / 180.0)), NR, rdna.as_mut_slice(),
             )
         })
     });
@@ -248,7 +248,7 @@ fn bench_radiation(c: &mut Criterion) {
     fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
     group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
         b.iter(|| {
-            vertical_radiation_spectrum(1.2, 0.9, -0.4, 2.1, 2.6, &dfr, nfold, &rna, &rnb, NR, &mut rdna)
+            vertical_radiation_spectrum(1.2, 0.9, -0.4, 2.1, 2.6, dfr.as_slice(), nfold, rna.as_slice(), rnb.as_slice(), NR, rdna.as_mut_slice())
         })
     });
 

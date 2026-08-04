@@ -319,11 +319,12 @@ pub fn simulate(
         // `np2` is not known until the time-window pass above has produced `tmax`, and
         // both of these are per-segment quantities that are fully rewritten each time
         // round, so nothing carries across segments.
-        let mut freq = Array1::<f32>::new(nfold);
-        let mut radiation = Array1::<f32>::new(nfold);
+        let mut freq = vec![0.0f32; nfold];
+        let mut radiation = vec![0.0f32; nfold];
         let df = 1.0 / (np2 as f32 * dt);
-        for i in 1..=nfold {
-            freq[i] = df * (i - 1) as f32;
+        // 0-based, which also removes the `- 1`: the axis is `df * bin`.
+        for (bin, f) in freq.iter_mut().enumerate() {
+            *f = df * bin as f32;
         }
 
         let mut spectrum: [Array1<Complex32>; 3] = [
@@ -416,7 +417,7 @@ pub fn simulate(
                     stochastic_spectrum(
                         &mut rng, np2, rpath, tw, tw_eps, tw_eta, shear_velocity_km_s, density_g_cm3, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
-                        spectrum[kf - 1].as_mut_slice(), freq.as_slice(), qbar, qfexp,
+                        spectrum[kf - 1].as_mut_slice(), &freq, qbar, qfexp,
                         moment_scale,
                     );
                 }
@@ -428,7 +429,7 @@ pub fn simulate(
                     );
                     for k in 0..3 {
                         apply_site_amplification(
-                            spectrum[k].as_mut_slice(), freq.as_slice(), nsfac,
+                            spectrum[k].as_mut_slice(), &freq, nsfac,
                             siteamp_log_freq.as_slice(), siteamp_factors.as_slice(),
                         );
                     }
@@ -450,15 +451,25 @@ pub fn simulate(
                 let pa = geom.azimuth_rad[(i, j)];
 
                 let component_rad = -90.0 * deg_to_rad;
-                horizontal_radiation_spectrum(&mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, component_rad, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, spectrum[0].as_mut_slice(), subfault_acc[0].as_mut_slice(), radiation.as_slice());
+                horizontal_radiation_spectrum(
+                        &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
+                        nfold, component_rad, nr, &mut radiation,
+                    );
+                apply_radiation_and_invert(nfold, mfold, spectrum[0].as_mut_slice(), subfault_acc[0].as_mut_slice(), &radiation);
 
                 let component_rad = 0.0f32;
-                horizontal_radiation_spectrum(&mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, component_rad, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, spectrum[1].as_mut_slice(), subfault_acc[1].as_mut_slice(), radiation.as_slice());
+                horizontal_radiation_spectrum(
+                        &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
+                        nfold, component_rad, nr, &mut radiation,
+                    );
+                apply_radiation_and_invert(nfold, mfold, spectrum[1].as_mut_slice(), subfault_acc[1].as_mut_slice(), &radiation);
 
-                vertical_radiation_spectrum(strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, &radv_rand_a, &radv_rand_b, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, spectrum[2].as_mut_slice(), subfault_acc[2].as_mut_slice(), radiation.as_slice());
+                vertical_radiation_spectrum(
+                        strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold,
+                        radv_rand_a.as_slice(), radv_rand_b.as_slice(), nr,
+                        &mut radiation,
+                    );
+                apply_radiation_and_invert(nfold, mfold, spectrum[2].as_mut_slice(), subfault_acc[2].as_mut_slice(), &radiation);
 
                 // Rupture time at this subfault.
                 let mut ratim;

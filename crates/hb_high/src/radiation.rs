@@ -92,11 +92,11 @@ pub fn horizontal_radiation_spectrum(
     rake_rad: f32,
     azimuth_rad: f32,
     takeoff_rad: f32,
-    frequency_hz: &crate::fort::Array1<f32>,
+    frequency_hz: &[f32],
     fold_count: usize,
     component_rad: f32,
     sample_count: usize,
-    radiation: &mut crate::fort::Array1<f32>,
+    radiation: &mut [f32],
 ) -> f32 {
     let pu = 3.1415926 / 180.0;
 
@@ -147,7 +147,7 @@ pub fn horizontal_radiation_spectrum(
 
     let radvh = (radv / sample_count as f32).sqrt();
 
-    for i in 1..=fold_count {
+    for i in 0..fold_count {
         let del = if frequency_hz[i] <= fr1 {
             radmin
         } else if frequency_hz[i] > fr1 && frequency_hz[i] <= fr2 {
@@ -186,12 +186,12 @@ pub fn vertical_radiation_spectrum(
     rake_rad: f32,
     azimuth_rad: f32,
     takeoff_rad: f32,
-    frequency_hz: &crate::fort::Array1<f32>,
+    frequency_hz: &[f32],
     fold_count: usize,
-    uniform_a: &crate::fort::Array1<f32>,
-    uniform_b: &crate::fort::Array1<f32>,
+    uniform_a: &[f32],
+    uniform_b: &[f32],
     sample_count: usize,
-    radiation: &mut crate::fort::Array1<f32>,
+    radiation: &mut [f32],
 ) -> f32 {
     let pu = 3.1415926 / 180.0;
 
@@ -214,7 +214,7 @@ pub fn vertical_radiation_spectrum(
     }
 
     let mut radv = 0.0f32;
-    for k in 1..=sample_count {
+    for k in 0..sample_count {
         // Uniform in cos(th) between the clamped limits.
         let th = ((1.0 - uniform_a[k]) * tha1.cos() + uniform_a[k] * tha2.cos()).acos();
         let fa = 360.0 * pu * uniform_b[k];
@@ -225,7 +225,7 @@ pub fn vertical_radiation_spectrum(
 
     let radvh = radv / sample_count as f32 / 2.0;
 
-    for i in 1..=fold_count {
+    for i in 0..fold_count {
         radiation[i] = rdx;
         if frequency_hz[i] <= fr1 {
             continue;
