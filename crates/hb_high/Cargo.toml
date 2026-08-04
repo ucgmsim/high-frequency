@@ -19,6 +19,7 @@ description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic h
 # Pinned to versions already in ~/.cargo/registry -- the network is blocked, so
 # resolution must succeed offline.
 criterion = { version = "0.8.2", features = ["html_reports"] }
+proptest = "1.11"
 
 [[bin]]
 name = "hb_high"
