@@ -1,6 +1,6 @@
 //! Site amplification.
 
-use crate::fort::{Array1, Complex32};
+use crate::fort::Complex32;
 use crate::state::VelocityModel;
 
 /// `subroutine site_amplification_factors(layer_count,frequency_count,fn,factors)` — `hb_high_ref.f:3020`.
@@ -28,12 +28,14 @@ pub fn site_amplification_factors(
     vmod: &VelocityModel,
     layer_count: usize,
     frequency_count: usize,
-    log_frequency: &Array1<f32>,
-    factors: &mut Array1<f32>,
+    log_frequency: &[f32],
+    factors: &mut [f32],
 ) {
     let vdsrc = (vmod.vsh_km_s[layer_count] * vmod.density_g_cm3[layer_count]) as f32;
 
-    for kf in 1..=frequency_count {
+    // 0-based over the table. `vmod`'s arrays are still `Array1` and still 1-based --
+    // the types say which is which, so there is nothing to confuse.
+    for kf in 0..frequency_count {
         let stt = 0.25 / log_frequency[kf].exp();
 
         let mut i = 2usize;
@@ -78,51 +80,52 @@ pub fn site_amplification_factors(
 /// which is why the interpolation is linear in `freq = alog(frequency_hz(i))` and the
 /// result is exponentiated.
 pub fn apply_site_amplification(
-    np2: usize,
-    spectrum: &mut Array1<Complex32>,
-    frequency_hz: &Array1<f32>,
+    spectrum: &mut [Complex32],
+    frequency_hz: &[f32],
     table_count: usize,
-    log_frequency: &Array1<f32>,
-    factors: &Array1<f32>,
+    log_frequency: &[f32],
+    factors: &[f32],
 ) {
+    // `np2` was a separate argument and is the spectrum's length at every call site.
+    let np2 = spectrum.len();
     let np = np2 / 2;
-    let nf = np + 1;
 
-    let mut kn = 1usize;
+    // 0-based since §2.3. `kn` is the table cursor: the Fortran's `kn <= table_count`
+    // becomes `kn < table_count` and its `kn > table_count` becomes
+    // `kn >= table_count`, with the clamp reading the last entry as
+    // `factors[table_count - 1]`. Traced against the 1-based original for
+    // table_count = 6: it walks 1..7 there and 0..6 here, clamping on the same step.
+    let mut kn = 0usize;
     let mut fm = 0.0f32;
     let mut am = factors[kn];
     let mut fp = log_frequency[kn];
     let mut ap = factors[kn];
 
     // DC. The factors are LOG amplitudes, so this exponentiates like every interior
-    // bin does. The Fortran multiplied by the raw factor here and at Nyquist while
-    // exponentiating everything between -- two conventions in one routine, disagreeing
-    // by a factor of 3.3 at a log-amplitude of 0.5. See REFACTOR.md §2.6 defect 2.
-    //
-    // There is no interpolation to do at zero frequency: `ln(0)` is undefined, so the
-    // bottom table entry is used, which is what the original did too.
-    spectrum[1] = spectrum[1] * factors[1].exp();
+    // bin does -- §2.6 defect 2. There is no interpolation to do at zero frequency:
+    // `ln(0)` is undefined, so the bottom table entry is used, as the original did.
+    spectrum[0] = spectrum[0] * factors[0].exp();
 
-    for i in 2..=np {
+    for i in 1..np {
         let freq = frequency_hz[i].ln();
 
-        // Label 9123: advance the interpolation bracket. Written as factors
+        // Label 9123: advance the interpolation bracket. Written as an
         // if-then-with-backward-goto in the source, which is a do-while.
-        if freq > fp && kn <= table_count {
+        if freq > fp && kn < table_count {
             loop {
                 fm = fp;
                 am = ap;
                 kn += 1;
-                if kn > table_count {
+                if kn >= table_count {
                     // Past the table: pin the upper edge far away so the
                     // interpolation flattens to the last value.
                     fp = 1.0e+15;
-                    ap = factors[table_count];
+                    ap = factors[table_count - 1];
                 } else {
                     fp = log_frequency[kn];
                     ap = factors[kn];
                 }
-                if !(freq > fp && kn <= table_count) {
+                if !(freq > fp && kn < table_count) {
                     break;
                 }
             }
@@ -132,14 +135,18 @@ pub fn apply_site_amplification(
         spectrum[i] = spectrum[i] * fac;
     }
 
-    // Re-impose Hermitian symmetry over the negative-frequency half.
-    for i in 1..=np - 1 {
-        spectrum[np2 - i + 1] = spectrum[i + 1].conj();
+    // Re-impose Hermitian symmetry over the negative-frequency half. The Fortran
+    // writes spectrum(np2 - i + 1) = conjg(spectrum(i + 1)) from a 1-based i; with
+    // j = i - 1 the destination is np2 - j - 1 and the source is j + 1. Checked on
+    // np2 = 16: Fortran i = 1 writes spectrum(16) from spectrum(2), storage 15 from
+    // storage 1; j = 0 gives 16 - 0 - 1 = 15 from 0 + 1 = 1.
+    for j in 0..np - 1 {
+        spectrum[np2 - j - 1] = spectrum[j + 1].conj();
     }
 
     // Nyquist takes the top of the table, exponentiated for the same reason as DC.
-    // This is the half of defect 2 that was actually live: unlike DC -- which
-    // `stochastic_spectrum` sets to zero, making the wrong gain unobservable -- this bin
-    // carries a value.
-    spectrum[nf] = spectrum[nf] * factors[table_count].exp();
+    // This is the half of §2.6 defect 2 that was actually live: unlike DC -- which
+    // `stochastic_spectrum` sets to zero, making the wrong gain unobservable -- this
+    // bin carries a value.
+    spectrum[np] = spectrum[np] * factors[table_count - 1].exp();
 }

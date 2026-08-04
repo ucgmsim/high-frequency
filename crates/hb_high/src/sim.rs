@@ -422,9 +422,15 @@ pub fn simulate(
                 }
 
                 if config.site_amp {
-                    site_amplification_factors(&vmod, ksrc, nsfac, &siteamp_log_freq, &mut siteamp_factors);
+                    site_amplification_factors(
+                        &vmod, ksrc, nsfac, siteamp_log_freq.as_slice(),
+                        siteamp_factors.as_mut_slice(),
+                    );
                     for k in 0..3 {
-                        apply_site_amplification(np2, &mut spectrum[k], &freq, nsfac, &siteamp_log_freq, &siteamp_factors);
+                        apply_site_amplification(
+                            spectrum[k].as_mut_slice(), freq.as_slice(), nsfac,
+                            siteamp_log_freq.as_slice(), siteamp_factors.as_slice(),
+                        );
                     }
                 }
                 // famprand is dead: fasig1 = fasig2 = 0.

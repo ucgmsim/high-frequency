@@ -120,7 +120,7 @@ fn get_sitefacs_matches_fortran() {
         let want: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
 
         let mut an = Array1::<f32>::new(nfreq);
-        site_amplification_factors(&vmod, j0, nfreq, &fn_, &mut an);
+        site_amplification_factors(&vmod, j0, nfreq, fn_.as_slice(), an.as_mut_slice());
         for k in 1..=nfreq {
             eq32(&format!("site_amplification_factors j0={j0} an[{k}]"), an[k], want[k - 1]);
         }

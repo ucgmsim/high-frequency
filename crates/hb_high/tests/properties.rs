@@ -583,7 +583,7 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(np2, &mut spec, &frequency, 6, &log_frequency, &factors);
+        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
 
         let want = level.exp();
         for i in 2..=np2 / 2 {
@@ -605,7 +605,7 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(np2, &mut spec, &frequency, 6, &log_frequency, &factors);
+        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
         for i in 2..=np2 / 2 {
             prop_assume!(original[i].norm() > 1e-3);
             let before = original[i].im.atan2(original[i].re);
@@ -626,7 +626,7 @@ proptest! {
         let np2 = 1usize << exponent;
         let mut spec = spectrum(np2, 53);
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(np2, &mut spec, &frequency, 6, &log_frequency, &factors);
+        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
         for i in 1..=np2 / 2 - 1 {
             let positive = spec[i + 1];
             let negative = spec[np2 - i + 1];

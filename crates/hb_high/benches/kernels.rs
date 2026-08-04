@@ -354,10 +354,10 @@ fn bench_spectrum(c: &mut Criterion) {
             )
         });
 
-        group.bench_with_input(BenchmarkId::new("apply_site_amplification", np2), &np2, |b, &np2| {
+        group.bench_with_input(BenchmarkId::new("apply_site_amplification", np2), &np2, |b, &_np2| {
             b.iter_batched_ref(
                 || src.clone(),
-                |cw| apply_site_amplification(np2, cw, &dfr, 20, &fn_, &an),
+                |cw| apply_site_amplification(cw.as_mut_slice(), dfr.as_slice(), 20, fn_.as_slice(), an.as_slice()),
                 criterion::BatchSize::SmallInput,
             )
         });
@@ -381,7 +381,7 @@ fn bench_spectrum(c: &mut Criterion) {
     let (fn_, mut an) = site_table();
     group.throughput(Throughput::Elements(1));
     group.bench_function("site_amplification_factors", |b| {
-        b.iter(|| site_amplification_factors(&v, black_box(20), black_box(20), &fn_, &mut an))
+        b.iter(|| site_amplification_factors(&v, black_box(20), black_box(20), fn_.as_slice(), an.as_mut_slice()))
     });
 
     group.finish();
