@@ -15,7 +15,9 @@ use hb_high::deck::ListReader;
 use hb_high::fort::{nint, Array1, Array2, Complex32};
 use hb_high::geom::even_dist2;
 use hb_high::highcor::highcor_f;
-use hb_high::input::{insert_air_layer, read_stations, read_stoch, read_velocity_model};
+use hb_high::input::{
+    insert_air_layer, read_stations, read_stoch, read_velocity_model, StochModel,
+};
 use hb_high::radiation::{radfrq_lin, radv_lin};
 use hb_high::ray::gf_amp_tt;
 use hb_high::rng::{normal_random_number, ranu2, Pcg32};
@@ -365,7 +367,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let Deck {
         mut stress_average, asite, outname, nrtyp, irtype, isite_amp, iftt, fhil,
         mut irand, nsite, duration, dt, fmx, akapp, qfexp, rvfac, shal_rvfac,
-        deep_rvfac, czero, calpha, mut sm, vr, slip_model, velfile, vsmoho,
+        deep_rvfac, czero, calpha, sm, vr, slip_model, velfile, vsmoho,
         mut nlskip, fasig1, fasig2, rvsig1, ipdur_model, ispar_adjust,
         mut targ_mag, mut fault_area, seek_bytes,
     } = read_deck(&mut deck)?;
@@ -428,106 +430,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         deep_dmax: deep_dmax_default,
     };
 
-    // ------------------------------------ average subfault size and max slip -
-    let mut dlm = 0.0f32;
-    let mut amx2 = 0.0f32;
-    for s in &stoch.segments {
-        dlm = (s.dx * s.dw).sqrt() + dlm;
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                amx2 = amx2.max(s.sddp[(i, j)].abs());
-            }
-        }
-    }
-    let slip_max = amx2;
-    let _ = slip_max;
-    dlm /= nevnt as f32;
-
-    // ------------- relative slip to relative moment; average fc and risetime -
-    let islip_weight_avg = 0; // set to 1 then 0
-    let mut nstot = 0usize;
-    let mut xsum = 0.0f32;
-    let mut fce_avg = 0.0f32;
-    let mut trise_avg = 0.0f32;
-
-    for iv in 0..nevnt {
-        let dwdj = stoch.segments[iv].dw * (stoch.segments[iv].dipq * pu).sin();
-        let nw = stoch.segments[iv].nw;
-        let nx = stoch.segments[iv].nx;
-        for j in 1..=nw {
-            let zdep = stoch.segments[iv].dtop + (j as f32 - 0.5) * dwdj;
-            // Layer lookup. Falls through with k = j0+1 if zdep is below the
-            // model, which the Fortran then indexes -- see below.
-            let mut k = j0 + 1;
-            for kk in 1..=j0 {
-                if zdep <= vmod_in.depth0[kk] {
-                    k = kk;
-                    break;
-                }
-            }
-            let bet = vmod_in.vsh0[k] as f32;
-            // vsh0 and rho0 are real*8 and dx/dw are real*4, so the WHOLE
-            // product is computed in double (dx/dw promoted) and narrows only on
-            // assignment to xmu, which is implicit real*4. Narrowing earlier
-            // shifts every subfault moment by an ulp or two.
-            let xmu = (vmod_in.vsh0[k] * vmod_in.vsh0[k] * vmod_in.rho0[k]
-                * stoch.segments[iv].dx as f64
-                * stoch.segments[iv].dw as f64) as f32;
-
-            for i in 1..=nx {
-                let v = xmu * stoch.segments[iv].sddp[(i, j)];
-                stoch.segments[iv].sddp[(i, j)] = v;
-                xsum += v;
-
-                let rvf = rv.factor(zdep);
-                let alphat = alpha_t(
-                    stoch.segments[iv].dipq, stoch.segments[iv].rakeq, calpha,
-                );
-                let zz = czero * (1.0 + fcfac) / alphat;
-                let mut fce = zz * rvf * bet / (dlm * pai);
-                let mut trise = stoch.segments[iv].rist[(i, j)];
-                if islip_weight_avg == 1 {
-                    fce = stoch.segments[iv].sddp[(i, j)] * fce;
-                    trise = stoch.segments[iv].sddp[(i, j)] * trise;
-                }
-                fce_avg += fce;
-                trise_avg += trise;
-                nstot += 1;
-            }
-        }
-    }
-
-    if sm < 0.0 {
-        sm = 1.0e+20 * xsum;
-    }
-    let xnorm = if islip_weight_avg == 1 { 1.0 / xsum } else { 1.0 / nstot as f32 };
-    fce_avg *= xnorm;
-    trise_avg *= xnorm;
-
-    let fcoef = czero / (2.0 * pai);
-    let fcmain = fcoef / trise_avg;
-
-    // ------------------- normalise relative moments to average weight unity --
-    let mut amx2 = 0.0f32;
-    let mut nstot = 0usize;
-    for s in &stoch.segments {
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                if s.sddp[(i, j)] > 0.001 {
-                    amx2 += s.sddp[(i, j)];
-                    nstot += 1;
-                }
-            }
-        }
-    }
-    let amx2 = nstot as f32 / amx2;
-    for s in &mut stoch.segments {
-        for j in 1..=s.nw {
-            for i in 1..=s.nx {
-                s.sddp[(i, j)] *= amx2;
-            }
-        }
-    }
+    // ------------------------------------------------ source normalisation ---
+    let SourceScale { dlm, sm, fce_avg, fcmain, nstot } =
+        normalise_source(&mut stoch, j0, &vmod_in, &rv, pu, pai, czero, calpha, fcfac, sm);
 
     // ---------------------------------------- stress parameter adjustment ----
     if targ_mag <= 0.0 {
@@ -922,6 +827,155 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Scalars derived from the slip model before any station is simulated.
+struct SourceScale {
+    /// Average subfault dimension `sqrt(dx*dw)`, averaged over segments, km.
+    dlm: f32,
+    /// Total seismic moment. Derived from the summed subfault moments when the
+    /// deck asked for it with a negative value.
+    sm: f32,
+    /// Mean subfault corner frequency, normalised. Feeds `bigc3`.
+    fce_avg: f32,
+    /// Corner frequency of the whole event, from the mean rise time.
+    fcmain: f32,
+    /// Count of subfaults whose relative moment exceeds 0.001 — the same
+    /// threshold the subfault pass uses to skip a subfault entirely.
+    nstot: usize,
+}
+
+/// Convert relative slip to relative moment, then normalise to unit average
+/// weight, mutating `stoch.segments[..].sddp` in place.
+///
+/// Three passes over the subfault grid, in the Fortran's order:
+///
+/// 1. average subfault size, and the maximum absolute slip (computed and discarded)
+/// 2. slip → moment via the rigidity `xmu`, accumulating `xsum`, `fce_avg`,
+///    `trise_avg` and a count of *all* subfaults
+/// 3. re-count only the subfaults above 0.001 and rescale so their mean weight is 1
+///
+/// The two counts are different and both matter: pass 2's count normalises the
+/// averages, pass 3's is the one that reaches `bigc`. The Fortran shadows one
+/// `nstot` with the other, so only the second survives — hence only that one is
+/// returned.
+#[allow(clippy::too_many_arguments)]
+fn normalise_source(
+    stoch: &mut StochModel,
+    j0: usize,
+    vmod_in: &VmodIn,
+    rv: &RuptureVelocity,
+    pu: f32,
+    pai: f32,
+    czero: f32,
+    calpha: f32,
+    fcfac: f32,
+    sm_in: f32,
+) -> SourceScale {
+    let nevnt = stoch.segments.len();
+
+    // --- pass 1: average subfault size, and a max slip that goes nowhere ------
+    let mut dlm = 0.0f32;
+    let mut amx2 = 0.0f32;
+    for s in &stoch.segments {
+        dlm = (s.dx * s.dw).sqrt() + dlm;
+        for j in 1..=s.nw {
+            for i in 1..=s.nx {
+                amx2 = amx2.max(s.sddp[(i, j)].abs());
+            }
+        }
+    }
+    let _slip_max = amx2;
+    dlm /= nevnt as f32;
+
+    // --- pass 2: relative slip to relative moment; average fc and rise time ---
+    // Frozen switch: the Fortran sets this to 1 and then to 0, so 0 wins and both
+    // slip-weighted branches below are unreachable. Kept because collapsing it
+    // bakes in a decision someone once left adjustable -- see REFACTOR.md §2.6.
+    let islip_weight_avg = 0;
+    let mut nstot = 0usize;
+    let mut xsum = 0.0f32;
+    let mut fce_avg = 0.0f32;
+    let mut trise_avg = 0.0f32;
+
+    for iv in 0..nevnt {
+        let dwdj = stoch.segments[iv].dw * (stoch.segments[iv].dipq * pu).sin();
+        let nw = stoch.segments[iv].nw;
+        let nx = stoch.segments[iv].nx;
+        for j in 1..=nw {
+            let zdep = stoch.segments[iv].dtop + (j as f32 - 0.5) * dwdj;
+            // Layer lookup. Falls through with k = j0+1 if zdep is below the
+            // model, which the Fortran then indexes -- so the fall-through is
+            // load-bearing, not an error path.
+            let mut k = j0 + 1;
+            for kk in 1..=j0 {
+                if zdep <= vmod_in.depth0[kk] {
+                    k = kk;
+                    break;
+                }
+            }
+            let bet = vmod_in.vsh0[k] as f32;
+            // vsh0 and rho0 are real*8 and dx/dw are real*4, so the WHOLE
+            // product is computed in double (dx/dw promoted) and narrows only on
+            // assignment to xmu, which is implicit real*4. Narrowing earlier
+            // shifts every subfault moment by an ulp or two.
+            let xmu = (vmod_in.vsh0[k] * vmod_in.vsh0[k] * vmod_in.rho0[k]
+                * stoch.segments[iv].dx as f64
+                * stoch.segments[iv].dw as f64) as f32;
+
+            for i in 1..=nx {
+                let v = xmu * stoch.segments[iv].sddp[(i, j)];
+                stoch.segments[iv].sddp[(i, j)] = v;
+                xsum += v;
+
+                let rvf = rv.factor(zdep);
+                let alphat =
+                    alpha_t(stoch.segments[iv].dipq, stoch.segments[iv].rakeq, calpha);
+                let zz = czero * (1.0 + fcfac) / alphat;
+                let mut fce = zz * rvf * bet / (dlm * pai);
+                let mut trise = stoch.segments[iv].rist[(i, j)];
+                if islip_weight_avg == 1 {
+                    fce = stoch.segments[iv].sddp[(i, j)] * fce;
+                    trise = stoch.segments[iv].sddp[(i, j)] * trise;
+                }
+                fce_avg += fce;
+                trise_avg += trise;
+                nstot += 1;
+            }
+        }
+    }
+
+    let sm = if sm_in < 0.0 { 1.0e+20 * xsum } else { sm_in };
+    let xnorm = if islip_weight_avg == 1 { 1.0 / xsum } else { 1.0 / nstot as f32 };
+    fce_avg *= xnorm;
+    trise_avg *= xnorm;
+
+    let fcoef = czero / (2.0 * pai);
+    let fcmain = fcoef / trise_avg;
+
+    // --- pass 3: normalise relative moments to average weight unity -----------
+    let mut wsum = 0.0f32;
+    let mut nstot = 0usize;
+    for s in &stoch.segments {
+        for j in 1..=s.nw {
+            for i in 1..=s.nx {
+                if s.sddp[(i, j)] > 0.001 {
+                    wsum += s.sddp[(i, j)];
+                    nstot += 1;
+                }
+            }
+        }
+    }
+    let scale = nstot as f32 / wsum;
+    for s in &mut stoch.segments {
+        for j in 1..=s.nw {
+            for i in 1..=s.nx {
+                s.sddp[(i, j)] *= scale;
+            }
+        }
+    }
+
+    SourceScale { dlm, sm, fce_avg, fcmain, nstot }
 }
 
 /// The depth-dependent rupture-velocity taper.
