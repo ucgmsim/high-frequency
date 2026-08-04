@@ -17,8 +17,8 @@ use crate::state::{RayState, VelocityModel};
 /// * `pr = ray_parameter` assigns a `complex*16` to a `real*8`, which silently takes the
 ///   real part. It is not a typo for `dreal(ray_parameter)`.
 /// * the local named `pi` is `dimag(ray_parameter)`, the **imaginary part of ray_parameter**, not
-///   3.14159. The actual pi appears separately as the truncated 10-digit
-///   literal `3.141592654d0`, which is copied verbatim.
+///   3.14159. The actual pi appears separately, as the Fortran's truncated 10-digit
+///   literal `3.141592654d0`; it is `std::f64::consts::PI` here.
 pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Complex64 {
     let t1 = 1.0e-08f64;
     let rsq = 1.0f64 / (velocity_km_s * velocity_km_s);
@@ -32,7 +32,7 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     // Near the real axis the phase is forced to 0 or pi rather than taken from
     // atan2, which would be ill-conditioned there.
     let phi = if pi.abs() < t1 {
-        if a < 0.0 { 3.141592654f64 } else { 0.0 }
+        if a < 0.0 { std::f64::consts::PI } else { 0.0 }
     } else {
         b.atan2(a)
     };

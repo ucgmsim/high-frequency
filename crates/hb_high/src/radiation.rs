@@ -98,7 +98,7 @@ pub fn horizontal_radiation_spectrum(
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
-    let pu = 3.1415926 / 180.0;
+    let pu = std::f32::consts::PI / 180.0;
 
     let fr1 = 0.5f32;
     let fr2 = 2.0f32;
@@ -193,7 +193,7 @@ pub fn vertical_radiation_spectrum(
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
-    let pu = 3.1415926 / 180.0;
+    let pu = std::f32::consts::PI / 180.0;
 
     let _fr2_superseded = 1.5f32;
     let fr1 = 0.001f32;

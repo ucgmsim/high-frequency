@@ -58,30 +58,70 @@ fn eq32(what: &str, got: f32, want: f32) {
                got.to_bits(), want.to_bits());
 }
 
-#[track_caller]
-fn eq64(what: &str, got: f64, want: f64) {
-    assert_eq!(got.to_bits(), want.to_bits(),
-               "{what}: rust {got:?} (0x{:016x}) vs fortran {want:?} (0x{:016x})",
-               got.to_bits(), want.to_bits());
-}
+// `eq64` is gone: both `f64` goldens in this tier now go through `near64`, since the pi
+// correction in `vertical_slowness` reaches every value they compare. The `f32` goldens
+// below are untouched by it and are still exact.
 
-/// Relative comparison for the values that pass through complex division.
+/// Relative comparison for the values that no longer match the oracle bit for bit.
 ///
-/// `REFACTOR.md` §2.2 replaced the hand-written complex arithmetic with `num-complex`.
-/// Its `norm`, `exp` and `mul` are bit-identical to the gfortran forms; its **division**
-/// is not — it does not use gfortran's Smith-with-range-reduction branch, and differs by
-/// 1-2 ulps. `cagniard_time_derivative` is the only golden that reaches a
-/// complex/complex division, so it is the only one loosened.
+/// Two independent reasons, both understood and both bounded:
 ///
-/// `1e-12` relative is roughly 10,000x the observed 1-ulp difference, and still tight
-/// enough that a wrong branch, a swapped operand or a lost term fails immediately.
+/// * **Complex division.** `REFACTOR.md` §2.2 replaced the hand-written complex
+///   arithmetic with `num-complex`. Its `norm`, `exp` and `mul` are bit-identical to the
+///   gfortran forms; its **division** is not — it does not use gfortran's
+///   Smith-with-range-reduction branch, and differs by 1-2 ulps. Only
+///   `cagniard_time_derivative` reaches a complex/complex division.
+/// * **Pi.** `vertical_slowness` used to force the branch-cut phase to the Fortran's
+///   truncated `3.141592654d0` and now uses `std::f64::consts::PI`, which moves the real
+///   part of `eta` by up to 2.05e-10 of its magnitude on branch-cut cases — see
+///   `tier0_golden::cr_stays_close_to_fortran`. Both `cagniard_time` and
+///   `cagniard_time_derivative` sum `eta` over layers, so both inherit it.
+///
+/// The pi term dominates — ~1e-16 for the division ulps against these measured worsts:
+///
+/// ```text
+/// cagcon  1.082e-10   (cagniard_time, a plain sum of eta over layers)
+/// dtdp    7.012e-10   (cagniard_time_derivative, which divides BY eta)
+/// ```
+///
+/// `eta`'s own worst is 2.05e-10 (`tier0_golden::cr_stays_close_to_fortran`). `cagcon`
+/// stays under that, as a sum should. `dtdp` amplifies it ~3.4x, which is expected
+/// rather than alarming: it divides by `eta`, and near the branch cut `eta` is small, so
+/// a fixed relative perturbation upstream is magnified by however close that case sits
+/// to the cut. That amplification is data-dependent, so the bound needs real headroom
+/// over the observed worst rather than a snug fit to it.
+///
+/// `5e-9` is ~7x the measured worst, and still four orders tighter than anything that
+/// could hide a wrong branch, a swapped operand or a lost term.
 fn near64(what: &str, got: f64, want: f64) {
-    let tol = 1e-12 * want.abs().max(f64::MIN_POSITIVE);
+    let tol = 5e-9 * want.abs().max(f64::MIN_POSITIVE);
     assert!(
         (got - want).abs() <= tol,
         "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
         (got - want).abs()
     );
+}
+
+/// Track the worst relative divergence across a fixture, so the number that justifies
+/// [`near64`]'s tolerance stays measured rather than remembered.
+#[derive(Default)]
+struct Divergence {
+    worst: f64,
+    at: String,
+}
+
+impl Divergence {
+    fn note(&mut self, what: &str, got: f64, want: f64) {
+        let rel = (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
+        if rel > self.worst {
+            self.worst = rel;
+            self.at = what.to_string();
+        }
+    }
+
+    fn report(&self, fixture: &str) {
+        println!("{fixture}: worst relative divergence {:.3e} at {}", self.worst, self.at);
+    }
 }
 
 /// Shared record layout for the `cagniard_time`/`cagniard_time_derivative` seam.
@@ -102,37 +142,51 @@ fn read_ray_seam(r: &mut Reader) -> (RayState, VelocityModel, Complex64, f64, us
     (st, vmod, p, rr, ndp)
 }
 
+/// Was exact; now bounded. `cagniard_time` sums `vertical_slowness` over layers, so it
+/// inherits the pi correction described on [`near64`].
 #[test]
-fn cagcon_matches_fortran() {
+fn cagcon_stays_close_to_fortran() {
     let mut r = Reader::open("cagcon.bin");
     let mut n = 0;
+    let mut div = Divergence::default();
     while !r.done() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
         let got = cagniard_time(&st, &vmod, p, 1, rr);
-        eq64(&format!("cagniard_time case {n} (ndeep={ndp}) re"), got.re, want.re);
-        eq64(&format!("cagniard_time case {n} (ndeep={ndp}) im"), got.im, want.im);
+        let re = format!("cagniard_time case {n} (ndeep={ndp}) re");
+        let im = format!("cagniard_time case {n} (ndeep={ndp}) im");
+        div.note(&re, got.re, want.re);
+        div.note(&im, got.im, want.im);
+        near64(&re, got.re, want.re);
+        near64(&im, got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();
     assert_eq!(n, 200);
+    div.report("cagcon");
 }
 
 #[test]
-fn dtdp_matches_fortran() {
+fn dtdp_stays_close_to_fortran() {
     let mut r = Reader::open("dtdp.bin");
     let mut n = 0;
+    let mut div = Divergence::default();
     while !r.done() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
         // Exercises complex division: Smith's algorithm, not (ac+bd)/(c^2+d^2).
         let got = cagniard_time_derivative(&st, &vmod, p, 1, rr);
-        near64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) re"), got.re, want.re);
-        near64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) im"), got.im, want.im);
+        let re = format!("cagniard_time_derivative case {n} (ndeep={ndp}) re");
+        let im = format!("cagniard_time_derivative case {n} (ndeep={ndp}) im");
+        div.note(&re, got.re, want.re);
+        div.note(&im, got.im, want.im);
+        near64(&re, got.re, want.re);
+        near64(&im, got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();
     assert_eq!(n, 200);
+    div.report("dtdp");
 }
 
 /// Relative comparison against a per-record scale, for the values that pass through

@@ -15,18 +15,22 @@ use crate::fort::Complex32;
 /// vector partition factor for two orthogonal components (nominally
 /// `1/sqrt(2)`, written as two digits).
 ///
-/// # The taper constant is a typo, and it is reproduced
+/// # The taper constant was a typo, and it is now fixed
 ///
-/// The taper uses `dd = 3.14159625/n0` (`:2266`). That is **not** pi — the last
-/// digits of `3.14159265` are transposed. Every other occurrence in the file is
-/// some truncation of the correct value (`3.1415926`, `3.14159265`,
-/// `3.141592654`), so this one is a genuine slip.
+/// The taper used `dd = 3.14159625/n0` (`:2266`). That is **not** pi — the last digits
+/// of `3.14159265` are transposed. Every other occurrence in the file is some
+/// truncation of the correct value (`3.1415926`, `3.14159265`, `3.141592654`), so this
+/// one was a genuine slip rather than a deliberate approximation.
 ///
-/// It is copied verbatim regardless. The error is about 1.1e-6 relative, which
-/// leaves the taper very slightly short of a half cosine, so the final sample is
-/// not exactly zero. Fixing it would change every waveform's tail. If it is ever
-/// worth correcting, that is a Phase 3 re-baseline with a written justification,
-/// not a quiet cleanup. See `PORTING_RULES.md` §1.
+/// It was reproduced verbatim for as long as bit-identity was the contract, with a note
+/// saying that correcting it needed a written justification rather than a quiet cleanup.
+/// This is that justification. The error is about 1.1e-6 relative — roughly thirty times
+/// the worst of the file's honest truncations — and it left the taper fractionally short
+/// of a half cosine, so the final sample was not exactly zero. It is now
+/// `std::f32::consts::PI`, and the taper closes properly.
+///
+/// This changes every waveform's tail, in the last `np2/10` samples only, by a factor
+/// bounded by the taper's own 1.1e-6 error. See `PORTING_RULES.md` §1.
 pub fn apply_radiation_and_invert(
     fold_count: usize,
     mirror_count: usize,
@@ -65,11 +69,10 @@ pub fn apply_radiation_and_invert(
         *sample = fac * bin.re;
     }
 
-    // Raised-cosine taper over the final np2/10 samples. `dd` is 3.14159625, a
-    // transposition of pi's digits in the original and reproduced deliberately -- see
-    // the note above and `PORTING_RULES.md` §1.
+    // Raised-cosine taper over the final np2/10 samples. The original's `dd` used
+    // 3.14159625, a transposition of pi's digits; see the note above.
     let n0 = np2 / 10;
-    let dd = 3.14159625 / (n0 as f32);
+    let dd = std::f32::consts::PI / (n0 as f32);
     for i in 1..=n0 {
         let arg = 0.5 * (1.0 + (i as f32 * dd).cos());
         // Fortran writes time_series(np2 - n0 + i) for i = 1..=n0, i.e. the last n0

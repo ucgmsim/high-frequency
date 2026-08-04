@@ -113,7 +113,6 @@ pub fn distance_azimuth(
 /// Both `x` and `y` are computed on each pass but only one is kept, matching the
 /// Fortran.
 ///
-/// `pi` is the source's own 9-digit `3.14159265`, not `std::f32::consts::PI`.
 /// Everything here is `f32`; there is no double-precision arithmetic.
 #[allow(clippy::too_many_arguments)]
 /// One subfault's source-to-station geometry.
@@ -201,7 +200,8 @@ pub fn subfault_geometry(
     // This is the same argument `input::Segment` already makes for its three grids.
     let mut rays = vec![SubfaultRay::default(); along_strike_count * down_dip_count];
 
-    let pi = 3.14159265f32;
+    // Was the source's own 9-digit `3.14159265`; now the correctly rounded value.
+    let pi = std::f32::consts::PI;
     let alei = 0.0f32;
     let alsi = 0.0f32;
     let thei = fault_lat_deg;

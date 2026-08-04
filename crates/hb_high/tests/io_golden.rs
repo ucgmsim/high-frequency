@@ -70,7 +70,7 @@ fn eq64(what: &str, got: f64, want: f64) {
 
 fn check(golden: &str, stoch_name: &str) {
     let mut r = Reader::open(golden);
-    let pu = 3.1415926f32 / 180.0;
+    let pu = hb_high::config::DEG_TO_RAD;
 
     let stoch_text = std::fs::read_to_string(
         root().join("harness/fixtures/stoch").join(stoch_name),

@@ -234,7 +234,7 @@ fn bench_radiation(c: &mut Criterion) {
         b.iter(|| {
             horizontal_radiation_spectrum(
                 &mut g, 1.2, 0.9, -0.4, 2.1, 2.6, dfr.as_slice(), nfold,
-                black_box(-90.0 * (3.1415926 / 180.0)), NR, rdna.as_mut_slice(),
+                black_box(-90.0f32.to_radians()), NR, rdna.as_mut_slice(),
             )
         })
     });

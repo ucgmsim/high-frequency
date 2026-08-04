@@ -50,9 +50,10 @@ thread_local! {
 /// violation loud instead of silently producing garbage, since the bit-reversal
 /// permutation below is only a permutation for powers of two.
 ///
-/// The `3.141593` in the twiddle argument is a 7-digit truncation of pi, about
-/// 2 `f32` ulps off. It is load-bearing: substituting a more accurate value
-/// changes the last bits of every transform. See `PORTING_RULES.md` §1.
+/// The vendored kernel's twiddle argument used `3.141593`, a 7-digit truncation of pi
+/// about 2 `f32` ulps off, and that value was load-bearing while it computed its own
+/// twiddles. §2.1 handed the transform to `rustfft`, which builds correctly rounded
+/// twiddles in its plan, so the constant is gone along with the kernel.
 pub fn fast(data: &mut [Complex32], ind: i32) {
     // The length is the slice's, not a separate argument. Every call site passed
     // exactly `data.len()`, so the parameter could only ever have disagreed with

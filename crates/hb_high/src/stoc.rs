@@ -67,7 +67,7 @@ pub fn stochastic_spectrum(
     q_exponent: f32,
     moment_scale: f32,
 ) {
-    let pai = 3.1415926f32;
+    let pai = std::f32::consts::PI;
     let rp = 0.63f32;
 
     let fc2 = corner_frequency_hz * corner_frequency_hz;

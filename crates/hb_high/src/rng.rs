@@ -117,7 +117,7 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
             while x2 == 0.0 {
                 x2 = rng.next_f32();
             }
-            x2 = 6.2831853 * x2;
+            x2 = std::f32::consts::TAU * x2;
             x1 = -x1.ln();
             x1 = (x1 + x1).sqrt();
             j = 2;

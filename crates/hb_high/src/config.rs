@@ -23,12 +23,17 @@
 //! obvious in a type. Each such field is an `Option` here, with an accessor that
 //! resolves it, so the resolved value is computed in exactly one place.
 
-/// The Fortran's pi, spelled exactly as it appears at `hb_high_ref.f:150`.
+/// Pi.
 ///
-/// **Not** `std::f32::consts::PI`, which differs in the last bits. Both the slip
-/// model reader and the simulation convert degrees with this, so it lives in one
-/// place to keep them from drifting.
-pub const PI: f32 = 3.1415926;
+/// This was `3.1415926` — the Fortran's own 8-digit truncation from
+/// `hb_high_ref.f:150`, carried verbatim for as long as bit-identity was the contract.
+/// It is now `std::f32::consts::PI`, the correctly rounded value.
+///
+/// The truncation was wrong by 3.5e-8 relative (about 1 `f32` ulp), and being
+/// deliberately wrong about pi is not a thing to keep for precedent once the contract
+/// that required it has expired. Both the slip model reader and the simulation convert
+/// degrees with this, so it lives in one place to keep them from drifting.
+pub const PI: f32 = std::f32::consts::PI;
 
 /// Degrees to radians, from the same literal.
 pub const DEG_TO_RAD: f32 = PI / 180.0;

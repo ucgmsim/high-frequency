@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn reads_the_minimal_stoch_fixture() {
-        let pu = 3.1415926f32 / 180.0;
+        let pu = crate::config::DEG_TO_RAD;
         let m = read_stoch(MINI_STOCH, pu).unwrap();
         assert_eq!(m.segments.len(), 1);
         let s = &m.segments[0];
