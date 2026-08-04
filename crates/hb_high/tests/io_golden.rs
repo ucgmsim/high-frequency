@@ -125,13 +125,15 @@ fn check(golden: &str, stoch_name: &str) {
     let want_nlskip = r.i32();
     assert_eq!(j0, want_j0, "j0 after Moho truncation and air layer");
     assert_eq!(nlskip, want_nlskip, "nlskip");
-    for i in 1..=j0 { eq32(&format!("depth_km[{i}]"), v.depth_km[i], r.f32()); }
-    for i in 1..=j0 { eq32(&format!("thickness_km[{i}]"), v.thickness_km[i], r.f32()); }
-    for i in 1..=j0 { eq64(&format!("vp_km_s[{i}]"), v.vp_km_s[i], r.f64()); }
-    for i in 1..=j0 { eq64(&format!("vsh_km_s[{i}]"), v.vsh_km_s[i], r.f64()); }
-    for i in 1..=j0 { eq64(&format!("density_g_cm3[{i}]"), v.density_g_cm3[i], r.f64()); }
-    for i in 1..=j0 { eq32(&format!("attenuation_p[{i}]"), v.attenuation_p[i], r.f32()); }
-    for i in 1..=j0 { eq32(&format!("attenuation_s[{i}]"), v.attenuation_s[i], r.f32()); }
+    // Layers are 0-based since §2.3; the golden's dump order is unchanged, so `i` here is
+    // the storage index and `i + 1` is the Fortran layer number the label reports.
+    for i in 0..j0 { eq32(&format!("depth_km[{}]", i + 1), v.depth_km[i], r.f32()); }
+    for i in 0..j0 { eq32(&format!("thickness_km[{}]", i + 1), v.thickness_km[i], r.f32()); }
+    for i in 0..j0 { eq64(&format!("vp_km_s[{}]", i + 1), v.vp_km_s[i], r.f64()); }
+    for i in 0..j0 { eq64(&format!("vsh_km_s[{}]", i + 1), v.vsh_km_s[i], r.f64()); }
+    for i in 0..j0 { eq64(&format!("density_g_cm3[{}]", i + 1), v.density_g_cm3[i], r.f64()); }
+    for i in 0..j0 { eq32(&format!("attenuation_p[{}]", i + 1), v.attenuation_p[i], r.f32()); }
+    for i in 0..j0 { eq32(&format!("attenuation_s[{}]", i + 1), v.attenuation_s[i], r.f32()); }
 
     // Station list.
     let st_text =

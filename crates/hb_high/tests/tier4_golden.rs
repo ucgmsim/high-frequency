@@ -147,10 +147,10 @@ fn gf_amp_tt_matches_fortran() {
         let range = r.f32();
 
         let mut vmod = VelocityModel::new();
-        for k in 1..=j0 { vmod.thickness_km[k] = r.f64(); }
-        for k in 1..=j0 { vmod.vp_km_s[k] = r.f64(); }
-        for k in 1..=j0 { vmod.vsh_km_s[k] = r.f64(); }
-        for k in 1..=j0 { vmod.attenuation_s[k] = r.f32(); }
+        for k in 0..j0 { vmod.thickness_km[k] = r.f64(); }
+        for k in 0..j0 { vmod.vp_km_s[k] = r.f64(); }
+        for k in 0..j0 { vmod.vsh_km_s[k] = r.f64(); }
+        for k in 0..j0 { vmod.attenuation_s[k] = r.f32(); }
 
         let want_nd = r.usize();
         let want_nh: Vec<i32> = (0..want_nd).map(|_| r.i32()).collect();
@@ -168,10 +168,11 @@ fn gf_amp_tt_matches_fortran() {
         // segment list would otherwise only show up as a wrong travel time.
         assert_eq!(st.rays.nd as usize, want_nd, "{tag} nd");
         for k in 0..want_nd {
-            assert_eq!(st.rays.nh[k], want_nh[k], "{tag} nh[{k}]");
+            // 0-based layer index against the golden's 1-based layer number.
+            assert_eq!(st.rays.nh[k] + 1, want_nh[k], "{tag} nh[{k}]");
             assert_eq!(st.rays.nm[k], want_nm[k], "{tag} nm[{k}]");
         }
-        assert_eq!(st.travel.ndeep, want_ndeep, "{tag} ndeep");
+        assert_eq!(st.travel.ndeep + 1, want_ndeep, "{tag} ndeep");
         assert_eq!(st.love, want_love, "{tag} love");
 
         eq32(&format!("{tag} rp0"), g.rp0, w_rp0);

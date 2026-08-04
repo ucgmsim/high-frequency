@@ -6,8 +6,6 @@
 //! Layouts are positionally identical across every declaration, so only the
 //! naming needed resolving.
 
-use crate::fort::Array1;
-
 /// `params.h` / `params_no_window.h`.
 ///
 /// `nq`, `np`, `nlaymax` and `lv` are identical in both headers. `mm` and `mmv`
@@ -38,20 +36,27 @@ use params::NLAYMAX;
 /// and `attenuation_s` are `real*4`. Note that five of the fourteen declarations get their
 /// `real*8`-ness solely from `implicit real*8 (a-h,o-z)`, so the types here are
 /// not negotiable.
+///
+/// **Layers are indexed 0-based**, `0..layer_count` — §2.3. The Fortran numbers them from
+/// 1 and so did this port until then. The allocation stays at `NLAYMAX` rather than
+/// shrinking to `layer_count`, and that is load-bearing rather than lazy: two lookups read
+/// one element PAST the model when a source is below every layer, which the Fortran did
+/// too, and the surrounding code depends on getting the zero there rather than a panic.
+/// See `PORTING_RULES.md` §7.
 #[derive(Clone, Debug)]
 pub struct VelocityModel {
     /// `dep` / `dpt` — cumulative depth to the base of each layer.
-    pub depth_km: Array1<f64>,
+    pub depth_km: Vec<f64>,
     /// `th` — layer thickness.
-    pub thickness_km: Array1<f64>,
+    pub thickness_km: Vec<f64>,
     /// P velocity. Named `c` in the dead `gencof`.
-    pub vp_km_s: Array1<f64>,
+    pub vp_km_s: Vec<f64>,
     /// S velocity. Named `vs` or `s` elsewhere.
-    pub vsh_km_s: Array1<f64>,
+    pub vsh_km_s: Vec<f64>,
     /// Density. Named `dn`, `d` or `rh` elsewhere.
-    pub density_g_cm3: Array1<f64>,
-    pub attenuation_p: Array1<f32>,
-    pub attenuation_s: Array1<f32>,
+    pub density_g_cm3: Vec<f64>,
+    pub attenuation_p: Vec<f32>,
+    pub attenuation_s: Vec<f32>,
 }
 
 impl Default for VelocityModel {
@@ -63,13 +68,13 @@ impl Default for VelocityModel {
 impl VelocityModel {
     pub fn new() -> Self {
         Self {
-            depth_km: Array1::new(NLAYMAX),
-            thickness_km: Array1::new(NLAYMAX),
-            vp_km_s: Array1::new(NLAYMAX),
-            vsh_km_s: Array1::new(NLAYMAX),
-            density_g_cm3: Array1::new(NLAYMAX),
-            attenuation_p: Array1::new(NLAYMAX),
-            attenuation_s: Array1::new(NLAYMAX),
+            depth_km: vec![0.0; NLAYMAX],
+            thickness_km: vec![0.0; NLAYMAX],
+            vp_km_s: vec![0.0; NLAYMAX],
+            vsh_km_s: vec![0.0; NLAYMAX],
+            density_g_cm3: vec![0.0; NLAYMAX],
+            attenuation_p: vec![0.0; NLAYMAX],
+            attenuation_s: vec![0.0; NLAYMAX],
         }
     }
 }
@@ -83,15 +88,15 @@ impl VelocityModel {
 /// would shift the whole block. See `PORTING_RULES.md` §2.
 #[derive(Clone, Debug)]
 pub struct VelocityModelInput {
-    pub depth_km: Array1<f32>,
-    pub thickness_km: Array1<f32>,
-    pub vp_km_s: Array1<f64>,
-    pub vsh_km_s: Array1<f64>,
-    pub density_g_cm3: Array1<f64>,
-    pub attenuation_p: Array1<f32>,
-    pub attenuation_s: Array1<f32>,
+    pub depth_km: Vec<f32>,
+    pub thickness_km: Vec<f32>,
+    pub vp_km_s: Vec<f64>,
+    pub vsh_km_s: Vec<f64>,
+    pub density_g_cm3: Vec<f64>,
+    pub attenuation_p: Vec<f32>,
+    pub attenuation_s: Vec<f32>,
     /// `grand` / `gr` — RNG scratch shared with `grandvel` (dead in production).
-    pub grand: Array1<f32>,
+    pub grand: Vec<f32>,
 }
 
 impl Default for VelocityModelInput {
@@ -103,14 +108,14 @@ impl Default for VelocityModelInput {
 impl VelocityModelInput {
     pub fn new() -> Self {
         Self {
-            depth_km: Array1::new(NLAYMAX),
-            thickness_km: Array1::new(NLAYMAX),
-            vp_km_s: Array1::new(NLAYMAX),
-            vsh_km_s: Array1::new(NLAYMAX),
-            density_g_cm3: Array1::new(NLAYMAX),
-            attenuation_p: Array1::new(NLAYMAX),
-            attenuation_s: Array1::new(NLAYMAX),
-            grand: Array1::new(3000),
+            depth_km: vec![0.0; NLAYMAX],
+            thickness_km: vec![0.0; NLAYMAX],
+            vp_km_s: vec![0.0; NLAYMAX],
+            vsh_km_s: vec![0.0; NLAYMAX],
+            density_g_cm3: vec![0.0; NLAYMAX],
+            attenuation_p: vec![0.0; NLAYMAX],
+            attenuation_s: vec![0.0; NLAYMAX],
+            grand: vec![0.0; 3000],
         }
     }
 }
@@ -166,11 +171,12 @@ impl Rays {
 /// §6.
 #[derive(Clone, Debug)]
 pub struct Travel {
-    /// P path multiplier per layer.
-    pub alp: Array1<f32>,
-    /// S path multiplier per layer.
-    pub als: Array1<f32>,
-    /// Deepest layer the ray penetrates. Read as `nd`/`ndp` by consumers.
+    /// P path multiplier per layer. 0-based by layer.
+    pub alp: Vec<f32>,
+    /// S path multiplier per layer. 0-based by layer.
+    pub als: Vec<f32>,
+    /// Deepest layer the ray penetrates, as a **0-based layer index**. Read as `nd`/`ndp`
+    /// by consumers, which iterate `0..=ndeep`.
     pub ndeep: i32,
     /// Written by `build_ray_path`; read by nothing.
     pub nup: i32,
@@ -184,7 +190,7 @@ impl Default for Travel {
 
 impl Travel {
     pub fn new() -> Self {
-        Self { alp: Array1::new(NLAYMAX), als: Array1::new(NLAYMAX), ndeep: 0, nup: 0 }
+        Self { alp: vec![0.0; NLAYMAX], als: vec![0.0; NLAYMAX], ndeep: 0, nup: 0 }
     }
 }
 

@@ -20,33 +20,38 @@ use crate::state::VelocityModel;
 /// assignment. `vdsrc = vs(layer_count)*dn(layer_count)` multiplies in double and stores single.
 /// The `as f32` casts below are the narrowing points and are load-bearing.
 ///
-/// The layer search reads at most `thickness_km[layer_count]`: the index is tested against `layer_count`
-/// at the top of the loop and only ever increments by one, so it cannot step
-/// past. (An earlier analysis of mine claimed it could reach `layer_count+1`; that was
+/// The layer search reads at most `thickness_km[source_layer]`: the index is tested
+/// against `source_layer` at the top of the loop and only ever increments by one, so it
+/// cannot step past. (An earlier analysis of mine claimed it could reach `+1`; that was
 /// wrong.)
+///
+/// The second argument was called `layer_count` here, which was a misreading: every caller
+/// passes `ksrc`, the SOURCE layer, and the routine walks down towards it rather than to
+/// the bottom of the model. Renamed with §2.3's index flip, since the two are easy to
+/// confuse once both are 0-based.
 pub fn site_amplification_factors(
     vmod: &VelocityModel,
-    layer_count: usize,
+    source_layer: usize,
     frequency_count: usize,
     log_frequency: &[f32],
     factors: &mut [f32],
 ) {
-    let vdsrc = (vmod.vsh_km_s[layer_count] * vmod.density_g_cm3[layer_count]) as f32;
+    let vdsrc = (vmod.vsh_km_s[source_layer] * vmod.density_g_cm3[source_layer]) as f32;
 
-    // 0-based over the table. `vmod`'s arrays are still `Array1` and still 1-based --
-    // the types say which is which, so there is nothing to confuse.
+    // Both the frequency table and the velocity model are 0-based since §2.3.
     for kf in 0..frequency_count {
         let stt = 0.25 / log_frequency[kf].exp();
 
-        let mut i = 2usize;
+        // Starts at the layer below the air layer: the Fortran's layer 2.
+        let mut i = 1usize;
         let mut zdep = 0.0f32;
         let mut pz = 0.0f32;
         let mut tt = 0.0f32;
-        let mut ttp = (vmod.thickness_km[2] / vmod.vsh_km_s[2]) as f32;
+        let mut ttp = (vmod.thickness_km[1] / vmod.vsh_km_s[1]) as f32;
 
         // Label 6145: walk down until a quarter-period of travel time has
         // accumulated, or the source layer is reached.
-        while !(ttp >= stt || i == layer_count) {
+        while !(ttp >= stt || i == source_layer) {
             zdep = (zdep as f64 + vmod.thickness_km[i]) as f32;
             pz = (pz as f64 + vmod.density_g_cm3[i] * vmod.thickness_km[i] / vmod.vsh_km_s[i]) as f32;
             tt = ttp;

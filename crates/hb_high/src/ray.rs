@@ -79,15 +79,20 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
         state.love = 2;
     }
     let n = state.rays.nd as usize;
+    // The n == 0 case the doc comment describes would underflow every `n - 1` below.
+    // The Fortran read past the array start instead; both are broken, but a named panic
+    // beats an index arithmetic overflow.
+    assert!(n >= 1, "build_ray_path needs at least one ray segment, got nd = 0");
 
-    // DO 10 I=1,100 -- deliberately not 1..=NLAYMAX. See the note above.
-    for i in 1..=100 {
+    // DO 10 I=1,100 -- deliberately not NLAYMAX. See the note above. 0-based, so this is
+    // layers 0..100, the same hundred layers the Fortran zeroed.
+    for i in 0..100 {
         state.travel.alp[i] = 0.0;
         state.travel.als[i] = 0.0;
     }
 
-    // Count how many times each layer is traversed, by wave mode. Segments are 0-based
-    // since §2.3; the LAYER numbers in `nh` are still 1-based.
+    // Count how many times each layer is traversed, by wave mode. Both indices are
+    // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
     for i in 0..n {
         let h = state.rays.nh[i] as usize;
         if state.rays.nm[i] == 5 {
@@ -146,10 +151,12 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
         state.coff.it[0] = 2;
     }
 
-    // Receiver position within its layer.
-    let lir1 = lir - 1;
+    // Receiver position within its layer: total thickness of everything above it.
+    // The Fortran sums layers 1..lir-1, which 0-based is indices 0..lir-1 -- so `0..lir`,
+    // NOT `1..=lir - 1`. Getting this wrong drops the air layer from the sum and moves the
+    // receiver, which is exactly the kind of silent one-layer error §2.3 is prone to.
     let mut thtot = 0.0f64;
-    for i in 1..=lir1 {
+    for i in 0..lir {
         thtot = vmod.thickness_km[i] + thtot;
     }
     let hrl = receiver_depth_km - thtot;
@@ -174,10 +181,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usi
         }
     }
 
-    // Source position within its layer.
-    let lis1 = lis - 1;
+    // Source position within its layer, same as the receiver block above.
     let mut thtot = 0.0f64;
-    for i in 1..=lis1 {
+    for i in 0..lis {
         thtot = vmod.thickness_km[i] + thtot;
     }
     let hsl = source_depth_km - thtot;
@@ -238,8 +244,11 @@ pub fn geometric_spreading(
 ) -> (f64, f32) {
     let nh1 = state.rays.nh[0] as usize;
 
+    // Layers above the source layer, skipping the air layer at index 0. 0-based this is
+    // `1..nh1`, not `1..=nh1 - 1`: same range, but the first spelling cannot underflow
+    // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
     let mut dep = 0.0f64;
-    for j in 2..=nh1.saturating_sub(1) {
+    for j in 1..nh1 {
         dep += vmod.thickness_km[j];
     }
 
@@ -307,7 +316,7 @@ pub fn geometric_spreading(
 /// skips them, `cagniard_time_derivative` does not. Preserved as-is.
 pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, _ray_index: usize, range_km: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
-    for i in 1..=state.travel.ndeep as usize {
+    for i in 0..=state.travel.ndeep as usize {
         let mut ea = Complex64::ZERO;
         let mut eb = Complex64::ZERO;
         if state.travel.alp[i] > 0.0 {
@@ -333,7 +342,7 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
 /// `ir` is unused. The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
 pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, _ray_index: usize, range_km: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
-    for i in 1..=state.travel.ndeep as usize {
+    for i in 0..=state.travel.ndeep as usize {
         let mut b = Complex64::ZERO;
         let mut c = Complex64::ZERO;
         if state.travel.alp[i] != 0.0 {
@@ -390,7 +399,7 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
 pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_index: usize, range_km: f64) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
     let mut v = 0.0f64;
-    for i in 1..=state.travel.ndeep as usize {
+    for i in 0..=state.travel.ndeep as usize {
         if state.travel.alp[i] > 0.0 {
             v = v.max(vmod.vp_km_s[i]);
         }
@@ -503,7 +512,9 @@ pub fn travel_time(
             continue;
         }
 
-        // Label 10 for upgoing, otherwise the layer below.
+        // Label 10 for upgoing, otherwise the layer below. A layer STEP, so it is the
+        // same +-1 in either index base. Upgoing from layer 0 would underflow, as the
+        // Fortran read `vs(0)` there; unreachable, and loud if it ever is not.
         let k = if nup == 1 { nhi - 1 } else { nhi + 1 };
         vb = vmod.vsh_km_s[k];
         va = vb;
@@ -583,11 +594,16 @@ pub fn green_function(
     ray_type: i32,
     wave_mode: i32,
 ) -> GreenFunction {
-    let krec = 2usize;
+    // The receiver sits in the second layer -- index 1 since §2.3, not 2.
+    let krec = 1usize;
+    // Deepest layer, 0-based. The Moho loops below run to `bottom_layer - 1` because they
+    // test the thickness of the layer BELOW the one they are on, and the bottom layer is
+    // forced to zero thickness by `read_velocity_model`.
+    let bottom_layer = layer_count - 1;
     let ir = 1usize;
 
     state.rays.ndeg = 1;
-    let hr = vmod.thickness_km[1];
+    let hr = vmod.thickness_km[0];
     let mut hs = src_depth as f64;
     let rr = range as f64;
 
@@ -595,9 +611,11 @@ pub fn green_function(
     // so the ray does not start exactly on a boundary.
     let hs_tol = 0.02f32 as f64;
     let mut dep = 0.0f64;
-    // Loop-completion value: DO ksrc = 1, layer_count leaves layer_count+1 if it never exits.
-    let mut ksrc = do_end(1, layer_count);
-    for k in 1..=layer_count {
+    // Loop-completion value. The Fortran's DO ksrc = 1, layer_count leaves layer_count+1;
+    // 0-based that is `layer_count`, one past the last layer. It is READ in that state --
+    // see the doc comment -- which is why the arrays stay NLAYMAX-sized.
+    let mut ksrc = do_end(0, layer_count - 1);
+    for k in 0..layer_count {
         dep += vmod.thickness_km[k];
         if hs >= dep && (hs - dep) < hs_tol {
             hs = dep + hs_tol;
@@ -630,8 +648,8 @@ pub fn green_function(
         // Moho multiples, if any. ktn is 0 for ray_type == 1.
         let ktn = (ray_type - 1) / 2;
         for _kt in 1..=ktn {
-            let mut jv = do_end(krec, layer_count - 1);
-            for jj in krec..=(layer_count - 1) {
+            let mut jv = do_end(krec, bottom_layer - 1);
+            for jj in krec..=(bottom_layer - 1) {
                 push(state, &mut l, jj);
                 if vmod.thickness_km[jj + 1] == 0.0 {
                     jv = jj;
@@ -647,8 +665,8 @@ pub fn green_function(
         }
     } else {
         // Down-going to the Moho, then back up.
-        let mut jv = do_end(ksrc, layer_count - 1);
-        for jj in ksrc..=(layer_count - 1) {
+        let mut jv = do_end(ksrc, bottom_layer - 1);
+        for jj in ksrc..=(bottom_layer - 1) {
             push(state, &mut l, jj);
             if vmod.thickness_km[jj + 1] == 0.0 {
                 jv = jj;
@@ -664,8 +682,8 @@ pub fn green_function(
 
         let ktn = (ray_type - 2) / 2;
         for _kt in 1..=ktn {
-            let mut jv = do_end(krec, layer_count - 1);
-            for jj in krec..=(layer_count - 1) {
+            let mut jv = do_end(krec, bottom_layer - 1);
+            for jj in krec..=(bottom_layer - 1) {
                 push(state, &mut l, jj);
                 if vmod.thickness_km[jj + 1] == 0.0 {
                     jv = jj;

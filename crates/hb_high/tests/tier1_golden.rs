@@ -70,17 +70,19 @@ impl Reader {
         );
     }
 
-    /// Read `th`, `vsh_km_s`, `density_g_cm3` for layers `1..=j0` into a fresh `VelocityModel`,
+    /// Read `th`, `vsh_km_s`, `density_g_cm3` for `j0` layers into a fresh `VelocityModel`,
     /// matching the driver's `dump_vmod`.
     fn vmod(&mut self, j0: usize) -> VelocityModel {
         let mut v = VelocityModel::new();
-        for k in 1..=j0 {
+        // 0-based since §2.3, matching what the production readers now produce. The
+        // golden's dump order is the Fortran's layer 1..j0 and is unchanged.
+        for k in 0..j0 {
             v.thickness_km[k] = self.f64();
         }
-        for k in 1..=j0 {
+        for k in 0..j0 {
             v.vsh_km_s[k] = self.f64();
         }
-        for k in 1..=j0 {
+        for k in 0..j0 {
             v.density_g_cm3[k] = self.f64();
         }
         v
@@ -113,16 +115,18 @@ fn get_sitefacs_matches_fortran() {
         let j0 = r.usize();
         let nfreq = r.usize();
         let vmod = r.vmod(j0);
-        let mut fn_ = Array1::<f32>::new(nfreq);
-        for k in 1..=nfreq {
-            fn_[k] = r.f32();
-        }
+        let fn_: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
         let want: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
 
-        let mut an = Array1::<f32>::new(nfreq);
-        site_amplification_factors(&vmod, j0, nfreq, fn_.as_slice(), an.as_mut_slice());
-        for k in 1..=nfreq {
-            eq32(&format!("site_amplification_factors j0={j0} an[{k}]"), an[k], want[k - 1]);
+        let mut an = vec![0.0f32; nfreq];
+        // The golden's `j0` is the Fortran's SOURCE layer number, 1-based; the argument is
+        // now a 0-based layer index. Everything the routine reads from `vmod` is keyed off
+        // it, so an unshifted value here reads the layer below and the amplification is
+        // silently wrong rather than out of range -- which is how this test caught the
+        // conversion.
+        site_amplification_factors(&vmod, j0 - 1, nfreq, &fn_, &mut an);
+        for k in 0..nfreq {
+            eq32(&format!("site_amplification_factors j0={j0} an[{k}]"), an[k], want[k]);
         }
         cases += 1;
     }
@@ -150,8 +154,10 @@ fn trav_matches_fortran() {
         let hr = r.f64();
         let vmod = r.vmod(j0);
 
+        // `nh` holds LAYER indices, and the golden's are the Fortran's 1-based layer
+        // numbers, so they shift as well as the segment index they are stored under.
         for k in 0..n {
-            st.rays.nh[k] = r.i32();
+            st.rays.nh[k] = r.i32() - 1;
         }
         for k in 0..n {
             st.rays.nm[k] = r.i32();
@@ -170,14 +176,15 @@ fn trav_matches_fortran() {
         let tag = format!("build_ray_path case {cases} (j0={j0} n={n} ndeg={ndeg})");
         assert_eq!(st.love, w_love, "{tag} love");
         assert_eq!(st.travel.nup, w_nup, "{tag} nup");
-        assert_eq!(st.travel.ndeep, w_ndeep, "{tag} ndeep");
+        // A 0-based layer index here against a 1-based layer number in the golden.
+        assert_eq!(st.travel.ndeep + 1, w_ndeep, "{tag} ndeep");
         for k in 0..n {
             assert_eq!(st.coff.it[k], w_it[k], "{tag} it[{k}]");
             assert_eq!(st.coff.nup1[k], w_nup1[k], "{tag} nup1[{k}]");
         }
-        for k in 1..=j0 {
-            eq32(&format!("{tag} alp[{k}]"), st.travel.alp[k], w_alp[k - 1]);
-            eq32(&format!("{tag} als[{k}]"), st.travel.als[k], w_als[k - 1]);
+        for k in 0..j0 {
+            eq32(&format!("{tag} alp[{k}]"), st.travel.alp[k], w_alp[k]);
+            eq32(&format!("{tag} als[{k}]"), st.travel.als[k], w_als[k]);
         }
         cases += 1;
     }
@@ -197,19 +204,19 @@ fn geom_terms_matches_fortran() {
         let p0 = r.f64();
 
         let mut vmod = VelocityModel::new();
-        for k in 1..=j0 {
+        for k in 0..j0 {
             vmod.thickness_km[k] = r.f64();
         }
-        for k in 1..=j0 {
+        for k in 0..j0 {
             vmod.vsh_km_s[k] = r.f64();
         }
-        for k in 1..=j0 {
+        for k in 0..j0 {
             vmod.attenuation_s[k] = r.f32();
         }
 
         let mut st = RayState::default();
         for k in 0..n {
-            st.rays.nh[k] = r.i32();
+            st.rays.nh[k] = r.i32() - 1;
         }
         st.rays.nd = n as i32;
 

@@ -240,7 +240,7 @@ pub fn simulate(
     if nlskip >= 0 {
         unreachable!("grandvel is dead under the production deck (nl_skip < 0)");
     } else {
-        for k in 1..=j0 {
+        for k in 0..j0 {
             vmod.depth_km[k] = vmod_in.depth_km[k] as f64;
             vmod.thickness_km[k] = vmod_in.thickness_km[k] as f64;
             vmod.vp_km_s[k] = vmod_in.vp_km_s[k];
@@ -285,7 +285,7 @@ pub fn simulate(
             // below: if zet exceeds every depth, shear_velocity_km_s keeps its previous
             // value. Undefined on the very first subfault of the first
             // station in the Fortran; zero here.
-            if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth_km[k] >= ray.depth_km as f64) {
+            if let Some(ksrc) = (0..j0).find(|&k| vmod.depth_km[k] >= ray.depth_km as f64) {
                 shear_velocity_km_s = vmod.vsh_km_s[ksrc] as f32;
             }
 
@@ -367,18 +367,20 @@ pub fn simulate(
             }
 
             // This pass DOES default shear_velocity_km_s/density_g_cm3 before the lookup.
-            let mut shear_velocity_km_s = vmod.vsh_km_s[1] as f32;
-            let mut density_g_cm3 = vmod.density_g_cm3[1] as f32;
-            let ksrc = match (1..=j0).find(|&k| vmod.depth_km[k] >= ray_geometry.depth_km as f64) {
+            let mut shear_velocity_km_s = vmod.vsh_km_s[0] as f32;
+            let mut density_g_cm3 = vmod.density_g_cm3[0] as f32;
+            let ksrc = match (0..j0).find(|&k| vmod.depth_km[k] >= ray_geometry.depth_km as f64) {
                 Some(k) => {
                     shear_velocity_km_s = vmod.vsh_km_s[k] as f32;
                     density_g_cm3 = vmod.density_g_cm3[k] as f32;
                     k
                 }
-                // shear_velocity_km_s and density_g_cm3 keep the layer-1 defaults set just above.
-                None => j0 + 1,
+                // shear_velocity_km_s and density_g_cm3 keep the first layer's defaults.
+                // `j0` is one PAST the last layer once 0-based, which is the Fortran's
+                // `j0 + 1` and is read as such below and by site_amplification_factors.
+                None => j0,
             };
-            if ksrc == j0 + 1 {
+            if ksrc == j0 {
                 // The Fortran prints 'wrong!' and carries on with
                 // ksrc = j0+1, which it then passes to site_amplification_factors.
                 println!(" wrong!");
@@ -717,7 +719,7 @@ fn normalise_source(
             // Layer lookup. Falls through with k = j0+1 if zdep is below the
             // model, which the Fortran then indexes -- so the fall-through is
             // load-bearing, not an error path.
-            let k = (1..=layer_count).find(|&kk| zdep <= vmod_in.depth_km[kk]).unwrap_or(layer_count + 1);
+            let k = (0..layer_count).find(|&kk| zdep <= vmod_in.depth_km[kk]).unwrap_or(layer_count);
             let xmu = (vmod_in.vsh_km_s[k] * vmod_in.vsh_km_s[k] * vmod_in.density_g_cm3[k]
                 * length_km
                 * width_km) as f32;

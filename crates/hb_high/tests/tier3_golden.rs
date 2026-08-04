@@ -51,16 +51,17 @@ impl Reader {
                    self.name, self.pos, self.buf.len());
     }
 
-    /// `dump_state`: th, vp_km_s, vs (`f64`) then alp, als (`f32`), for `1..=ndeep`.
+    /// `dump_state`: th, vp_km_s, vs (`f64`) then alp, als (`f32`), for `ndeep` layers.
     fn state(&mut self, ndeep: usize) -> (RayState, VelocityModel) {
         let mut vmod = VelocityModel::new();
-        for k in 1..=ndeep { vmod.thickness_km[k] = self.f64(); }
-        for k in 1..=ndeep { vmod.vp_km_s[k] = self.f64(); }
-        for k in 1..=ndeep { vmod.vsh_km_s[k] = self.f64(); }
+        for k in 0..ndeep { vmod.thickness_km[k] = self.f64(); }
+        for k in 0..ndeep { vmod.vp_km_s[k] = self.f64(); }
+        for k in 0..ndeep { vmod.vsh_km_s[k] = self.f64(); }
         let mut st = RayState::default();
-        for k in 1..=ndeep { st.travel.alp[k] = self.f32(); }
-        for k in 1..=ndeep { st.travel.als[k] = self.f32(); }
-        st.travel.ndeep = ndeep as i32;
+        for k in 0..ndeep { st.travel.alp[k] = self.f32(); }
+        for k in 0..ndeep { st.travel.als[k] = self.f32(); }
+        // A layer count in the golden, a 0-based index in the struct -- see tier2.
+        st.travel.ndeep = ndeep as i32 - 1;
         (st, vmod)
     }
 }
@@ -111,7 +112,7 @@ fn pnot_matches_fortran() {
 
         // Reconstruct the starting point to classify which path ran.
         let mut v = 0.0f64;
-        for i in 1..=ndeep {
+        for i in 0..ndeep {
             if st.travel.alp[i] > 0.0 {
                 v = v.max(vmod.vp_km_s[i]);
             }
@@ -156,7 +157,7 @@ fn ttime_matches_fortran() {
         let rr = r.f64();
         let (mut st, vmod) = r.state(ndeep);
 
-        for k in 0..nseg { st.rays.nh[k] = r.i32(); }
+        for k in 0..nseg { st.rays.nh[k] = r.i32() - 1; }
         for k in 0..nseg { st.rays.nm[k] = r.i32(); }
         for k in 0..nseg { st.coff.it[k] = r.i32(); }
         for k in 0..nseg { st.coff.nup1[k] = r.i32(); }
