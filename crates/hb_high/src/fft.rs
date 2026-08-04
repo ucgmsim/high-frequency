@@ -83,11 +83,20 @@ pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f
     let a2 = a1 * dt / 3.0;
     let nstps = count - 1;
 
-    for i in 1..=nstps {
-        // DE uses the value of VE from *before* this iteration's update; the
-        // two statements are both inside DO 1 and their order matters.
-        de = de + ve * dt + a2 * (2.0 * acceleration[i] + acceleration[i + 1]);
-        ve = ve + a1 * (acceleration[i] + acceleration[i + 1]);
+    // Trapezoidal double integration. Inherently serial -- `de` depends on the `ve`
+    // from before this iteration's update, and both statements are inside `DO 1`, so
+    // their order is load-bearing. What can be improved is the memory traffic: the
+    // original loads `acceleration[i]` and `acceleration[i+1]` every iteration, and
+    // consecutive iterations overlap by one element. Carrying the previous sample in a
+    // register halves the loads.
+    //
+    // The arithmetic and its order are untouched, so this is bit-exact.
+    let samples = &acceleration.as_slice()[..count];
+    let mut previous = samples[0];
+    for &next in &samples[1..count] {
+        de = de + ve * dt + a2 * (2.0 * previous + next);
+        ve = ve + a1 * (previous + next);
+        previous = next;
     }
 
     let rnstp = nstps as f32;
@@ -95,8 +104,14 @@ pub fn remove_quadratic_trend(count: usize, dt: f32, acceleration: &mut Array1<f
     let c1 = 2.0 / t * (ve - 3.0 / t * de);
     let c2 = 6.0 / t * (2.0 / t * de - ve) / t;
 
-    for i in 3..=count {
-        let a3 = (i - 1) as f32;
-        acceleration[i] = acceleration[i] + c1 + c2 * a3 * dt;
+    // The correction is affine in the sample index, so this loop is trivially
+    // vectorisable -- but only if the compiler can see a contiguous slice rather than a
+    // sequence of bounds-checked 1-based index expressions. Written as a slice iterator
+    // for that reason; `a3` keeps the same value it had (`i - 1` for Fortran index `i`,
+    // which is `k + 2` here) and the multiply order is unchanged, so this too is
+    // bit-exact.
+    for (k, sample) in acceleration.as_mut_slice()[2..count].iter_mut().enumerate() {
+        let a3 = (k + 2) as f32;
+        *sample = *sample + c1 + c2 * a3 * dt;
     }
 }
