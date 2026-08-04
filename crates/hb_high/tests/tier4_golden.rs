@@ -104,7 +104,7 @@ fn stoc_f_matches_fortran() {
         let (mut rng, _) = Pcg32::seed(seed);
         let mut cw = Array1::<Complex32>::filled(np2, Complex32::ZERO);
         stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
-               fc, fmx, akapp, &mut cw, &dfr, qb, qfe, bigc);
+               fc, fmx, akapp, cw.as_mut_slice(), dfr.as_slice(), qb, qfe, bigc);
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
         // Scale from the Fortran record, so the tolerance does not float with our

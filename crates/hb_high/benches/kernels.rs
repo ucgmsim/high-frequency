@@ -338,7 +338,7 @@ fn bench_spectrum(c: &mut Criterion) {
             b.iter(|| {
                 stochastic_spectrum(
                     &mut g, np2, 60.0, 2.0, 0.2, 0.05, 3.2, 2.7, DT, 3.0e22, 0.0,
-                    1.5, 10.0, 0.045, &mut cw, &dfr, 0.02, 0.6, 2.1,
+                    1.5, 10.0, 0.045, cw.as_mut_slice(), dfr.as_slice(), 0.02, 0.6, 2.1,
                 )
             })
         });

@@ -416,7 +416,8 @@ pub fn simulate(
                     stochastic_spectrum(
                         &mut rng, np2, rpath, tw, tw_eps, tw_eta, shear_velocity_km_s, density_g_cm3, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
-                        &mut spectrum[kf - 1], &freq, qbar, qfexp, moment_scale,
+                        spectrum[kf - 1].as_mut_slice(), freq.as_slice(), qbar, qfexp,
+                        moment_scale,
                     );
                 }
 

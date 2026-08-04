@@ -1,7 +1,7 @@
 //! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
 use crate::fft::{fast, remove_quadratic_trend};
-use crate::fort::{Array1, Complex32, Complex64};
+use crate::fort::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Pcg32};
 use crate::special::gamma;
 
@@ -61,8 +61,8 @@ pub fn stochastic_spectrum(
     corner_frequency_hz: f32,
     fmax_hz: f32,
     kappa_s: f32,
-    spectrum: &mut Array1<Complex32>,
-    frequency_hz: &Array1<f32>,
+    spectrum: &mut [Complex32],
+    frequency_hz: &[f32],
     qbar: f32,
     q_exponent: f32,
     moment_scale: f32,
@@ -106,11 +106,13 @@ pub fn stochastic_spectrum(
     //
     // `t^b` has no such recurrence for real `b` and stays a `powf`.
     let decay_per_sample = (-(c as f64) * dt as f64).exp();
-    let mut decay = 1.0f64; // exp(0) at i = 1
-    let mut w = Array1::<f32>::new(np2);
-    for i in 1..=np2 {
-        let t = (i - 1) as f32 * dt;
-        w[i] = aa * t.powf(b) * decay as f32;
+    let mut decay = 1.0f64; // exp(0) at the first sample
+    let mut w = vec![0.0f32; np2];
+    // 0-based since §2.3, which also makes `t` honest: it was `(i - 1) * dt` for a
+    // 1-based `i`, i.e. just `index * dt`.
+    for (index, envelope) in w.iter_mut().enumerate() {
+        let t = index as f32 * dt;
+        *envelope = aa * t.powf(b) * decay as f32;
         decay *= decay_per_sample;
     }
 
@@ -119,9 +121,9 @@ pub fn stochastic_spectrum(
     let omgc = 2.0 * pai * corner_frequency_hz;
     let omgm = 2.0 * pai * fmax_hz;
 
-    let mut as_ = Array1::<f64>::new(np2);
-    as_[1] = 0.0;
-    for i in 2..=fold_count {
+    let mut as_ = vec![0.0f64; np2];
+    as_[0] = 0.0;
+    for i in 1..fold_count {
         let fr = frequency_hz[i];
         let fr2 = fr * fr;
 
@@ -170,16 +172,16 @@ pub fn stochastic_spectrum(
         as_[i] = a1 * a2a3 * frank as f64;
     }
 
-    let mut a = Array1::<f32>::new(np2);
-    fill_normal_deviates(rng, np2, a.as_mut_slice());
-    remove_quadratic_trend(dt, a.as_mut_slice());
+    let mut a = vec![0.0f32; np2];
+    fill_normal_deviates(rng, np2, &mut a);
+    remove_quadratic_trend(dt, &mut a);
 
-    let mut ac = Array1::<Complex32>::filled(np2, Complex32::ZERO);
-    for i in 1..=np2 {
-        ac[i] = Complex32::new(a[i] * w[i], 0.0);
+    let mut ac = vec![Complex32::ZERO; np2];
+    for (bin, (&deviate, &envelope)) in ac.iter_mut().zip(a.iter().zip(w.iter())) {
+        *bin = Complex32::new(deviate * envelope, 0.0);
     }
 
-    fast(ac.as_mut_slice(), -1);
+    fast(&mut ac, -1);
 
     // Average POWER spectrum to unity (2009-03-18), not amplitude.
     //
@@ -190,8 +192,8 @@ pub fn stochastic_spectrum(
     // simplified because `hypot(re,im)^2` and `re^2 + im^2` differ in the last bits.
     // Under Stage 2 it can: this is the same quantity, computed without the detour.
     let mut fsa = 0.0f32;
-    for i in 1..=fold_count {
-        fsa += ac[i].norm_sqr();
+    for bin in &ac[..fold_count] {
+        fsa += bin.norm_sqr();
     }
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
@@ -201,13 +203,21 @@ pub fn stochastic_spectrum(
         Complex32::new(d.re as f32, d.im as f32)
     };
 
+    // 0-based. The Fortran writes spectrum(i) and its conjugate partner
+    // spectrum(np2 - i + 1) from a 1-based i; with j = i - 1 the partner is
+    // np2 - i + 1 - 1 = np2 - j - 1. Checked on np2 = 16: Fortran i = 1 writes
+    // spectrum(16), storage element 15, and j = 0 gives 16 - 0 - 1 = 15.
+    //
+    // Note the partner of the LAST iteration and the Nyquist store below are the same
+    // element -- Fortran i = np writes spectrum(np + 1) = spectrum(fold_count) -- so the
+    // Nyquist assignment overwrites it. That ordering is the original's and is kept.
     let np = np2 / 2;
-    for i in 1..=np {
-        spectrum[i] = scale(ac[i], as_[i], amp);
+    for j in 0..np {
+        spectrum[j] = scale(ac[j], as_[j], amp);
         // conjg() is applied to the complex*16 product, before narrowing.
-        let d = Complex64::new(ac[i + 1].re as f64, ac[i + 1].im as f64) * as_[i + 1];
+        let d = Complex64::new(ac[j + 1].re as f64, ac[j + 1].im as f64) * as_[j + 1];
         let d = d.conj() * amp as f64;
-        spectrum[np2 - i + 1] = Complex32::new(d.re as f32, d.im as f32);
+        spectrum[np2 - j - 1] = Complex32::new(d.re as f32, d.im as f32);
     }
-    spectrum[fold_count] = scale(ac[fold_count], as_[fold_count], amp);
+    spectrum[fold_count - 1] = scale(ac[fold_count - 1], as_[fold_count - 1], amp);
 }
