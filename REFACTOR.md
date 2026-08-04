@@ -747,8 +747,20 @@ What is oversized today, per `simulate` call:
 | `freq`, `radiation` | `mm` = 262144 f32 each | `np2/2 + 1` and `np2` |
 
 At the production `duration = 20`, `dt = 0.005` that is `ndata = 4000` and
-`np2 = 16384`, so roughly **7 MB reserved against a few hundred kilobytes used** — and
-the pages are touched, because the arrays are zero-initialised.
+`np2 = 16384`, so roughly **7 MB of address space reserved against a few hundred
+kilobytes used**.
+
+> **Correction, measured.** An earlier version of this section claimed the pages are
+> touched because the arrays are zero-initialised. That is wrong. `Array1::new` is
+> `vec![0.0; n]`, which for a large `n` goes through `alloc_zeroed` → `calloc` → an
+> `mmap` of zero pages; those are copy-on-write from a shared zero page and never become
+> resident until written. Nothing ever wrote to the unused tails, so they were never
+> resident. Sizing the buffers correctly moved **peak RSS from 6700 KB to 6584 KB —
+> 116 KB, not 7 MB** — and instructions by −0.11%.
+>
+> So the memory and performance case for this item is nearly nil. **The capability case
+> is the whole justification**: removing the recompile-to-go-longer ceiling. That is
+> reason enough, but it should not be sold as a memory saving.
 
 Two traps to respect while doing it:
 

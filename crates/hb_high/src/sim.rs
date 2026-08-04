@@ -215,16 +215,24 @@ pub fn simulate(
     // rupture-time jitter below.
     irand = irand_after;
 
-    let mut radv_rand_a = Array1::<f32>::new(MMV);
-    let mut radv_rand_b = Array1::<f32>::new(MMV);
+    // `nr` = 1000 values, not `mmv` = 262144. `vertical_radiation_spectrum` reads
+    // exactly `nr` of these, and `fill_uniform_deviates` only ever drew that many, so
+    // the other 99.6% of each array was reserved, zeroed and never touched.
+    let mut radv_rand_a = Array1::<f32>::new(nr);
+    let mut radv_rand_b = Array1::<f32>::new(nr);
     fill_uniform_deviates(&mut rng, nr, &mut radv_rand_a);
     fill_uniform_deviates(&mut rng, nr, &mut radv_rand_b);
 
     let mut vmod = VelocityModel::new();
-    let mut acc = Array2::<f32>::new(3, MMV);
+    // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
+    // touches this.
+    let mut acc = Array2::<f32>::new(3, ndata);
+    // This one STAYS at `mmv`, and the reason is not laziness. `fill_normal_deviates`
+    // is called with `MMV` below, and the number of deviates drawn is part of the RNG
+    // stream -- every subsequent draw depends on where the generator ended up. Shrinking
+    // the allocation without shrinking the draw would be a buffer overrun; shrinking the
+    // draw would change every waveform. See REFACTOR.md §2.6b.
     let mut normal_deviates = Array1::<f32>::new(MMV);
-    let mut freq = Array1::<f32>::new(MM);
-    let mut radiation = Array1::<f32>::new(MM);
     let mut siteamp_factors = Array1::<f32>::new(params::NLAYMAX);
 
     // ------------------------------------------------- the single station ---
@@ -324,6 +332,12 @@ pub fn simulate(
 
         let nfold = np2 / 2 + 1;
         let mfold = np2 / 2 - 1;
+        // Sized from `np2` and allocated here rather than at `mm` before the loop:
+        // `np2` is not known until the time-window pass above has produced `tmax`, and
+        // both of these are per-segment quantities that are fully rewritten each time
+        // round, so nothing carries across segments.
+        let mut freq = Array1::<f32>::new(nfold);
+        let mut radiation = Array1::<f32>::new(nfold);
         let df = 1.0 / (np2 as f32 * dt);
         for i in 1..=nfold {
             freq[i] = df * (i - 1) as f32;
