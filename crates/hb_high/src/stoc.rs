@@ -90,10 +90,28 @@ pub fn stochastic_spectrum(
     // result narrows back to real*4.
     let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
 
+    // Saragoni-Hart envelope, `aa * t^b * exp(-c*t)` on the evenly spaced grid
+    // `t = (i-1)*dt`.
+    //
+    // `exp(-c*t)` on that grid is a geometric sequence with ratio `exp(-c*dt)`, so it
+    // advances by one multiply per sample instead of one `expf` per sample. That is
+    // `np2` transcendentals removed per call, three calls per subfault.
+    // `PROFILE.md` item 4 ruled this out for bit-identity; Stage 2 allows it.
+    //
+    // The ratio is accumulated in `f64` deliberately. Relative error grows like
+    // `n * eps`, which over 16384 samples is ~1e-3 in `f32` — visible — against
+    // ~2e-12 in `f64`. Underflow is harmless and matches the direct form: once the
+    // product reaches zero it stays there, exactly as `expf` of a large negative
+    // argument would.
+    //
+    // `t^b` has no such recurrence for real `b` and stays a `powf`.
+    let decay_per_sample = (-(c as f64) * dt as f64).exp();
+    let mut decay = 1.0f64; // exp(0) at i = 1
     let mut w = Array1::<f32>::new(np2);
     for i in 1..=np2 {
         let t = (i - 1) as f32 * dt;
-        w[i] = aa * t.powf(b) * (-c * t).exp();
+        w[i] = aa * t.powf(b) * decay as f32;
+        decay *= decay_per_sample;
     }
 
     let beta = shear_velocity_km_s * 100000.0;
@@ -121,27 +139,35 @@ pub fn stochastic_spectrum(
         let omg = 2.0 * pai * fr;
         let a1 = (cc * subevent_moment * (omg * omg / (1.0 + (omg / omgc) * (omg / omgc)))) as f64;
 
-        let a2 = if kappa_s <= 0.0 {
-            // (1.0 + (omg/omgm)**1)**(-1.0). The **1 is the identity, and
-            // gfortran folds **(-1.0) to a reciprocal -- so this must be a
-            // division, NOT powf(-1.0), which differs. See PORTING_RULES.md §4b.
-            (1.0 / (1.0 + (omg / omgm))) as f64
+        // `a2` (near-surface attenuation) and `a3` (path attenuation) were two
+        // separate `expf` calls per frequency bin. Two simplifications, both
+        // arithmetic identities verified numerically to double-precision epsilon
+        // before being applied:
+        //
+        //   a3's argument   -0.5*omg*qbar*fr^-qfe  with omg = 2*pi*fr
+        //                 = -pi*qbar*fr^(1-qfe)              one fewer multiply
+        //   a2 * a3       = exp(-pi*fr*kappa) * exp(-pi*qbar*fr^(1-qfe))
+        //                 = exp(-pi*(fr*kappa + qbar*fr^(1-qfe)))   one fewer expf
+        //
+        // Only the `kappa > 0` branch can be combined; the `kappa <= 0` form of `a2`
+        // is a rational function, not an exponential, and production always has
+        // `kappa = 0.045`. Both branches are exercised — the tier-4 golden includes a
+        // negative-kappa case.
+        //
+        // No assumption is made about the frequency axis being evenly spaced, unlike
+        // the envelope recurrence above. `frequency_hz` is caller-supplied data.
+        let path = qbar * fr.powf(1.0 - q_exponent);
+        let a2a3 = if kappa_s <= 0.0 {
+            let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
+            let a3 = ((-pai * path).exp() / distance_cm) as f64;
+            a2 * a3
         } else {
-            (-pai * fr * kappa_s).exp() as f64
+            ((-pai * (fr * kappa_s + path)).exp() / distance_cm) as f64
         };
 
-        // The Fortran assigns a3 three times; only the last survives. The two
-        // dead stores are recorded here rather than executed -- they are pure
-        // and immediately overwritten, and each costs an exp() per frequency
-        // bin on a path called three times per subfault:
-        //     a3 = exp(-omg*distance_cm/(2.0*qv*beta))/distance_cm        ! fixed Q model
-        //     a3 = exp(-0.5*omg*qbar*fr**(-0.5))/distance_cm        ! qbar, fixed exponent
-        let a3 = ((-0.5 * omg * qbar * fr.powf(-q_exponent)).exp() / distance_cm) as f64;
-
-        // Frankel two-corner convolution operator.
         let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
 
-        as_[i] = a1 * a2 * a3 * frank as f64;
+        as_[i] = a1 * a2a3 * frank as f64;
     }
 
     let mut a = Array1::<f32>::new(np2);
