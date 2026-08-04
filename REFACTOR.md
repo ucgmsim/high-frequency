@@ -48,6 +48,33 @@ in Stage 2. Concretely:
   calibrated — see below. Use it as a release gate, not a per-commit gate; it
   costs ~25 minutes.
 
+### Working cheaply: bit-parity first, bisect on failure
+
+Running the statistical campaign after every change is the wrong default — Tier C is
+25 minutes and Tier D another 25. The cheap checks catch nearly everything:
+
+| check | cost | when |
+| --- | --- | --- |
+| `cargo test` | ~0.1 s release | every edit |
+| `harness/run_parity.sh` (release only) | ~40 s | every commit |
+| Tier B (50 seeds) | ~1 min | when parity goes red *on purpose* |
+| Tier C / Tier D | ~25 min each | batch boundaries only |
+
+**Bit-parity is a cheap test, not just a Stage 1 gate.** Plenty of Stage 2 changes
+turn out bit-identical in effect even when they are not so by construction — §2.2b's
+gamma swap moved `f64` by three ulps and the output did not change at all, because the
+consumer narrows to `f32`. So keep running it, and treat the result as a *classifier*:
+
+- **parity green** — nothing further needed, commit and move on.
+- **parity red, and the change was meant to be exact** — a bug. Do not reach for the
+  statistical gates; they are far too slow to localise anything. Bisect.
+- **parity red, and the change was meant to alter numerics** — now Tier B earns its
+  keep, because it is paired and will say *how much* moved.
+
+**Commit small and often.** The value is not tidiness, it is that `git bisect` over
+twenty small commits finds a regression in four or five parity runs. Over three large
+ones it tells you almost nothing.
+
 ### Tier D is calibrated, and it found something
 
 The A/A control (`--aa`, one binary split in half, 600v600) returns **0 of 15
@@ -455,7 +482,37 @@ that constraint is gone:
 Bonus: `Complex::cis` gives pure-imaginary `exp` directly, which was PROFILE item
 2. If 2.1 lands first, that path may already be gone.
 
-### 2.3 `fort::Array1`/`Array2` → 0-based slices
+### 2.3 `fort::Array1`/`Array2` → 0-based storage
+
+`Array1` and `Array2` are ~105 lines of `fort.rs`: 1-based indexing, column-major 2-D,
+and bounds assertions. They do look a lot like a hand-rolled `ndarray`, and that is
+worth taking seriously rather than reflexively reaching for slices.
+
+**Split the decision by dimensionality**, because the two have different answers:
+
+- **`Array1` → plain `Vec`/slices.** `ndarray` adds nothing to one dimension that a
+  slice does not already have, and it would put a bounds-checked wrapper straight back.
+  This is also where the churn is: 45 references in `state.rs` alone.
+- **`Array2` → `ndarray::Array2` is genuinely attractive.** There are only about eleven
+  sites (`SubfaultGeometry`'s five, `Segment`'s three, `acc` at `(3, MMV)`), and they
+  want exactly what `ndarray` provides: column views, `Zip`, and slicing. `acc` is
+  three components by samples and the output loop is a transpose-and-interleave, which
+  is one `columns()` iteration instead of a nested index loop.
+
+The counter-argument, stated fairly: `ndarray` pulls in `matrixmultiply`, `rawpointer`,
+`num-complex` and `num-traits` for eleven call sites of 2-D indexing, where `Vec<f32>`
+plus a five-line `index(i, j)` helper would do. It earns its place only if the second
+`1.3b` pass wants its iterators more broadly — which it might, since `Zip` and `azip!`
+are the natural form for the per-bin spectral loops.
+
+**Do `Array2` first, and only after §2.6's defect 1.** The column-major layout is
+load-bearing today for exactly one reason: `stdd(0,l)` aliases across columns
+(`PORTING_RULES.md` §7). Fixing that defect removes the only observable dependence on
+layout, after which the 2-D storage can be whatever `ndarray` defaults to and the
+migration stops being delicate. That is a reason to move defect 1 *earlier* in the
+sequence, not later.
+
+#### The original framing, still true
 
 Deletes ~120 lines, plus the mental overhead of 1-based indexing everywhere.
 **Do this last, module by module, with Tier B green after each.**
@@ -709,8 +766,10 @@ Stage 2, each with Tier B then C:
 9. `powf` cleanup (2.4).
 10. `delaz5` (2.5).
 11. The two defect fixes (2.6), separately, each with its Tier C delta recorded:
-    the `siteamp` convention split, then the `stdd(0,l)` sample shift.
-12. `Array1`/`Array2` (2.3), module by module, last.
+    the `siteamp` convention split, then the `stdd(0,l)` sample shift. The second of
+    these **unblocks** step 12 — see §2.3.
+12. `Array1`/`Array2` (2.3): `Array2` → `ndarray`, then `Array1` → slices, module by
+    module. Last, and only after step 11 removes the layout constraint.
 13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
 Re-run Tier D at the end of Stage 2 as a release gate, comparing Rust-before vs
