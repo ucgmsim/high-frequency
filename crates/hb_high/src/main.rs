@@ -534,16 +534,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let dipa = seg.dipq * pu;
             let raka = seg.rakeq * pu;
 
-            let mut rlsu = Array2::<f32>::new(params::NQ, params::NP);
-            let mut phsu = Array2::<f32>::new(params::NQ, params::NP);
-            let mut thsu = Array2::<f32>::new(params::NQ, params::NP);
-            let mut dst = Array2::<f32>::new(params::NQ, params::NP);
-            let mut zet = Array2::<f32>::new(params::NQ, params::NP);
-            even_dist2(
+            let geom = even_dist2(
                 seg.elonq, seg.elatq, station.stlon, station.stlat,
                 seg.strq, seg.dipq, seg.dtop, seg.astop, seg.dx, seg.dw,
                 seg.nx, seg.nw,
-                &mut rlsu, &mut phsu, &mut thsu, &mut dst, &mut zet,
             );
 
             // --- time-window pass. NOTE: j outer, i inner. --------------------
@@ -559,11 +553,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // below: if zet exceeds every depth, bet keeps its previous
                 // value. Undefined on the very first subfault of the first
                 // station in the Fortran; zero here.
-                if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth[k] >= zet[(i, j)] as f64) {
+                if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth[k] >= geom.depth_km[(i, j)] as f64) {
                     bet = vmod.vsh[ksrc] as f32;
                 }
 
-                let rvf = rv.factor(zet[(i, j)]);
+                let rvf = rv.factor(geom.depth_km[(i, j)]);
                 let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
                 let zz = czero * (1.0 + fcfac) / alphat;
 
@@ -574,7 +568,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let mut d0 = 0.0f32;
                 let mut slp = 0.0f32;
                 for kk in 1..=ndur {
-                    if rlsu[(i, j)] > rdur[kk] {
+                    if geom.slant_km[(i, j)] > rdur[kk] {
                         r0 = rdur[kk];
                         d0 = dpth[kk];
                         slp = dpdr[kk];
@@ -584,14 +578,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let fce = zz * rvf * bet / (dlm * pai);
                 let tw0 = 1.0 / fce;
                 let tw0 = bigc.sqrt() * tw0;
-                let dpath = d0 + slp * (rlsu[(i, j)] - r0);
+                let dpath = d0 + slp * (geom.slant_km[(i, j)] - r0);
                 // VERSION1: no 81.92 s cap.
                 twin[(i, j)] = 2.12 * (tw0 + dpath);
 
                 if twin[(i, j)] > tmax {
                     tmax = twin[(i, j)];
                 }
-                d10 = d10.min(rlsu[(i, j)]);
+                d10 = d10.min(geom.slant_km[(i, j)]);
             }
 
             let ntmax = (2.0 * tmax / dt) as i32 as usize;
@@ -641,7 +635,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // This pass DOES default bet/ro before the lookup.
                 let mut bet = vmod.vsh[1] as f32;
                 let mut ro = vmod.rho[1] as f32;
-                let ksrc = match (1..=j0).find(|&k| vmod.depth[k] >= zet[(i, j)] as f64) {
+                let ksrc = match (1..=j0).find(|&k| vmod.depth[k] >= geom.depth_km[(i, j)] as f64) {
                     Some(k) => {
                         bet = vmod.vsh[k] as f32;
                         ro = vmod.rho[k] as f32;
@@ -656,7 +650,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!(" wrong!");
                 }
 
-                let rvf0 = rv.factor(zet[(i, j)]);
+                let rvf0 = rv.factor(geom.depth_km[(i, j)]);
                 let mut rvf = rvf0;
                 if rvsig1 > 0.0 {
                     irandcnt += 1;
@@ -679,7 +673,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // gf_amp_tt unconditionally and overwrites the results below,
                     // and type 0 borrows type 1's tracing to do it.
                     let g = gf_amp_tt(
-                        &mut ray, &vmod, j0, zet[(i, j)], dst[(i, j)],
+                        &mut ray, &vmod, j0, geom.depth_km[(i, j)], geom.horiz_km[(i, j)],
                         kind.trace_type(irtype[ir]), mode,
                     );
                     let mut stime = g.stime;
@@ -688,7 +682,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let mut sub_tstart = stime - tw_eps * twin[(i, j)];
 
                     if kind == RayKind::StraightRay {
-                        rpath = rlsu[(i, j)];
+                        rpath = geom.slant_km[(i, j)];
                         qbar = rpath / (bet * 150.0);
                         stime = rpath / 3.7;
                         sub_tstart = 0.7 * stime;
@@ -723,11 +717,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let th = match kind {
                         // The straight-ray approximation ignores the traced ray
                         // parameter and uses the geometric take-off angle.
-                        RayKind::StraightRay => thsu[(i, j)],
+                        RayKind::StraightRay => geom.takeoff_rad[(i, j)],
                         RayKind::Upgoing => pai - incidence,
                         RayKind::Downgoing => incidence,
                     };
-                    let pa = phsu[(i, j)];
+                    let pa = geom.azimuth_rad[(i, j)];
 
                     let cmp = -90.0 * pu;
                     radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &dfr, nfold, cmp, nr, &mut rdna);

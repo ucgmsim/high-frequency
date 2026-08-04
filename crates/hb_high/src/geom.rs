@@ -150,6 +150,27 @@ pub fn delaz5(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> Delaz5 {
 /// `pi` is the source's own 9-digit `3.14159265`, not `std::f32::consts::PI`.
 /// Everything here is `f32`; there is no double-precision arithmetic.
 #[allow(clippy::too_many_arguments)]
+/// Per-subfault source-to-station geometry, every array indexed `(i, j)`.
+///
+/// The Fortran keeps these as five separate `(nq, np)` arrays named `rlsu`, `phsu`,
+/// `thsu`, `dst` and `zet`; they are always allocated, filled and indexed together,
+/// so they are one value.
+pub struct SubfaultGeometry {
+    /// `rlsu` — slant distance from subfault to station, km. Includes depth, so
+    /// this is what the path-duration table and `d10` are computed from.
+    pub slant_km: crate::fort::Array2<f32>,
+    /// `phsu` — station azimuth seen from the subfault, radians.
+    pub azimuth_rad: crate::fort::Array2<f32>,
+    /// `thsu` — geometric take-off angle, radians. Used in place of the traced ray
+    /// parameter under the straight-ray approximation.
+    pub takeoff_rad: crate::fort::Array2<f32>,
+    /// `dst` — horizontal distance from subfault to station, km.
+    pub horiz_km: crate::fort::Array2<f32>,
+    /// `zet` — subfault depth below the surface, km.
+    pub depth_km: crate::fort::Array2<f32>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn even_dist2(
     xlonq: f32,
     ylatq: f32,
@@ -163,12 +184,14 @@ pub fn even_dist2(
     dy: f32,
     nx: usize,
     nw: usize,
-    rl: &mut crate::fort::Array2<f32>,
-    ph: &mut crate::fort::Array2<f32>,
-    th: &mut crate::fort::Array2<f32>,
-    dst: &mut crate::fort::Array2<f32>,
-    zet: &mut crate::fort::Array2<f32>,
-) {
+) -> SubfaultGeometry {
+    use crate::state::params;
+    let mut rl = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+    let mut ph = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+    let mut th = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+    let mut dst = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+    let mut zet = crate::fort::Array2::<f32>::new(params::NQ, params::NP);
+
     let pi = 3.14159265f32;
     let alei = 0.0f32;
     let alsi = 0.0f32;
@@ -227,5 +250,13 @@ pub fn even_dist2(
             ph[(i, j)] = g.azes;
             zet[(i, j)] = zm1;
         }
+    }
+
+    SubfaultGeometry {
+        slant_km: rl,
+        azimuth_rad: ph,
+        takeoff_rad: th,
+        horiz_km: dst,
+        depth_km: zet,
     }
 }

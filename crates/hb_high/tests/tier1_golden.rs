@@ -6,11 +6,11 @@
 //!
 //! Regenerate with `harness/kernels/gen_tier1_golden.sh`.
 
-use hb_high::fort::{Array1, Array2};
+use hb_high::fort::Array1;
 use hb_high::geom::even_dist2;
 use hb_high::ray::{geom_terms, trav};
 use hb_high::site::get_sitefacs;
-use hb_high::state::{params, RayState, Vmod};
+use hb_high::state::{RayState, Vmod};
 use std::path::PathBuf;
 
 struct Reader {
@@ -232,26 +232,19 @@ fn even_dist2_matches_fortran() {
         let (azmq, dipangq, zm, astop) = (r.f32(), r.f32(), r.f32(), r.f32());
         let (dx, dy) = (r.f32(), r.f32());
 
-        let mut rl = Array2::<f32>::new(params::NQ, params::NP);
-        let mut ph = Array2::<f32>::new(params::NQ, params::NP);
-        let mut th = Array2::<f32>::new(params::NQ, params::NP);
-        let mut dst = Array2::<f32>::new(params::NQ, params::NP);
-        let mut zet = Array2::<f32>::new(params::NQ, params::NP);
-
-        even_dist2(
+        let g = even_dist2(
             xlonq, ylatq, slon, slat, azmq, dipangq, zm, astop, dx, dy, nx, nw,
-            &mut rl, &mut ph, &mut th, &mut dst, &mut zet,
         );
 
         // Driver dump order: ((dst,rl,th,ph,zet), j=1,nw), i=1,nx)
         for i in 1..=nx {
             for j in 1..=nw {
                 let tag = format!("even_dist2 case {cases} ({i},{j})");
-                eq32(&format!("{tag} dst"), dst[(i, j)], r.f32());
-                eq32(&format!("{tag} rl"), rl[(i, j)], r.f32());
-                eq32(&format!("{tag} th"), th[(i, j)], r.f32());
-                eq32(&format!("{tag} ph"), ph[(i, j)], r.f32());
-                eq32(&format!("{tag} zet"), zet[(i, j)], r.f32());
+                eq32(&format!("{tag} dst"), g.horiz_km[(i, j)], r.f32());
+                eq32(&format!("{tag} rl"), g.slant_km[(i, j)], r.f32());
+                eq32(&format!("{tag} th"), g.takeoff_rad[(i, j)], r.f32());
+                eq32(&format!("{tag} ph"), g.azimuth_rad[(i, j)], r.f32());
+                eq32(&format!("{tag} zet"), g.depth_km[(i, j)], r.f32());
             }
         }
         cases += 1;
