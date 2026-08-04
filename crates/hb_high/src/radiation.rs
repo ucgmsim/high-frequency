@@ -11,38 +11,38 @@
 ///
 /// The expressions below preserve Fortran's left-to-right association exactly.
 /// `SR*(CD**2-SD**2)*(CT**2-ST**2)*SS` is
-/// `((sr * (cd*cd - sd*sd)) * (ct*ct - st*st)) * ss` — regrouping it, even into
+/// `((sin_rake * (cos_dip*cos_dip - sin_dip*sin_dip)) * (cos_takeoff*cos_takeoff - sin_takeoff*sin_takeoff)) * sin_az` — regrouping it, even into
 /// something algebraically identical, moves the last bits.
 ///
 /// The commented-out alternative forms in the source are earlier versions using
 /// double-angle identities; they are *not* bit-equivalent to what is compiled
 /// and must not be substituted.
 pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_rad: f32, takeoff_rad: f32) -> (f32, f32) {
-    let sr = rake_rad.sin();
-    let vertical_slowness = rake_rad.cos();
-    let sd = dip_rad.sin();
-    let cd = dip_rad.cos();
-    let st = takeoff_rad.sin();
-    let ct = takeoff_rad.cos();
-    let ss = (azimuth_rad - strike_rad).sin();
-    let cs = (azimuth_rad - strike_rad).cos();
+    let sin_rake = rake_rad.sin();
+    let cos_rake = rake_rad.cos();
+    let sin_dip = dip_rad.sin();
+    let cos_dip = dip_rad.cos();
+    let sin_takeoff = takeoff_rad.sin();
+    let cos_takeoff = takeoff_rad.cos();
+    let sin_az = (azimuth_rad - strike_rad).sin();
+    let cos_az = (azimuth_rad - strike_rad).cos();
 
     // RDP is computed by the Fortran and then discarded -- the P radiation
     // coefficient is never returned or used. Kept so the two sources stay
     // line-comparable; see PORTING_RULES.md §7.
-    let _rdp = vertical_slowness * sd * (st * st) * 2.0 * ss * cs - vertical_slowness * cd * 2.0 * st * ct * cs
-        + sr * 2.0 * sd * cd * ((ct * ct) - (st * st) * (ss * ss))
-        + sr * ((cd * cd) - (sd * sd)) * 2.0 * st * ct * ss;
+    let _rdp = cos_rake * sin_dip * (sin_takeoff * sin_takeoff) * 2.0 * sin_az * cos_az - cos_rake * cos_dip * 2.0 * sin_takeoff * cos_takeoff * cos_az
+        + sin_rake * 2.0 * sin_dip * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff) * (sin_az * sin_az))
+        + sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * 2.0 * sin_takeoff * cos_takeoff * sin_az;
 
-    let rdsv = sr * ((cd * cd) - (sd * sd)) * ((ct * ct) - (st * st)) * ss
-        - vertical_slowness * cd * ((ct * ct) - (st * st)) * cs
-        + vertical_slowness * sd * st * ct * 2.0 * ss * cs
-        - sr * sd * cd * 2.0 * st * ct * (1.0 + (ss * ss));
+    let rdsv = sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * sin_az
+        - cos_rake * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * cos_az
+        + cos_rake * sin_dip * sin_takeoff * cos_takeoff * 2.0 * sin_az * cos_az
+        - sin_rake * sin_dip * cos_dip * 2.0 * sin_takeoff * cos_takeoff * (1.0 + (sin_az * sin_az));
 
-    let rdsh = vertical_slowness * cd * ct * ss
-        + vertical_slowness * sd * st * ((cs * cs) - (ss * ss))
-        + sr * ((cd * cd) - (sd * sd)) * ct * cs
-        - sr * sd * cd * st * 2.0 * ss * cs;
+    let rdsh = cos_rake * cos_dip * cos_takeoff * sin_az
+        + cos_rake * sin_dip * sin_takeoff * ((cos_az * cos_az) - (sin_az * sin_az))
+        + sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * cos_takeoff * cos_az
+        - sin_rake * sin_dip * cos_dip * sin_takeoff * 2.0 * sin_az * cos_az;
 
     (rdsh, rdsv)
 }
