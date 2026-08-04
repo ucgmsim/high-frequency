@@ -1,6 +1,6 @@
 //! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
-use crate::fft::{fast, remove_quadratic_trend};
+use crate::fft::{forward, remove_quadratic_trend};
 use crate::fort::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Pcg32};
 use crate::special::gamma;
@@ -181,7 +181,7 @@ pub fn stochastic_spectrum(
         *bin = Complex32::new(deviate * envelope, 0.0);
     }
 
-    fast(&mut ac, -1);
+    forward(&mut ac);
 
     // Average POWER spectrum to unity (2009-03-18), not amplitude.
     //

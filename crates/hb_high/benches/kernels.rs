@@ -21,7 +21,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use hb_high::fft::{fast, remove_quadratic_trend};
+use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::subfault_geometry;
 use hb_high::highcor::apply_radiation_and_invert;
@@ -93,7 +93,7 @@ fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
         depsum += v.thickness_km[k];
     }
     let hs = depsum - 0.5 * v.thickness_km[ksrc];
-    build_ray_path(&mut st, v, 1, hs, v.thickness_km[0]);
+    build_ray_path(&mut st, v, hs, v.thickness_km[0]);
     st
 }
 
@@ -144,14 +144,17 @@ fn bench_fft(c: &mut Criterion) {
     for &np2 in NP2S {
         group.throughput(Throughput::Elements(np2 as u64));
         let src = spectrum(np2);
-        for (name, ind) in [("analysis", -1i32), ("synthesis", 1i32)] {
+        for (name, run) in [
+            ("analysis", forward as fn(&mut [Complex32])),
+            ("synthesis", inverse as fn(&mut [Complex32])),
+        ] {
             group.bench_with_input(
                 BenchmarkId::new(name, np2),
-                &(np2, ind),
-                |b, &(_n, i)| {
+                &np2,
+                |b, _| {
                     b.iter_batched_ref(
                         || src.clone(),
-                        |ace| fast(ace.as_mut_slice(), black_box(i)),
+                        |ace| run(ace.as_mut_slice()),
                         criterion::BatchSize::SmallInput,
                     )
                 },
@@ -272,16 +275,16 @@ fn bench_ray(c: &mut Criterion) {
         b.iter(|| black_box(vertical_slowness(black_box(p), black_box(3.2))))
     });
     group.bench_function("cagniard_time", |b| {
-        b.iter(|| black_box(cagniard_time(&st, &v, black_box(p), 1, black_box(60.0))))
+        b.iter(|| black_box(cagniard_time(&st, &v, black_box(p), black_box(60.0))))
     });
     group.bench_function("cagniard_time_derivative", |b| {
-        b.iter(|| black_box(cagniard_time_derivative(&st, &v, black_box(p), 1, black_box(60.0))))
+        b.iter(|| black_box(cagniard_time_derivative(&st, &v, black_box(p), black_box(60.0))))
     });
     group.bench_function("stationary_ray_parameter", |b| {
-        b.iter(|| black_box(stationary_ray_parameter(&st, &v, 1, black_box(60.0))))
+        b.iter(|| black_box(stationary_ray_parameter(&st, &v, black_box(60.0))))
     });
     group.bench_function("travel_time", |b| {
-        b.iter(|| black_box(travel_time(&st, &v, 1, black_box(0.15), 0.0, black_box(60.0))))
+        b.iter(|| black_box(travel_time(&st, &v, black_box(0.15), 0.0, black_box(60.0))))
     });
     group.bench_function("geometric_spreading", |b| {
         b.iter(|| black_box(geometric_spreading(&st, &v, black_box(30.0), black_box(0.15), 1)))
@@ -289,7 +292,7 @@ fn bench_ray(c: &mut Criterion) {
     group.bench_function("build_ray_path", |b| {
         b.iter_batched_ref(
             || ray_state(18),
-            |st| build_ray_path(st, &v, 1, black_box(30.0), black_box(v.thickness_km[1])),
+            |st| build_ray_path(st, &v, black_box(30.0), black_box(v.thickness_km[1])),
             criterion::BatchSize::SmallInput,
         )
     });

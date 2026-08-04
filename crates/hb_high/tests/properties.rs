@@ -36,7 +36,7 @@
 use hb_high::config::{
     HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
 };
-use hb_high::fft::{fast, remove_quadratic_trend};
+use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry};
 use hb_high::input::{read_stoch, read_velocity_model, Station};
@@ -343,8 +343,8 @@ proptest! {
         let n = 1usize << exponent;
         let original = spectrum(n, 7);
         let mut work = original.clone();
-        fast(work.as_mut_slice(), -1);
-        fast(work.as_mut_slice(), 1);
+        forward(work.as_mut_slice());
+        inverse(work.as_mut_slice());
 
         // Take the scale from the largest input bin, where it is best conditioned.
         let pivot = (0..n)
@@ -381,7 +381,7 @@ proptest! {
         let mut t_rhs = rhs.clone();
         let mut t_combined = combined.clone();
         for arr in [&mut t_lhs, &mut t_rhs, &mut t_combined] {
-            fast(arr.as_mut_slice(), -1);
+            forward(arr.as_mut_slice());
         }
 
         let peak = t_combined.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
@@ -412,7 +412,7 @@ proptest! {
             *slot = Complex32::new(v, 0.0);
             sum += v;
         }
-        fast(work.as_mut_slice(), -1);
+        forward(work.as_mut_slice());
         // DC is bin 0 now, not 1.
         prop_assert!(
             work[0].im.abs() <= 1e-4 * sum.abs().max(1.0),

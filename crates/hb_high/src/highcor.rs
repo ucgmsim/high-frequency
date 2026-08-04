@@ -1,7 +1,7 @@
 //! Radiation-pattern filtering and the inverse transform back to the time
 //! domain.
 
-use crate::fft::fast;
+use crate::fft::inverse;
 use crate::fort::Complex32;
 
 /// `subroutine apply_radiation_and_invert(fold_count,mirror_count,np2,spectrum,time_series,radiation)` — `hb_high_ref.f:2234`.
@@ -62,7 +62,7 @@ pub fn apply_radiation_and_invert(
         spectrum[j] *= radiation[2 * fold_count - j - 2];
     }
 
-    fast(spectrum, 1);
+    inverse(spectrum);
 
     let fac = 1.0 / (radiation_norm * partition_factor * np2 as f32);
     for (sample, bin) in time_series[..np2].iter_mut().zip(spectrum.iter()) {

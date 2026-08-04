@@ -42,13 +42,12 @@ pub type Complex64 = Complex<f64>;
 // Intrinsic shims
 // ---------------------------------------------------------------------------
 
-/// `round_half_away_from_zero(x)` — round half **away from zero**.
-///
-/// Not `round_ties_even` (which rounds half to even) and not a bare `as i32`
-/// (which truncates).
-pub fn round_half_away_from_zero(x: f32) -> i32 {
-    x.round() as i32
-}
+// `round_half_away_from_zero` (Fortran `NINT`) lived here until §2.8. Its only caller
+// was the sub-event time offset in the subfault pass, and that offset was computed and
+// then unconditionally zeroed -- `nsum` has been frozen at 1 since 2004. With the dead
+// arithmetic gone, nothing in the program rounds half away from zero, so a shim for the
+// difference between `NINT` and `round_ties_even` documents a hazard the code no longer
+// runs into. If a future change revives the sub-event offset, it comes back with it.
 
 /// `int(x)` — truncate **toward zero**, so `int(-1.7) == -1`.
 ///
@@ -63,20 +62,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nint_rounds_half_away_from_zero() {
-        assert_eq!(round_half_away_from_zero(0.5), 1);
-        assert_eq!(round_half_away_from_zero(1.5), 2);
-        assert_eq!(round_half_away_from_zero(2.5), 3); // round_ties_even would give 2
-        assert_eq!(round_half_away_from_zero(-0.5), -1);
-        assert_eq!(round_half_away_from_zero(-2.5), -3);
-    }
-
-    #[test]
     fn int_truncates_toward_zero() {
         assert_eq!(truncate_toward_zero(1.7), 1);
         assert_eq!(truncate_toward_zero(-1.7), -1); // toward zero, not floor
         assert_eq!(truncate_toward_zero(-0.2), 0);
     }
-
-    
-    }
+}

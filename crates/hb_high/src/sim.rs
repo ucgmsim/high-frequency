@@ -28,7 +28,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, StressParamAdjust,
 };
-use crate::fort::{round_half_away_from_zero, Complex32};
+use crate::fort::{truncate_toward_zero, Complex32};
 use crate::geom::subfault_geometry;
 use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, StochModel};
@@ -176,9 +176,11 @@ pub fn simulate(
 
     // Seismic moment of the subevent, from the average stress on the fault.
     let subevent_moment = stress_average * dlm * dlm * dlm * 1.0e+21;
-    // nsum is computed from `ratio` and then forced to 1 (2004-04-20), which is
-    // why the Frankel operator in stochastic_spectrum carries the scaling instead.
-    let nsum = 1usize;
+    // The Fortran's `nsum` -- the sub-event count -- is computed from `ratio` and then
+    // forced to 1 (2004-04-20), which is why the Frankel operator in
+    // stochastic_spectrum carries the scaling instead. It is not bound here because
+    // nothing reads it; the one place it reached is documented at its use site in the
+    // subfault pass, where the draw it used to gate still has to happen.
 
     // The Fortran computes four candidate moment scalings in a row and lets the
     // last assignment win, leaving the other three as documentation of what was
@@ -199,7 +201,7 @@ pub fn simulate(
     // longer than the compiled array rather than reporting anything -- arguably worse
     // than the `np2 > mm` abort below it, which at least said something. Both are gone;
     // the buffers are sized from the deck.
-    let ndata = (duration / dt) as i32 as usize;
+    let ndata = truncate_toward_zero(duration / dt) as usize;
 
     let (mut rng, irand_after) = Pcg32::seed(irand);
     // init_random_seed mutates its argument, and the mutated value gates the
@@ -321,7 +323,7 @@ pub fn simulate(
             d10 = d10.min(ray.slant_km);
         }
 
-        let ntmax = (2.0 * tmax / dt) as i32 as usize;
+        let ntmax = truncate_toward_zero(2.0 * tmax / dt) as usize;
         let mut np2 = 2usize;
         while np2 < ntmax {
             np2 *= 2;
@@ -397,7 +399,6 @@ pub fn simulate(
             let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
             let fce = fc_coeff * rvf * shear_velocity_km_s / dlm / pi;
-            let rise = subfault.rise_time_s;
 
             let mode = 4; // hardwired SH
             for &ray_type in &config.rayset {
@@ -500,52 +501,60 @@ pub fn simulate(
                     ratim = subfault.rupture_time_s;
                 }
 
-                // int() truncates toward zero, so a negative
-                // sub_tstart makes kst smaller, possibly negative.
-                let kst = (ratim / dt) as i32 + (sub_tstart / dt) as i32;
+                // Both terms truncate TOWARD ZERO, not toward negative infinity, so a
+                // negative `sub_tstart` makes `kst` smaller and possibly negative. The
+                // named shim is the point: a future edit to `.floor()` here would be
+                // silent, and `kst` is the sample index the whole subfault lands on.
+                let kst = truncate_toward_zero(ratim / dt) + truncate_toward_zero(sub_tstart / dt);
 
-                for _k in 1..=nsum {
-                    let si = rng.next_f32();
-                    let dris = si * rise / dt;
-                    let mut k2 = round_half_away_from_zero(dris);
-                    if nsum == 1 {
-                        k2 = 0;
-                    }
-                    let k2 = k2 + kst;
-                    // §2.6 defect 1 is fixed here: sample 1 of the subfault's trace
-                    // now lands on `k2`, not on `k2 + 1`.
-                    //
-                    // The Fortran read `stdd(li - k2, l)`, so its first iteration read
-                    // index 0 -- one element before the column, which nothing ever
-                    // writes -- and every subfault's contribution arrived one sample
-                    // late. See REFACTOR.md §2.6 for the analysis and PORTING_RULES §7
-                    // for the aliasing that made that read return zero rather than
-                    // crash.
-                    //
-                    // The upper bound moves with it: reading `idx + 1` over the old
-                    // range would reach `subfault_acc[np2 + 1]`, past the end. The
-                    // contribution is `subfault_acc[1..=np2]` placed at
-                    // `acc[k2 ..= k2 + np2 - 1]`.
-                    let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
+                // ONE DRAW, AND IT MUST STAY. The Fortran loops `k = 1, nsum` here,
+                // draws a uniform, and turns it into a sub-event time offset `k2`. But
+                // `nsum` was frozen at 1 in 2004, so the loop ran once and the very next
+                // statement was `if (nsum.eq.1) k2 = 0` -- the offset was computed and
+                // then unconditionally thrown away, taking the rise time with it.
+                //
+                // So the arithmetic is dead and is gone. The draw is not: it advances
+                // the shared generator once per (subfault, ray), and every sample
+                // produced after it depends on where the stream ends up. Deleting this
+                // line as "obviously dead code" changes every waveform in the program.
+                //
+                // The offset it used to compute is a frozen switch, not a defect -- see
+                // REFACTOR.md "Not defects: frozen switches". Reviving it needs the same
+                // explicit sign-off collapsing it would have needed.
+                let _stream_advance = rng.next_f32();
 
-                    let sd = subfault.slip;
-                    let mut li = k2;
-                    while li <= kend {
-                        // `k2` can be negative. Writes below index 1 land before DS in
-                        // the Fortran and are never read back, since the output reads
-                        // DS(1..ndata), so they are discarded rather than reproduced.
-                        if li >= 1 {
-                            let idx = (li - k2) as usize;
-                            // `li` is the Fortran's 1-based sample number, so the
-                            // 0-based slot is one lower. The `fort::Array2` this used to
-                            // be had a 1-based second subscript, which hid this.
-                            let sample = li as usize - 1;
-                            for component in 0..3 {
-                                acc[component][sample] += sd * subfault_acc[component][idx];
-                            }
+                // §2.6 defect 1 is fixed here: sample 1 of the subfault's trace lands on
+                // `k2`, not on `k2 + 1`.
+                //
+                // The Fortran read `stdd(li - k2, l)`, so its first iteration read index
+                // 0 -- one element before the column, which nothing ever writes -- and
+                // every subfault's contribution arrived one sample late. See REFACTOR.md
+                // §2.6 for the analysis and PORTING_RULES §7 for the aliasing that made
+                // that read return zero rather than crash.
+                //
+                // The upper bound moves with it: reading `idx + 1` over the old range
+                // would reach `subfault_acc[np2 + 1]`, past the end. The contribution is
+                // `subfault_acc[1..=np2]` placed at `acc[k2 ..= k2 + np2 - 1]`.
+                let k2 = kst;
+                let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
+
+                let sd = subfault.slip;
+                let mut li = k2;
+                while li <= kend {
+                    // `k2` can be negative. Writes below index 1 land before DS in the
+                    // Fortran and are never read back, since the output reads
+                    // DS(1..ndata), so they are discarded rather than reproduced.
+                    if li >= 1 {
+                        let idx = (li - k2) as usize;
+                        // `li` is the Fortran's 1-based sample number, so the 0-based
+                        // slot is one lower. The `fort::Array2` this used to be had a
+                        // 1-based second subscript, which hid this.
+                        let sample = li as usize - 1;
+                        for component in 0..3 {
+                            acc[component][sample] += sd * subfault_acc[component][idx];
                         }
-                        li += 1;
                     }
+                    li += 1;
                 }
             }
         }

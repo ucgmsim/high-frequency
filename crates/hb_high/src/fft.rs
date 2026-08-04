@@ -43,28 +43,46 @@ thread_local! {
     static PLANS: RefCell<HashMap<(usize, bool), FftPlan>> = RefCell::new(HashMap::new());
 }
 
+/// Analysis transform, `e^{-i w t}` — the Fortran's `FAST(NNN, ACE, -1)`.
+///
+/// Unnormalised; callers divide by the length where they need to.
+pub fn forward(data: &mut [Complex32]) {
+    transform(data, true)
+}
+
+/// Synthesis transform — the Fortran's `FAST(NNN, ACE, +1)`.
+///
+/// Unnormalised; [`crate::highcor::apply_radiation_and_invert`] divides by `np2`.
+pub fn inverse(data: &mut [Complex32]) {
+    transform(data, false)
+}
+
 /// `SUBROUTINE FAST(NNN,ACE,IND)` — in-place unnormalised complex radix-2 FFT.
 ///
-/// `ind = -1` is the analysis transform (`e^{-i w t}`), `ind = +1` synthesis.
-/// Neither direction is scaled; callers divide by `NNN` where they need to.
+/// The `ind` argument is gone. It only ever took `-1` or `+1`, the body's sole use of it
+/// was `let forward = ind == -1`, and it cost a runtime assertion to enforce a two-valued
+/// domain the type system can express for free. The two call sites each have a fixed
+/// direction, so this is two named functions rather than an enum — there is no dispatch
+/// to preserve. `REFACTOR.md` §1.4b deferred this until §2.1 replaced the kernel, which
+/// it has.
 ///
-/// `nnn` must be a power of two. Every call site satisfies this — `np2` is built
-/// by doubling from 2 at `:1089-1092` — but the assertion makes a future
-/// violation loud instead of silently producing garbage, since the bit-reversal
-/// permutation below is only a permutation for powers of two.
+/// The inverted mapping — `-1` meaning *forward* — was the trap, and it needed the
+/// module header's four paragraphs to defend. `forward()` and `inverse()` need none.
+///
+/// `len` must be a power of two. Every call site satisfies this (`np2` is built by
+/// doubling from 2), but the assertion makes a future violation loud rather than
+/// silently wrong.
 ///
 /// The vendored kernel's twiddle argument used `3.141593`, a 7-digit truncation of pi
 /// about 2 `f32` ulps off, and that value was load-bearing while it computed its own
 /// twiddles. §2.1 handed the transform to `rustfft`, which builds correctly rounded
 /// twiddles in its plan, so the constant is gone along with the kernel.
-pub fn fast(data: &mut [Complex32], ind: i32) {
+fn transform(data: &mut [Complex32], forward: bool) {
     // The length is the slice's, not a separate argument. Every call site passed
     // exactly `data.len()`, so the parameter could only ever have disagreed with
     // reality -- §2.3.
     let len = data.len();
     assert!(len.is_power_of_two(), "FAST requires a power-of-two length, got {len}");
-    assert!(ind == 1 || ind == -1, "FAST direction must be +/-1, got {ind}");
-    let forward = ind == -1;
 
     let plan = PLANS.with(|plans| {
         Arc::clone(plans.borrow_mut().entry((len, forward)).or_insert_with(|| {

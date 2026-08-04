@@ -1,6 +1,6 @@
 //! Fourier amplitude spectra, for the inter-frequency correlation analysis.
 //!
-//! Reuses `hb_high::fft::fast` rather than adding a second transform: that routine
+//! Reuses `hb_high::fft::forward` rather than adding a second transform: that routine
 //! is already gated bit-identical against the Fortran across 13 lengths and both
 //! directions, and it already requires the power-of-two lengths we need here.
 //!
@@ -13,7 +13,7 @@
 //!   frequency rather than adding information, and it is applied identically to
 //!   both codes, so it cannot bias a comparison.
 
-use hb_high::fft::fast;
+use hb_high::fft::forward;
 use hb_high::fort::Complex32;
 
 /// Default frequency bins for the correlation analysis: 30 log-spaced bands from
@@ -42,8 +42,7 @@ pub fn fas(acc: &[f32], dt: f64) -> (Vec<f64>, Vec<f64>) {
     for (slot, &a) in z.iter_mut().zip(acc) {
         *slot = Complex32::new(a, 0.0);
     }
-    // ind = -1 is the analysis direction; see hb_high::fft::fast.
-    fast(z.as_mut_slice(), -1);
+    forward(z.as_mut_slice());
 
     let nf = n / 2 + 1;
     let df = 1.0 / (n as f64 * dt);

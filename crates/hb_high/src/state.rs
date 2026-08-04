@@ -95,8 +95,10 @@ pub struct VelocityModelInput {
     pub density_g_cm3: Vec<f64>,
     pub attenuation_p: Vec<f32>,
     pub attenuation_s: Vec<f32>,
-    /// `grand` / `gr` — RNG scratch shared with `grandvel` (dead in production).
-    pub grand: Vec<f32>,
+    // `grand`/`gr` -- 3000 floats of RNG scratch for `grandvel` -- lived here until
+    // §2.8. `grandvel` is dead under the production deck (`nl_skip < 0`) and is not
+    // ported, so nothing ever read the field, but `simulate` deep-cloned it once per
+    // call to carry it.
 }
 
 impl Default for VelocityModelInput {
@@ -115,7 +117,6 @@ impl VelocityModelInput {
             density_g_cm3: vec![0.0; NLAYMAX],
             attenuation_p: vec![0.0; NLAYMAX],
             attenuation_s: vec![0.0; NLAYMAX],
-            grand: vec![0.0; 3000],
         }
     }
 }

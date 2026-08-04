@@ -54,15 +54,18 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     Complex64::new(a, b)
 }
 
-/// `subroutine build_ray_path(ray_index,source_depth_km,receiver_depth_km)` — `hb_high_ref.f:3507`.
+/// `subroutine build_ray_path(ir,source_depth_km,receiver_depth_km)` — `hb_high_ref.f:3507`.
 ///
 /// Builds the per-layer path multipliers for one ray. Sole writer of
 /// `/travel/` (`alp`, `als`, `ndeep`, `nup`), `/coff/` (`it`, `nup1`) and
 /// `/rmode/` (`love`); reads `/rays/` and `/vmod/thickness_km`.
 ///
-/// `source_depth_km` is the source depth, `receiver_depth_km` the receiver depth. `ray_index` is retained to match
-/// the Fortran signature but is always 1 — `/rays/` has a degenerate leading
-/// dimension of 1.
+/// `source_depth_km` is the source depth, `receiver_depth_km` the receiver depth.
+///
+/// The Fortran's `ir` argument is gone. `/rays/` has a degenerate leading dimension of
+/// 1 and every routine hardwired the index to 1; `PORTING_RULES.md` §6 said to keep the
+/// argument "during transliteration" and drop it in Phase 3, which is here. `state.rs`
+/// dropped the dimension itself back in §2.3.
 ///
 /// # Known bug, reproduced
 ///
@@ -71,8 +74,7 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
 /// previous ray. Harmless at the ~34 layers production uses, but it is not
 /// widened here: doing so would change results for any deeper model, silently.
 /// See `PORTING_RULES.md` §7.
-pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, ray_index: usize, source_depth_km: f64, receiver_depth_km: f64) {
-    assert_eq!(ray_index, 1, "/rays/ has a degenerate leading dimension; ray_index must be 1");
+pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_km: f64, receiver_depth_km: f64) {
 
     state.love = 1;
     if state.rays.nm[0] == 4 {
@@ -308,13 +310,11 @@ pub fn geometric_spreading(
 /// routine declares as `nd`. It is **not** `/rays/nd`, which this routine also
 /// has in scope. See `PORTING_RULES.md` §6.
 ///
-/// `ir` is unused — kept to match the Fortran signature.
-///
 /// Note the guard is `alp(i) > 0`, whereas [`cagniard_time_derivative`] uses `alp(i) /= 0`. `alp`
 /// can be negative after `build_ray_path`'s source- and receiver-layer adjustments, so
 /// the two routines genuinely disagree about negative multipliers: `cagniard_time`
 /// skips them, `cagniard_time_derivative` does not. Preserved as-is.
-pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, _ray_index: usize, range_km: f64) -> Complex64 {
+pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, range_km: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 0..=state.travel.ndeep as usize {
         let mut ea = Complex64::ZERO;
@@ -339,8 +339,8 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
 /// the numerator to complex and doing a full complex division — Smith's
 /// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fort::Complex`]'s `Div`.
 ///
-/// `ir` is unused. The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
-pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, _ray_index: usize, range_km: f64) -> Complex64 {
+/// The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
+pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, range_km: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 0..=state.travel.ndeep as usize {
         let mut b = Complex64::ZERO;
@@ -358,7 +358,7 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
     Complex64::from(range_km) - ray_parameter * a
 }
 
-/// `subroutine stationary_ray_parameter(ray_index,p0,t0,range_km)` — `hb_high_ref.f:3441`.
+/// `subroutine stationary_ray_parameter(ir,p0,t0,range_km)` — `hb_high_ref.f:3441`.
 ///
 /// Finds the geometric ray parameter `p0` and its travel time `t0`, returned as
 /// `(p0, t0)`.
@@ -396,7 +396,7 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
 /// Measured over 72 cases with `range_km` from 0.5 to 400 km, the largest `a` seen was
 /// -2106. Every case also exits on the `|a| <= 0.01` tolerance; the
 /// 40-iteration cap never fires. Both facts are pinned in `tier3_golden.rs`.
-pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_index: usize, range_km: f64) -> (f64, f64) {
+pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km: f64) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
     let mut v = 0.0f64;
     for i in 0..=state.travel.ndeep as usize {
@@ -427,7 +427,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
     let mut p = Complex64::from(ptest - 10.0 * eps);
 
     // Real part of a complex*16, assigned to a real*8.
-    let mut a = cagniard_time_derivative(state, vmod, p, ray_index, range_km).re;
+    let mut a = cagniard_time_derivative(state, vmod, p, range_km).re;
 
     if a < 0.0 {
         // Label 11: bisect between pn (where dtau/dp < 0) and pp.
@@ -437,7 +437,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
         loop {
             k += 1;
             p = Complex64::from((pn + pp) / 2.0);
-            a = cagniard_time_derivative(state, vmod, p, ray_index, range_km).re;
+            a = cagniard_time_derivative(state, vmod, p, range_km).re;
             if a.abs() <= 0.01 || k >= 40 {
                 break;
             }
@@ -451,11 +451,11 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
 
     // Label 12.
     let p0 = p.re;
-    let t = cagniard_time(state, vmod, p, ray_index, range_km);
+    let t = cagniard_time(state, vmod, p, range_km);
     (p0, t.re)
 }
 
-/// `subroutine travel_time(ray_index,ray_parameter,t0,p1,t1,range_km)` — `hb_high_ref.f:3610`.
+/// `subroutine travel_time(ir,ray_parameter,t0,p1,t1,range_km)` — `hb_high_ref.f:3610`.
 ///
 /// Clamps the ray parameter to the smallest `1/v` over every segment and both
 /// sides of each reflecting interface, then evaluates the travel time there.
@@ -479,12 +479,11 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, ray_inde
 /// throughout and only the first clamp applies. The branch matters for the
 /// Moho-multiple ray shapes.
 ///
-/// Note `nm(ray_index,1)` — the mode of the *first* segment governs whether P
+/// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
 /// velocities are considered, for every segment.
 pub fn travel_time(
     state: &RayState,
     vmod: &VelocityModel,
-    ray_index: usize,
     ray_parameter: f64,
     _time_guess: f64,
     range_km: f64,
@@ -525,7 +524,7 @@ pub fn travel_time(
     }
 
     let p = Complex64::from(p1);
-    let t = cagniard_time(state, vmod, p, ray_index, range_km);
+    let t = cagniard_time(state, vmod, p, range_km);
     (p1, t.re)
 }
 
@@ -600,7 +599,6 @@ pub fn green_function(
     // test the thickness of the layer BELOW the one they are on, and the bottom layer is
     // forced to zero thickness by `read_velocity_model`.
     let bottom_layer = layer_count - 1;
-    let ir = 1usize;
 
     state.rays.ndeg = 1;
     let hr = vmod.thickness_km[0];
@@ -700,10 +698,10 @@ pub fn green_function(
     }
     state.rays.nd = l as i32;
 
-    build_ray_path(state, vmod, ir, hs, hr);
-    let (p0, t0) = stationary_ray_parameter(state, vmod, ir, rr);
+    build_ray_path(state, vmod, hs, hr);
+    let (p0, t0) = stationary_ray_parameter(state, vmod, rr);
     // Outputs discarded by the Fortran; the call is kept for comparability.
-    let (_p1, _t1) = travel_time(state, vmod, ir, p0, t0, rr);
+    let (_p1, _t1) = travel_time(state, vmod, p0, t0, rr);
 
     let (rpd, qbar) = geometric_spreading(state, vmod, hs, p0, ray_type);
 

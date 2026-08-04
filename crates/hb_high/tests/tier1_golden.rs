@@ -147,7 +147,11 @@ fn trav_matches_fortran() {
     while !r.done() {
         let j0 = r.usize();
         let n = r.usize();
+        // The driver still writes `ir` into every record and always writes 1. The port's
+        // signatures no longer take it (§2.8, per PORTING_RULES §6), but the field has
+        // to be consumed to keep the reader aligned with the fixture.
         let ir = r.usize();
+        assert_eq!(ir, 1, "the golden's degenerate ray index should always be 1");
         let ndeg = r.i32();
         let hs = r.f64();
         let hr = r.f64();
@@ -170,7 +174,7 @@ fn trav_matches_fortran() {
         let w_alp: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
         let w_als: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
 
-        build_ray_path(&mut st, &vmod, ir, hs, hr);
+        build_ray_path(&mut st, &vmod, hs, hr);
 
         let tag = format!("build_ray_path case {cases} (j0={j0} n={n} ndeg={ndeg})");
         assert_eq!(st.love, w_love, "{tag} love");

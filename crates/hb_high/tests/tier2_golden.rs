@@ -152,7 +152,7 @@ fn cagcon_stays_close_to_fortran() {
     while !r.done() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
-        let got = cagniard_time(&st, &vmod, p, 1, rr);
+        let got = cagniard_time(&st, &vmod, p, rr);
         let re = format!("cagniard_time case {n} (ndeep={ndp}) re");
         let im = format!("cagniard_time case {n} (ndeep={ndp}) im");
         div.note(&re, got.re, want.re);
@@ -175,7 +175,7 @@ fn dtdp_stays_close_to_fortran() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
         // Exercises complex division: Smith's algorithm, not (ac+bd)/(c^2+d^2).
-        let got = cagniard_time_derivative(&st, &vmod, p, 1, rr);
+        let got = cagniard_time_derivative(&st, &vmod, p, rr);
         let re = format!("cagniard_time_derivative case {n} (ndeep={ndp}) re");
         let im = format!("cagniard_time_derivative case {n} (ndeep={ndp}) im");
         div.note(&re, got.re, want.re);

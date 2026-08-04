@@ -103,7 +103,7 @@ fn pnot_matches_fortran() {
         let want_p0 = r.f64();
         let want_t0 = r.f64();
 
-        let (p0, t0) = stationary_ray_parameter(&st, &vmod, 1, rr);
+        let (p0, t0) = stationary_ray_parameter(&st, &vmod, rr);
         let tag = format!("stationary_ray_parameter case {n} (ndeep={ndeep} r={rr})");
         // p0 pins the whole search: the eps growth loop, the 0.01 tolerance and
         // the 40-iteration cap all feed into it.
@@ -167,7 +167,7 @@ fn ttime_matches_fortran() {
         let want_t1 = r.f64();
 
         // t0 is passed and never read by the Fortran; 0.0 stands in.
-        let (p1, t1) = travel_time(&st, &vmod, 1, p0, 0.0, rr);
+        let (p1, t1) = travel_time(&st, &vmod, p0, 0.0, rr);
         let tag = format!("travel_time case {n} (ndeep={ndeep} n={nseg})");
         eq64(&format!("{tag} p1"), p1, want_p1);
         eq64(&format!("{tag} t1"), t1, want_t1);
