@@ -139,8 +139,9 @@ pub fn distance_azimuth(event_lat_deg: f32, event_lon_deg: f32, station_lat_deg:
 /// * `ph`  — azimuth, radians (`azes` straight from `DELAZ5`)
 /// * `zet` — subfault depth, km
 ///
-/// `astop` is half the fault length along strike, so `(i-0.5)*dx - astop`
-/// centres the along-strike coordinate on the reference point.
+/// `along_strike_offset_km` is half the fault length along strike, so
+/// `(i-0.5)*subfault_length_km - along_strike_offset_km` centres the along-strike
+/// coordinate on the reference point.
 ///
 /// The degree-to-km scale factors `ddx`/`ddy` are obtained empirically: two
 /// `DELAZ5` calls one degree apart in longitude and in latitude respectively.
@@ -190,7 +191,7 @@ pub fn subfault_geometry(
     // five, essentially all of it untouched -- and it allocates them per segment.
     // Every access below and in every caller is `(i, j)` within `1..=along_strike_count`/`1..=down_dip_count`,
     // so the layout is not observable and compacting them changes no arithmetic.
-    // This is the same argument `input::Segment` already makes for sddp/rist/rupt.
+    // This is the same argument `input::Segment` already makes for its three grids.
     let mut rl = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
     let mut ph = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
     let mut th = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);

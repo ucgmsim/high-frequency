@@ -198,12 +198,12 @@ pub struct RuptureVelocityTaper {
 impl RuptureVelocity {
     /// Apply the defaults and set the transition depths.
     ///
-    /// `zhyp_max` is the deepest hypocentre in the slip model. When it is below the
+    /// `max_hypocentre_depth_km` is the deepest hypocentre in the slip model. When it is below the
     /// default deep transition the defaults stand; otherwise the deep band moves
     /// down to start at the hypocentre and span 5 km.
-    pub fn resolve(self, zhyp_max: f32) -> RuptureVelocityTaper {
-        let (deep_dmin, deep_dmax) = if zhyp_max > defaults::DEEP_DMIN {
-            (zhyp_max, zhyp_max + 5.0)
+    pub fn resolve(self, max_hypocentre_depth_km: f32) -> RuptureVelocityTaper {
+        let (deep_dmin, deep_dmax) = if max_hypocentre_depth_km > defaults::DEEP_DMIN {
+            (max_hypocentre_depth_km, max_hypocentre_depth_km + 5.0)
         } else {
             (defaults::DEEP_DMIN, defaults::DEEP_DMAX)
         };

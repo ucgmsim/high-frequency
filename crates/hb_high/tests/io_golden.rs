@@ -81,28 +81,29 @@ fn check(golden: &str, stoch_name: &str) {
     let want_nevnt = r.i32() as usize;
     let want_nstot = r.i32() as usize;
     assert_eq!(m.segments.len(), want_nevnt, "nevnt");
-    assert_eq!(m.nstot, want_nstot, "nstot");
-    eq32("farea_in", m.farea_in, r.f32());
-    eq32("zhyp_max", m.zhyp_max, r.f32());
+    assert_eq!(m.subfault_count, want_nstot, "nstot");
+    eq32("farea_in", m.fault_area_km2, r.f32());
+    eq32("zhyp_max", m.max_hypocentre_depth_km, r.f32());
 
     for (k, s) in m.segments.iter().enumerate() {
-        assert_eq!(s.nx, r.i32() as usize, "seg {k} nx");
-        assert_eq!(s.nw, r.i32() as usize, "seg {k} nw");
-        eq32(&format!("seg {k} elonq"), s.elonq, r.f32());
-        eq32(&format!("seg {k} elatq"), s.elatq, r.f32());
-        eq32(&format!("seg {k} dx"), s.dx, r.f32());
-        eq32(&format!("seg {k} dw"), s.dw, r.f32());
-        eq32(&format!("seg {k} strq"), s.strq, r.f32());
-        eq32(&format!("seg {k} dipq"), s.dipq, r.f32());
-        eq32(&format!("seg {k} rakeq"), s.rakeq, r.f32());
-        eq32(&format!("seg {k} dtop"), s.dtop, r.f32());
-        eq32(&format!("seg {k} shyp"), s.shyp, r.f32());
-        eq32(&format!("seg {k} dhyp"), s.dhyp, r.f32());
-        eq32(&format!("seg {k} astop"), s.astop, r.f32());
+        assert_eq!(s.along_strike_count, r.i32() as usize, "seg {k} nx");
+        assert_eq!(s.down_dip_count, r.i32() as usize, "seg {k} nw");
+        eq32(&format!("seg {k} elonq"), s.fault_lon_deg, r.f32());
+        eq32(&format!("seg {k} elatq"), s.fault_lat_deg, r.f32());
+        eq32(&format!("seg {k} dx"), s.subfault_length_km, r.f32());
+        eq32(&format!("seg {k} dw"), s.subfault_width_km, r.f32());
+        eq32(&format!("seg {k} strq"), s.strike_deg, r.f32());
+        eq32(&format!("seg {k} dipq"), s.dip_deg, r.f32());
+        eq32(&format!("seg {k} rakeq"), s.rake_deg, r.f32());
+        eq32(&format!("seg {k} dtop"), s.top_depth_km, r.f32());
+        eq32(&format!("seg {k} shyp"), s.hypocentre_along_strike_km, r.f32());
+        eq32(&format!("seg {k} dhyp"), s.hypocentre_down_dip_km, r.f32());
+        eq32(&format!("seg {k} astop"), s.along_strike_offset_km, r.f32());
         // Driver dump order: ((arr(iv,i,j), i=1,nx), j=1,nw)
-        for (name, arr) in [("sddp", &s.sddp), ("rist", &s.rist), ("rupt", &s.rupt)] {
-            for j in 1..=s.nw {
-                for i in 1..=s.nx {
+        let dumped = [("sddp", &s.slip), ("rist", &s.rise_time_s), ("rupt", &s.rupture_time_s)];
+        for (name, arr) in dumped {
+            for j in 1..=s.down_dip_count {
+                for i in 1..=s.along_strike_count {
                     eq32(&format!("seg {k} {name}({i},{j})"), arr[(i, j)], r.f32());
                 }
             }
@@ -153,7 +154,7 @@ fn readers_match_fortran_on_the_minimal_fault() {
 
 #[test]
 fn readers_match_fortran_on_the_alpine_fault() {
-    // nx=257, nw=11 -- 2827 subfaults, and the case where a compact layout
-    // matters: the Fortran's sddp/rist/rupt are 720 MB of mostly-unused array.
+    // 257 along strike by 11 down dip -- 2827 subfaults, and the case where a compact
+    // layout matters: the Fortran's sddp/rist/rupt are 720 MB of mostly-unused array.
     check("alpine.bin", "alpine_base_r1.stoch");
 }

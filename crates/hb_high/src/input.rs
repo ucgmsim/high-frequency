@@ -7,37 +7,61 @@ use crate::state::{params, VelocityModelInput};
 
 /// One fault segment from the `.stoch` file.
 ///
-/// Slip, rise time and rupture time are stored `(nx, nw)` — along-strike by
+/// Slip, rise time and rupture time are stored as a subfault grid — along-strike by
 /// down-dip — rather than in the Fortran's `(lv, nq, np)` block.
 ///
 /// That layout change is deliberate and safe. The Fortran declares
 /// `sddp(lv,nq,np)` with `lv=1000, nq=600, np=100`: **240 MB per array, 720 MB
 /// for the three**, almost all of it untouched. Layout is only observable where
 /// the original indexes out of bounds (as it does for `stdd`, see
-/// `PORTING_RULES.md` §7), and these three are always indexed within
-/// `1..=nx`/`1..=nw`. So compacting them changes no arithmetic.
+/// `PORTING_RULES.md` §7), and these three are always indexed inside the real grid.
+/// So compacting them changes no arithmetic.
+///
+/// Field names are the port's, not the Fortran's; each one's original spelling is in
+/// its doc comment so a reader can still find it in `hb_high_ref.f`.
 #[derive(Clone, Debug)]
 pub struct Segment {
-    pub elonq: f32,
-    pub elatq: f32,
-    pub nx: usize,
-    pub nw: usize,
-    pub dx: f32,
-    pub dw: f32,
-    pub strq: f32,
-    pub dipq: f32,
-    pub rakeq: f32,
-    pub dtop: f32,
-    pub shyp: f32,
-    pub dhyp: f32,
-    /// Along-strike extent of the reference point, `0.5*nx*dx`.
-    pub astop: f32,
-    /// Slip, indexed `(i, j)`.
-    pub sddp: Array2<f32>,
-    /// Rise time.
-    pub rist: Array2<f32>,
-    /// Rupture time.
-    pub rupt: Array2<f32>,
+    /// `elonq` — longitude of the segment's along-strike reference point.
+    pub fault_lon_deg: f32,
+    /// `elatq` — latitude of the same point.
+    pub fault_lat_deg: f32,
+    /// `nx` — subfault count along strike.
+    pub along_strike_count: usize,
+    /// `nw` — subfault count down dip.
+    pub down_dip_count: usize,
+    /// `dx` — subfault dimension along strike, km.
+    pub subfault_length_km: f32,
+    /// `dw` — subfault dimension down dip, km.
+    pub subfault_width_km: f32,
+    /// `strq` — strike, degrees clockwise from north.
+    pub strike_deg: f32,
+    /// `dipq` — dip, degrees from horizontal.
+    pub dip_deg: f32,
+    /// `rakeq` — rake, degrees.
+    pub rake_deg: f32,
+    /// `dtop` — depth to the top edge of the segment, km.
+    pub top_depth_km: f32,
+    /// `shyp` — hypocentre offset along strike from the segment centre, km.
+    pub hypocentre_along_strike_km: f32,
+    /// `dhyp` — hypocentre offset down dip from the top edge, km.
+    pub hypocentre_down_dip_km: f32,
+    /// `astop` — half the fault length along strike,
+    /// `0.5 * along_strike_count * subfault_length_km`. Not read from the file;
+    /// derived here because every consumer wants it.
+    pub along_strike_offset_km: f32,
+    /// `sddp` — subfault slip, indexed `(i, j)`.
+    ///
+    /// **This field changes meaning partway through a run.** It holds slip as read
+    /// from the file until [`crate::sim::normalise_source`], which converts it in
+    /// place to relative moment and then rescales it to unit mean. Everything
+    /// downstream of that call is reading moment weights, not slip. The Fortran does
+    /// the same thing to the same array; naming it `slip_cm` would be a lie for most
+    /// of the program's life, which is why the units tag is absent here.
+    pub slip: Array2<f32>,
+    /// `rist` — subfault rise time, s.
+    pub rise_time_s: Array2<f32>,
+    /// `rupt` — subfault rupture time relative to origin, s.
+    pub rupture_time_s: Array2<f32>,
 }
 
 impl Segment {
@@ -46,8 +70,8 @@ impl Segment {
     ///
     /// This is the order the time-window pass walks the grid.
     pub fn depth_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
-        let (nx, nw) = (self.nx, self.nw);
-        (1..=nw).flat_map(move |j| (1..=nx).map(move |i| (i, j)))
+        let (along_strike_count, down_dip_count) = (self.along_strike_count, self.down_dip_count);
+        (1..=down_dip_count).flat_map(move |j| (1..=along_strike_count).map(move |i| (i, j)))
     }
 
     /// Subfault indices `(i, j)` with the **strike** index outermost: `i` varies
@@ -60,11 +84,11 @@ impl Segment {
     /// would pair a different normal deviate with each subfault's rupture-velocity
     /// perturbation, and every waveform would change.
     ///
-    /// Neither iterator borrows the segment — they capture `nx` and `nw` by value —
-    /// so a caller can mutate `sddp` while iterating.
+    /// Neither iterator borrows the segment — both capture the two counts by value — so a
+    /// caller can mutate `slip` while iterating.
     pub fn strike_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
-        let (nx, nw) = (self.nx, self.nw);
-        (1..=nx).flat_map(move |i| (1..=nw).map(move |j| (i, j)))
+        let (along_strike_count, down_dip_count) = (self.along_strike_count, self.down_dip_count);
+        (1..=along_strike_count).flat_map(move |i| (1..=down_dip_count).map(move |j| (i, j)))
     }
 }
 
@@ -73,18 +97,18 @@ impl Segment {
 pub struct StochModel {
     pub segments: Vec<Segment>,
     /// Total subfault count across all segments.
-    pub nstot: usize,
+    pub subfault_count: usize,
     /// Total fault area, km².
-    pub farea_in: f32,
+    pub fault_area_km2: f32,
     /// Deepest hypocentre over the segments.
-    pub zhyp_max: f32,
+    pub max_hypocentre_depth_km: f32,
 }
 
 /// Read a `.stoch` file — `hb_high_ref.f:253-285`.
 ///
 /// Produced from an SRF by `srf2stoch`. Format: segment count, then per segment
-/// a two-line header followed by three `nw`-row blocks of `nx` values each
-/// (slip, rise time, rupture time).
+/// a two-line header followed by three blocks of one record per down-dip row, each
+/// record holding one value per along-strike column (slip, rise time, rupture time).
 ///
 /// `deg_to_rad` is the caller's degrees-to-radians factor; the Fortran uses its own
 /// `3.1415926/180` from `:150`.
@@ -93,61 +117,65 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
     let nevnt = r.i32()? as usize;
 
     let mut segments = Vec::with_capacity(nevnt);
-    let mut nstot = 0usize;
-    let mut farea_in = 0.0f32;
-    let mut zhyp_max = 0.0f32;
+    let mut subfault_count = 0usize;
+    let mut fault_area_km2 = 0.0f32;
+    let mut max_hypocentre_depth_km = 0.0f32;
 
     for _ in 0..nevnt {
         let v = r.read_values(6)?;
         let g = |k: usize| v[k].as_deref().unwrap_or("");
-        let elonq = crate::deck::parse_f32(g(0))?;
-        let elatq = crate::deck::parse_f32(g(1))?;
-        let nx = crate::deck::parse_i32(g(2))? as usize;
-        let nw = crate::deck::parse_i32(g(3))? as usize;
-        let dx = crate::deck::parse_f32(g(4))?;
-        let dw = crate::deck::parse_f32(g(5))?;
+        let fault_lon_deg = crate::deck::parse_f32(g(0))?;
+        let fault_lat_deg = crate::deck::parse_f32(g(1))?;
+        let along_strike_count = crate::deck::parse_i32(g(2))? as usize;
+        let down_dip_count = crate::deck::parse_i32(g(3))? as usize;
+        let subfault_length_km = crate::deck::parse_f32(g(4))?;
+        let subfault_width_km = crate::deck::parse_f32(g(5))?;
 
         let v = r.read_values(6)?;
         let g = |k: usize| v[k].as_deref().unwrap_or("");
-        let strq = crate::deck::parse_f32(g(0))?;
-        let dipq = crate::deck::parse_f32(g(1))?;
-        let rakeq = crate::deck::parse_f32(g(2))?;
-        let dtop = crate::deck::parse_f32(g(3))?;
-        let shyp = crate::deck::parse_f32(g(4))?;
-        let dhyp = crate::deck::parse_f32(g(5))?;
+        let strike_deg = crate::deck::parse_f32(g(0))?;
+        let dip_deg = crate::deck::parse_f32(g(1))?;
+        let rake_deg = crate::deck::parse_f32(g(2))?;
+        let top_depth_km = crate::deck::parse_f32(g(3))?;
+        let hypocentre_along_strike_km = crate::deck::parse_f32(g(4))?;
+        let hypocentre_down_dip_km = crate::deck::parse_f32(g(5))?;
 
-        // Accumulated in the Fortran's order: nx*nw + nstot, not nstot + nx*nw.
-        nstot = nx * nw + nstot;
-        farea_in = nx as f32 * dx * nw as f32 * dw + farea_in;
-        let astop = 0.5 * nx as f32 * dx;
+        // Accumulated in the Fortran's order: `nx*nw + nstot`, not `nstot + nx*nw`.
+        subfault_count = along_strike_count * down_dip_count + subfault_count;
+        fault_area_km2 = along_strike_count as f32 * subfault_length_km
+            * down_dip_count as f32 * subfault_width_km
+            + fault_area_km2;
+        let along_strike_offset_km = 0.5 * along_strike_count as f32 * subfault_length_km;
 
         // 2014-12-19: this was '*' and should have been '/'; fixed upstream.
-        let zhyp = dtop + dhyp / (dipq * deg_to_rad).sin();
-        if zhyp > zhyp_max {
-            zhyp_max = zhyp;
+        let zhyp = top_depth_km + hypocentre_down_dip_km / (dip_deg * deg_to_rad).sin();
+        if zhyp > max_hypocentre_depth_km {
+            max_hypocentre_depth_km = zhyp;
         }
 
-        let mut sddp = Array2::<f32>::new(nx, nw);
-        let mut rist = Array2::<f32>::new(nx, nw);
-        let mut rupt = Array2::<f32>::new(nx, nw);
-        for arr in [&mut sddp, &mut rist, &mut rupt] {
-            for j in 1..=nw {
-                // One record per down-dip row, nx values along strike.
-                let row = r.read_values(nx)?;
-                for i in 1..=nx {
+        let mut slip = Array2::<f32>::new(along_strike_count, down_dip_count);
+        let mut rise_time_s = Array2::<f32>::new(along_strike_count, down_dip_count);
+        let mut rupture_time_s = Array2::<f32>::new(along_strike_count, down_dip_count);
+        for arr in [&mut slip, &mut rise_time_s, &mut rupture_time_s] {
+            for j in 1..=down_dip_count {
+                // One record per down-dip row, along_strike_count values along strike.
+                let row = r.read_values(along_strike_count)?;
+                for i in 1..=along_strike_count {
                     arr[(i, j)] = crate::deck::parse_f32(row[i - 1].as_deref().unwrap_or(""))?;
                 }
             }
         }
 
         segments.push(Segment {
-            elonq, elatq, nx, nw, dx, dw,
-            strq, dipq, rakeq, dtop, shyp, dhyp, astop,
-            sddp, rist, rupt,
+            fault_lon_deg, fault_lat_deg,
+            along_strike_count, down_dip_count, subfault_length_km, subfault_width_km,
+            strike_deg, dip_deg, rake_deg, top_depth_km,
+            hypocentre_along_strike_km, hypocentre_down_dip_km, along_strike_offset_km,
+            slip, rise_time_s, rupture_time_s,
         });
     }
 
-    Ok(StochModel { segments, nstot, farea_in, zhyp_max })
+    Ok(StochModel { segments, subfault_count, fault_area_km2, max_hypocentre_depth_km })
 }
 
 /// Read the 1-D velocity model into `/vmod_in/` — `hb_high_ref.f:322-349`.
@@ -321,10 +349,13 @@ mod tests {
         // interchangeable at the call sites -- see Segment::strike_major -- so this
         // pins which is which.
         let s = Segment {
-            elonq: 0.0, elatq: 0.0, nx: 3, nw: 2, dx: 1.0, dw: 1.0,
-            strq: 0.0, dipq: 90.0, rakeq: 0.0, dtop: 0.0, shyp: 0.0, dhyp: 0.0,
-            astop: 0.0,
-            sddp: Array2::new(3, 2), rist: Array2::new(3, 2), rupt: Array2::new(3, 2),
+            fault_lon_deg: 0.0, fault_lat_deg: 0.0,
+            along_strike_count: 3, down_dip_count: 2,
+            subfault_length_km: 1.0, subfault_width_km: 1.0,
+            strike_deg: 0.0, dip_deg: 90.0, rake_deg: 0.0, top_depth_km: 0.0,
+            hypocentre_along_strike_km: 0.0, hypocentre_down_dip_km: 0.0,
+            along_strike_offset_km: 0.0,
+            slip: Array2::new(3, 2), rise_time_s: Array2::new(3, 2), rupture_time_s: Array2::new(3, 2),
         };
         assert_eq!(
             s.depth_major().collect::<Vec<_>>(),
@@ -349,17 +380,17 @@ mod tests {
         let m = read_stoch(MINI_STOCH, pu).unwrap();
         assert_eq!(m.segments.len(), 1);
         let s = &m.segments[0];
-        assert_eq!((s.nx, s.nw), (2, 2));
-        assert_eq!(s.elonq, -179.7826);
-        assert_eq!(s.strq, 187.0);
-        assert_eq!(m.nstot, 4);
+        assert_eq!((s.along_strike_count, s.down_dip_count), (2, 2));
+        assert_eq!(s.fault_lon_deg, -179.7826);
+        assert_eq!(s.strike_deg, 187.0);
+        assert_eq!(m.subfault_count, 4);
         // Slip rows are down-dip, values along strike.
-        assert_eq!(s.sddp[(1, 1)], 7.38758e0);
-        assert_eq!(s.sddp[(2, 1)], 5.38111e0);
-        assert_eq!(s.sddp[(1, 2)], 8.36237e0);
-        assert_eq!(s.rist[(1, 1)], 1.32973e-1);
-        assert_eq!(s.rupt[(2, 2)], 5.81083e-1);
-        assert_eq!(s.astop, 0.5 * 2.0 * 1.64);
+        assert_eq!(s.slip[(1, 1)], 7.38758e0);
+        assert_eq!(s.slip[(2, 1)], 5.38111e0);
+        assert_eq!(s.slip[(1, 2)], 8.36237e0);
+        assert_eq!(s.rise_time_s[(1, 1)], 1.32973e-1);
+        assert_eq!(s.rupture_time_s[(2, 2)], 5.81083e-1);
+        assert_eq!(s.along_strike_offset_km, 0.5 * 2.0 * 1.64);
     }
 
     #[test]

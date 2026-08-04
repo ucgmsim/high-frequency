@@ -750,24 +750,24 @@ proptest! {
         prop_assert_eq!(model.segments.len(), shapes.len());
 
         let want_subfaults: usize = shapes.iter().map(|&(a, d, _, _)| a * d).sum();
-        prop_assert_eq!(model.nstot, want_subfaults);
+        prop_assert_eq!(model.subfault_count, want_subfaults);
 
         let want_area: f32 = shapes
             .iter()
             .map(|&(a, d, len, wid)| a as f32 * len * d as f32 * wid)
             .sum();
         prop_assert!(
-            (model.farea_in - want_area).abs() <= 1e-3 * want_area,
+            (model.fault_area_km2 - want_area).abs() <= 1e-3 * want_area,
             "area {} vs {want_area}",
-            model.farea_in
+            model.fault_area_km2
         );
 
         // Every segment's grid is the shape it was given, and the slip survives.
         for (segment, &(along, down, _, _)) in model.segments.iter().zip(shapes.iter()) {
-            prop_assert_eq!(segment.nx, along);
-            prop_assert_eq!(segment.nw, down);
+            prop_assert_eq!(segment.along_strike_count, along);
+            prop_assert_eq!(segment.down_dip_count, down);
             for (i, j) in segment.depth_major() {
-                prop_assert_eq!(segment.sddp[(i, j)], 1.0);
+                prop_assert_eq!(segment.slip[(i, j)], 1.0);
             }
         }
     }

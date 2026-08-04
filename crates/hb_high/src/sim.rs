@@ -129,16 +129,16 @@ pub fn simulate(
     let nevnt = stoch.segments.len();
 
     for (k, s) in stoch.segments.iter().enumerate() {
-        if s.dx != stoch.segments[0].dx {
+        if s.subfault_length_km != stoch.segments[0].subfault_length_km {
             return Err(SimError::InconsistentSegments(format!(
                 "dx({}) = {} not equal to dx(1) = {}, exiting...",
-                k + 1, s.dx, stoch.segments[0].dx
+                k + 1, s.subfault_length_km, stoch.segments[0].subfault_length_km
             )));
         }
-        if s.dw != stoch.segments[0].dw {
+        if s.subfault_width_km != stoch.segments[0].subfault_width_km {
             return Err(SimError::InconsistentSegments(format!(
                 "dw({}) = {} not equal to dw(1) = {}, exiting...",
-                k + 1, s.dw, stoch.segments[0].dw
+                k + 1, s.subfault_width_km, stoch.segments[0].subfault_width_km
             )));
         }
     }
@@ -153,17 +153,17 @@ pub fn simulate(
 
     // Resolved here rather than at parse time: the deep transition depths depend on
     // the deepest hypocentre, which is only known once the slip model is read.
-    let rv = config.rupture_velocity.resolve(stoch.zhyp_max);
+    let rv = config.rupture_velocity.resolve(stoch.max_hypocentre_depth_km);
 
     // ------------------------------------------------ source normalisation ---
-    let SourceScale { dlm, sm, nstot } =
+    let SourceScale { dlm, sm, subfault_count } =
         normalise_source(&mut stoch, j0, &vmod_in, deg_to_rad, config.moment);
 
     // ---------------------------------------- stress parameter adjustment ----
     let targ_mag = config
         .target_magnitude
         .unwrap_or_else(|| 2.0 * (sm.ln() / 10.0f32.ln()) / 3.0 - 10.7);
-    let fault_area = config.fault_area.unwrap_or(stoch.farea_in);
+    let fault_area = config.fault_area.unwrap_or(stoch.fault_area_km2);
     let mut spar_fac = match config.stress_param_adjust {
         // Leonard (2010), active tectonic.
         StressParamAdjust::LeonardActive => ((targ_mag - 3.99) * 10.0f32.ln()).exp() / fault_area,
@@ -185,14 +185,14 @@ pub fn simulate(
     // tried. Reproduced with the names attached to their formulae rather than to
     // their order, and only the surviving one bound.
     //
-    //   by_count      sm / (subevent_moment * nstot)          -- linear in subfault count
-    //   by_sqrt_count sm / (subevent_moment * sqrt(nstot))    -- THE LIVE ONE
+    //   by_count      sm / (subevent_moment * subfault_count)          -- linear in subfault count
+    //   by_sqrt_count sm / (subevent_moment * sqrt(subfault_count))    -- THE LIVE ONE
     //   by_two_thirds (sm/subevent_moment)^(2/3)
     //   by_corner_sq  (fce_avg / fcmain)^2
     //
     // `1.0 *` in by_sqrt_count is the Fortran's, and it matters: it forces the
-    // integer nstot through a real multiply before the sqrt.
-    let moment_scale = sm / (subevent_moment * (1.0 * nstot as f32).sqrt());
+    // integer subfault_count through a real multiply before the sqrt.
+    let moment_scale = sm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
 
     // ------------------------------------------------------------ stations ---
     // No ceiling. The Fortran clamped this to `mmv`, which SILENTLY TRUNCATED a record
@@ -257,14 +257,15 @@ pub fn simulate(
 
     for iv in 0..nevnt {
         let seg = &stoch.segments[iv];
-        let strike_rad = seg.strq * deg_to_rad;
-        let dip_rad = seg.dipq * deg_to_rad;
-        let rake_rad = seg.rakeq * deg_to_rad;
+        let strike_rad = seg.strike_deg * deg_to_rad;
+        let dip_rad = seg.dip_deg * deg_to_rad;
+        let rake_rad = seg.rake_deg * deg_to_rad;
 
         let geom = subfault_geometry(
-            seg.elonq, seg.elatq, station.stlon, station.stlat,
-            seg.strq, seg.dipq, seg.dtop, seg.astop, seg.dx, seg.dw,
-            seg.nx, seg.nw,
+            seg.fault_lon_deg, seg.fault_lat_deg, station.stlon, station.stlat,
+            seg.strike_deg, seg.dip_deg, seg.top_depth_km, seg.along_strike_offset_km,
+            seg.subfault_length_km, seg.subfault_width_km,
+            seg.along_strike_count, seg.down_dip_count,
         );
 
         // --- time-window pass. NOTE: j outer, i inner. --------------------
@@ -285,7 +286,7 @@ pub fn simulate(
             }
 
             let rvf = rv.factor(geom.depth_km[(i, j)]);
-            let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
+            let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
 
             // Path duration bin. Strict `>` means r0/d0/slp stay unset
@@ -347,7 +348,7 @@ pub fn simulate(
         // --- subfault pass. NOTE: i outer, j inner -- the OPPOSITE order to
         // the window pass above. irandcnt is consumed in THIS order. -------
         for (i, j) in seg.strike_major() {
-            if seg.sddp[(i, j)] < 0.001 {
+            if seg.slip[(i, j)] < 0.001 {
                 continue; // goto 4 lands on the inner loop's terminator
             }
 
@@ -385,10 +386,10 @@ pub fn simulate(
                 }
             }
 
-            let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
+            let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
             let fce = fc_coeff * rvf * shear_velocity_km_s / dlm / pi;
-            let rise = seg.rist[(i, j)];
+            let rise = seg.rise_time_s[(i, j)];
 
             let mode = 4; // hardwired SH
             for &ray_type in &config.rayset {
@@ -479,14 +480,16 @@ pub fn simulate(
                 // Rupture time at this subfault.
                 let mut ratim;
                 if let Some(vr) = config.rupture_velocity_override {
-                    let xra = seg.shyp - (i as f32 - 0.5 * (seg.nx as f32 + 1.0)) * seg.dx;
-                    let yra = seg.dhyp - (j as f32 - 0.5) * seg.dw;
+                    let along_strike_centre = 0.5 * (seg.along_strike_count as f32 + 1.0);
+                    let xra = seg.hypocentre_along_strike_km
+                        - (i as f32 - along_strike_centre) * seg.subfault_length_km;
+                    let yra = seg.hypocentre_down_dip_km - (j as f32 - 0.5) * seg.subfault_width_km;
                     ratim = (xra * xra + yra * yra).sqrt() / vr;
                     if irand > 0 {
                         ratim += (rng.next_f32() - 0.5) * 0.1 * ratim;
                     }
                 } else {
-                    ratim = seg.rupt[(i, j)];
+                    ratim = seg.rupture_time_s[(i, j)];
                 }
 
                 // int() truncates toward zero, so a negative
@@ -517,7 +520,7 @@ pub fn simulate(
                     // `acc[k2 ..= k2 + np2 - 1]`.
                     let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
 
-                    let sd = seg.sddp[(i, j)];
+                    let sd = seg.slip[(i, j)];
                     let mut li = k2;
                     while li <= kend {
                         // `k2` can be negative. Writes below index 1 land before DS in
@@ -627,18 +630,18 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
 
 /// Scalars derived from the slip model before any station is simulated.
 struct SourceScale {
-    /// Average subfault dimension `sqrt(dx*dw)`, averaged over segments, km.
+    /// Average subfault dimension `sqrt(length * width)`, averaged over segments, km.
     dlm: f32,
     /// Total seismic moment. Derived from the summed subfault moments when the
     /// deck asked for it with a negative value.
     sm: f32,
     /// Count of subfaults whose relative moment exceeds 0.001 — the same
     /// threshold the subfault pass uses to skip a subfault entirely.
-    nstot: usize,
+    subfault_count: usize,
 }
 
 /// Convert relative slip to relative moment, then normalise to unit average
-/// weight, mutating `stoch.segments[..].sddp` in place.
+/// weight, mutating `stoch.segments[..].slip` in place.
 ///
 /// Three passes over the subfault grid, in the Fortran's order:
 ///
@@ -649,7 +652,7 @@ struct SourceScale {
 ///
 /// The two counts are different and both matter: pass 2's count normalises the
 /// averages, pass 3's is the one that reaches `moment_scale`. The Fortran shadows one
-/// `nstot` with the other, so only the second survives — hence only that one is
+/// `subfault_count` with the other, so only the second survives — hence only that one is
 /// returned.
 #[allow(clippy::too_many_arguments)]
 fn normalise_source(
@@ -664,10 +667,10 @@ fn normalise_source(
     // --- pass 1: average subfault size ----------------------------------------
     // The Fortran also accumulates `slip_max` over every subfault here. Nothing
     // reads it: its only consumer is the commented-out `!print*,'Maximum slip '`
-    // at hb_high_ref.f:683. Dropped, along with the O(nstot) loop that fed it.
+    // at hb_high_ref.f:683. Dropped, along with the O(subfault_count) loop that fed it.
     let mut dlm = 0.0f32;
     for s in &stoch.segments {
-        dlm = (s.dx * s.dw).sqrt() + dlm;
+        dlm = (s.subfault_length_km * s.subfault_width_km).sqrt() + dlm;
     }
     dlm /= nevnt as f32;
 
@@ -681,7 +684,7 @@ fn normalise_source(
     // and `bigC` is assigned five times at :807-811 with `bigC = bigC1b` last, so
     // bigC3 never survives. Their only other consumers are the commented-out prints
     // at :684-685 and :817. Dropping them also removes `xnorm`, this pass's own
-    // `nstot` count (which only normalised them), and `islip_weight_avg` -- a frozen
+    // `subfault_count` count (which only normalised them), and `islip_weight_avg` -- a frozen
     // switch whose two branches only ever weighted these dead quantities.
     //
     // What remains live: the in-place slip-to-moment conversion, and `xsum`, which
@@ -689,26 +692,26 @@ fn normalise_source(
     let mut xsum = 0.0f32;
 
     for iv in 0..nevnt {
-        let dwdj = stoch.segments[iv].dw * (stoch.segments[iv].dipq * deg_to_rad).sin();
-        let nw = stoch.segments[iv].nw;
-        let nx = stoch.segments[iv].nx;
-        for j in 1..=nw {
-            let zdep = stoch.segments[iv].dtop + (j as f32 - 0.5) * dwdj;
+        let dwdj = stoch.segments[iv].subfault_width_km * (stoch.segments[iv].dip_deg * deg_to_rad).sin();
+        let down_dip_count = stoch.segments[iv].down_dip_count;
+        let along_strike_count = stoch.segments[iv].along_strike_count;
+        for j in 1..=down_dip_count {
+            let zdep = stoch.segments[iv].top_depth_km + (j as f32 - 0.5) * dwdj;
             // Layer lookup. Falls through with k = j0+1 if zdep is below the
             // model, which the Fortran then indexes -- so the fall-through is
             // load-bearing, not an error path.
             let k = (1..=layer_count).find(|&kk| zdep <= vmod_in.depth_km[kk]).unwrap_or(layer_count + 1);
-            // vsh_km_s and density_g_cm3 are real*8 and dx/dw are real*4, so the WHOLE
+            // vsh_km_s and density_g_cm3 are real*8 and the Fortran's dx/dw real*4, so the WHOLE
             // product is computed in double (dx/dw promoted) and narrows only on
             // assignment to xmu, which is implicit real*4. Narrowing earlier
             // shifts every subfault moment by an ulp or two.
             let xmu = (vmod_in.vsh_km_s[k] * vmod_in.vsh_km_s[k] * vmod_in.density_g_cm3[k]
-                * stoch.segments[iv].dx as f64
-                * stoch.segments[iv].dw as f64) as f32;
+                * stoch.segments[iv].subfault_length_km as f64
+                * stoch.segments[iv].subfault_width_km as f64) as f32;
 
-            for i in 1..=nx {
-                let v = xmu * stoch.segments[iv].sddp[(i, j)];
-                stoch.segments[iv].sddp[(i, j)] = v;
+            for i in 1..=along_strike_count {
+                let v = xmu * stoch.segments[iv].slip[(i, j)];
+                stoch.segments[iv].slip[(i, j)] = v;
                 xsum += v;
             }
         }
@@ -720,23 +723,23 @@ fn normalise_source(
 
     // --- pass 3: normalise relative moments to average weight unity -----------
     let mut wsum = 0.0f32;
-    let mut nstot = 0usize;
+    let mut subfault_count = 0usize;
     for s in &stoch.segments {
         for (i, j) in s.depth_major() {
-            if s.sddp[(i, j)] > 0.001 {
-                wsum += s.sddp[(i, j)];
-                nstot += 1;
+            if s.slip[(i, j)] > 0.001 {
+                wsum += s.slip[(i, j)];
+                subfault_count += 1;
             }
         }
     }
-    let scale = nstot as f32 / wsum;
+    let scale = subfault_count as f32 / wsum;
     for s in &mut stoch.segments {
         for (i, j) in s.depth_major() {
-            s.sddp[(i, j)] *= scale;
+            s.slip[(i, j)] *= scale;
         }
     }
 
-    SourceScale { dlm, sm, nstot }
+    SourceScale { dlm, sm, subfault_count }
 }
 
 /// The `alphaT` corner-frequency adjustment (2013-11-20).
@@ -745,7 +748,7 @@ fn normalise_source(
 /// `fR` peaks at a rake of 90 degrees. The rake is first wrapped into
 /// `[-180, 180]` by repeated addition or subtraction of 360, which the Fortran
 /// does with backward `goto`s.
-fn alpha_t(avgdip: f32, rakeq: f32, calpha: f32) -> f32 {
+fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
     let mut fd = 0.0f32;
     if avgdip <= 90.0 && avgdip > 45.0 {
         fd = 1.0 - (avgdip - 45.0) / 45.0;
@@ -753,7 +756,7 @@ fn alpha_t(avgdip: f32, rakeq: f32, calpha: f32) -> f32 {
         fd = 1.0;
     }
 
-    let mut avgrak = rakeq;
+    let mut avgrak = rake_deg;
     while avgrak < -180.0 {
         avgrak += 360.0;
     }
