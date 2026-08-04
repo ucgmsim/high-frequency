@@ -261,9 +261,14 @@ one at the call site. **Default disposition: reproduce.**
 | `ksrc = j0+1` passed as a layer index | `:1145` | reproduce |
 | `d10` reset to `10000.` inside the segment loop, so the stderr distance covers only the last segment | `:973` | reproduce |
 | `ttime`'s `p1`/`t1` discarded by its only caller | `:3313` | keep the call; it is side-effect-free but keeping it preserves line-by-line comparability |
+| `siteamp` scales the DC and Nyquist bins by the factor **directly** while every interior bin gets `exp(factor)` — two conventions in one routine, disagreeing by 3.3x at a log-amplitude of 0.5 | `siteamp` | reproduce. Impact is negligible: DC is identically zero on entry (`stoc_f` sets `as(1)=0`), and Nyquist sits at 100 Hz where kappa has attenuated the spectrum by ~7e-7. Flagged for Stage 2 in `REFACTOR.md` §2.6 |
 
-Fixing any of these is Phase 3 work, done as a deliberate re-baseline with a
-written justification. Never silently re-baseline a golden.
+Fixing any of these is Stage 2 work, done as a deliberate re-baseline with a written
+justification. Never silently re-baseline a golden.
+
+Two of them are flagged for an explicit fix-or-keep decision in `REFACTOR.md` §2.6:
+the `stdd(0,l)` sample shift and the `siteamp` convention split. The rest keep the
+default disposition.
 
 ## 8. Input parsing
 

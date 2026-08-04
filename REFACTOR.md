@@ -489,25 +489,105 @@ passes 0. A modern geodesic (`geographiclib-rs`) is both smaller at the call sit
 and more accurate. Tier C, since it moves distances by metres and distance feeds
 the path-duration branch selection.
 
-### 2.6 Decisions that are yours, not mine
+### 2.6 Defects flagged for a Stage 2 decision
 
-Two items are science calls, and I have deliberately not assumed an answer:
+Two genuine defects in the original, both faithfully reproduced by the port, both
+needing a **fix-or-keep** decision that is a science call rather than an engineering
+one. Neither can be resolved under Stage 1's bit-identity gate, so both wait here.
 
-- **The `stdd(0, l)` out-of-bounds read.** The original reads one element before
-  the array on every subfault's first accumulation sample, which delays each
-  subfault's contribution by one sample. The port reproduces it faithfully
-  (`main.rs::stdd_at`, `PORTING_RULES.md` §7). It is a **bug in the Fortran**.
-  Under "small, not identical", do you keep bug-compatibility or fix it? Fixing it
-  changes output for real (Tier C), removes a function and a 15-line comment, and
-  means the port no longer matches production on a known defect. My
-  recommendation: fix it, in its own commit, with the Tier C delta recorded — but
-  it is your call whether production parity on a defect matters more than
-  correctness.
-- **`nsum` and the dead averaging machinery.** `nsum` is computed from `ratio` and
-  then forced to 1 (dated 2004-04-20), which is why the Frankel operator in
-  `stoc_f` carries the scaling instead. Similarly `islip_weight_avg` is set to 1
-  and then 0. These are frozen switches with live consequences; collapsing them
-  removes real code but bakes in a decision someone once left adjustable.
+They are registered alongside the rest in `PORTING_RULES.md` §7, whose standing
+disposition is *reproduce, do not fix*. This section is where that default gets
+revisited.
+
+#### Defect 1 — `stdd(0, l)`: every subfault's contribution is delayed one sample
+
+| | |
+| --- | --- |
+| Fortran | `hb_high_ref.f:1394-1396` |
+| Port | `sim.rs::subfault_acc_at`, which models the read explicitly |
+| Register | `PORTING_RULES.md` §7, first row |
+
+The accumulation loop runs `li = k2, kend` and reads `stdd(li-k2, l)`, so its first
+iteration reads **index 0** — one element before the column. `apply_radiation_and_invert`
+fills only `1..=np2`, so nothing ever writes there.
+
+`stdd` is declared `stdd(mmv,3)` column-major, so `stdd(0,2)` aliases `stdd(mmv,1)`
+and `stdd(0,3)` aliases `stdd(mmv,2)`. Both are untouched — the zeroing loop covers
+only `1..np2` — and live in `.bss`, hence read as zero. `stdd(0,1)` is genuinely
+before the array. The port models all three as zero.
+
+**Effect.** `DS(l,k2)` receives nothing and `DS(l,k2+1)` receives `stdd(1)`, so every
+subfault's contribution is shifted one sample later. Because the shift is *uniform*
+across subfaults, the result is a whole-trace time offset of one sample — 5 ms at the
+production `dt = 0.005` — plus the loss of each contribution's final sample where
+`kend` clamps.
+
+**Why the severity is not obvious.** No intensity measure notices: PGA, PGV, duration
+and pSA are all invariant under a 5 ms translation. So on the Phase 2 gates this is
+invisible, and Tier C would report it as equivalent.
+
+Where it *does* matter is absolute timing. The workflow **sums the high-frequency
+synthetic with a low-frequency one**, and a 5 ms offset applied to only one of the two
+is a real phase error at high frequency — half a cycle at 100 Hz, a tenth of a cycle
+at 10 Hz. That is the question to answer before deciding, and it is answered by
+looking at how the two are combined downstream, not by anything in this repository.
+
+**Recommendation: fix it**, in its own commit, with the Tier C delta recorded. Expect
+Tier C to show no change, and say so explicitly rather than treating the null result
+as confirmation the fix was unnecessary.
+
+#### Defect 2 — site amplification applies two different conventions
+
+| | |
+| --- | --- |
+| Fortran | `siteamp`, `hb_high_ref.f` |
+| Port | `site.rs::apply_site_amplification` |
+| Found by | writing `tests/properties.rs`; pinned there by `dc_and_nyquist_are_scaled_linearly_not_exponentially` |
+
+The factor table holds **log** amplitudes: every interior bin is scaled by
+`exp(interpolated factor)`. But the two end bins are scaled by the factor
+**directly**:
+
+```rust
+spectrum[1] = spectrum[1] * factors[1];                  // DC      -- linear
+...
+let fac = (am + (freq - fm) * (ap - am) / (fp - fm)).exp();
+spectrum[i] = spectrum[i] * fac;                         // interior -- exponential
+...
+spectrum[nf] = spectrum[nf] * factors[table_count];      // Nyquist -- linear
+```
+
+A table of log-amplitude 0.5 therefore amplifies the interior by `e^0.5 = 1.65` while
+*attenuating* the two end bins to 0.5 — they disagree by a factor of 3.3.
+
+**Severity, measured rather than assumed.** An earlier note in this plan called this
+"almost certainly a defect" and left the impact unquantified. Quantified, it is much
+smaller than the mechanism suggests:
+
+- **The DC half is inert.** `stochastic_spectrum` sets `as_[1] = 0.0`, so the DC bin
+  is identically zero on entry. Multiplying zero by the wrong factor is still zero.
+- **The Nyquist half is live** — `spectrum[fold_count]` is written with a non-zero
+  value — but Nyquist sits at `1/(2*dt) = 100 Hz` in production, where the kappa
+  filter `exp(-pi*f*kappa)` with `kappa = 0.045` has already attenuated the spectrum
+  by `exp(-14.1) ~ 7e-7`. One bin in 8193 at `np2 = 16384`, six orders of magnitude
+  below the passband.
+
+So this is a real inconsistency with negligible numerical consequence. It is worth
+fixing because it is *confusing* — two conventions in one routine, with nothing
+saying so — not because it moves any waveform.
+
+**Recommendation: fix it** as part of §2.2b or the site-amplification cleanup, and
+delete the property test that pins it. That test asserts the two conventions visibly
+disagree, so it fails the moment they are reconciled, which is the intended trigger.
+
+#### Not defects: frozen switches
+
+`nsum` is computed from `ratio` and then forced to 1 (dated 2004-04-20), which is why
+the Frankel operator in `stochastic_spectrum` carries the scaling instead.
+`islip_weight_avg` is set to 1 and then 0. These are **not** bugs — they are switches
+someone deliberately froze. Collapsing them removes real code but bakes in a decision
+that was left adjustable, so it needs the same explicit sign-off, and it is listed
+here so it does not get done by accident during a tidy.
 
 ---
 

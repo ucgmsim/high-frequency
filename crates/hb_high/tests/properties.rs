@@ -644,12 +644,24 @@ proptest! {
 /// The DC and Nyquist bins are scaled by the factor **directly**, while every bin
 /// between them is scaled by its exponential.
 ///
-/// This is almost certainly a defect in the original — `spectrum[1] * factors[1]`
-/// and `spectrum[nf] * factors[table_count]` against `exp(...)` everywhere else, so
-/// a physically ordinary table of log-amplitude 0.5 amplifies the interior by 1.65
-/// while *attenuating* DC to half. It is pinned here rather than fixed because Stage 1
-/// is bit-identical; the test exists so the inconsistency is impossible to lose track
-/// of, and so that whoever fixes it in Stage 2 has to delete a test that says why.
+/// Two conventions in one routine — `spectrum[1] * factors[1]` and
+/// `spectrum[nf] * factors[table_count]` against `exp(...)` everywhere else — so a
+/// table of log-amplitude 0.5 amplifies the interior by 1.65 while *attenuating* the
+/// two end bins to 0.5, a disagreement of 3.3x.
+///
+/// The numerical consequence is nonetheless negligible, which is worth stating so
+/// nobody treats this as urgent:
+///
+/// * **DC is inert.** `stochastic_spectrum` sets `as(1) = 0`, so the bin is
+///   identically zero on entry and the wrong gain changes nothing.
+/// * **Nyquist is live but irrelevant.** It sits at `1/(2*dt) = 100 Hz`, where the
+///   kappa filter has already attenuated the spectrum by `exp(-pi*100*0.045) ~ 7e-7`.
+///   One bin in 8193 at `np2 = 16384`.
+///
+/// So this is pinned as a *clarity* defect, not a science one. It stays because Stage 1
+/// is bit-identical; the test exists so the inconsistency cannot be lost track of, and
+/// so that whoever reconciles it in Stage 2 has to delete a test that explains why.
+/// See `REFACTOR.md` §2.6 and `PORTING_RULES.md` §7.
 #[test]
 fn dc_and_nyquist_are_scaled_linearly_not_exponentially() {
     let np2 = 64usize;
