@@ -13,3 +13,4 @@
 //! `reference/hb_high_ref.f`** on every deck in `harness/decks/`.
 
 pub mod fort;
+pub mod rng;

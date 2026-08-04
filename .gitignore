@@ -3,3 +3,5 @@
 /harness/out
 *.o
 *.mod
+/reference/hb_high_ref.f
+/reference/hb_high_subs.f
