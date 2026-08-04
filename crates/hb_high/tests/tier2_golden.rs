@@ -1,13 +1,19 @@
 //! Bit-identity gate for the tier-2 kernels.
 //!
 //! Regenerate with `harness/kernels/gen_tier2_golden.sh`.
+//!
+//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
+//! written by the Fortran driver, which dumps one file per subprogram it exercises,
+//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
+//! them would mean editing the drivers and regenerating every golden, and the names
+//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
 use hb_high::fort::{Array1, Complex32, Complex64};
-use hb_high::highcor::highcor_f;
-use hb_high::radiation::{radfrq_lin, radv_lin};
-use hb_high::ray::{cagcon, dtdp};
+use hb_high::highcor::apply_radiation_and_invert;
+use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
+use hb_high::ray::{cagniard_time, cagniard_time_derivative};
 use hb_high::rng::Pcg32;
-use hb_high::state::{RayState, Vmod};
+use hb_high::state::{RayState, VelocityModel};
 use std::path::PathBuf;
 
 struct Reader {
@@ -59,12 +65,12 @@ fn eq64(what: &str, got: f64, want: f64) {
                got.to_bits(), want.to_bits());
 }
 
-/// Shared record layout for the `cagcon`/`dtdp` seam.
-fn read_ray_seam(r: &mut Reader) -> (RayState, Vmod, Complex64, f64, usize) {
+/// Shared record layout for the `cagniard_time`/`cagniard_time_derivative` seam.
+fn read_ray_seam(r: &mut Reader) -> (RayState, VelocityModel, Complex64, f64, usize) {
     let ndp = r.usize();
     let p = Complex64::new(r.f64(), r.f64());
     let rr = r.f64();
-    let mut vmod = Vmod::new();
+    let mut vmod = VelocityModel::new();
     for k in 1..=ndp { vmod.thic[k] = r.f64(); }
     for k in 1..=ndp { vmod.vp[k] = r.f64(); }
     for k in 1..=ndp { vmod.vsh[k] = r.f64(); }
@@ -82,9 +88,9 @@ fn cagcon_matches_fortran() {
     while !r.done() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
-        let got = cagcon(&st, &vmod, p, 1, rr);
-        eq64(&format!("cagcon case {n} (ndeep={ndp}) re"), got.re, want.re);
-        eq64(&format!("cagcon case {n} (ndeep={ndp}) im"), got.im, want.im);
+        let got = cagniard_time(&st, &vmod, p, 1, rr);
+        eq64(&format!("cagniard_time case {n} (ndeep={ndp}) re"), got.re, want.re);
+        eq64(&format!("cagniard_time case {n} (ndeep={ndp}) im"), got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();
@@ -99,9 +105,9 @@ fn dtdp_matches_fortran() {
         let (st, vmod, p, rr, ndp) = read_ray_seam(&mut r);
         let want = Complex64::new(r.f64(), r.f64());
         // Exercises complex division: Smith's algorithm, not (ac+bd)/(c^2+d^2).
-        let got = dtdp(&st, &vmod, p, 1, rr);
-        eq64(&format!("dtdp case {n} (ndeep={ndp}) re"), got.re, want.re);
-        eq64(&format!("dtdp case {n} (ndeep={ndp}) im"), got.im, want.im);
+        let got = cagniard_time_derivative(&st, &vmod, p, 1, rr);
+        eq64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) re"), got.re, want.re);
+        eq64(&format!("cagniard_time_derivative case {n} (ndeep={ndp}) im"), got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();
@@ -126,12 +132,12 @@ fn highcor_f_matches_fortran() {
         let want_stdd: Vec<f32> = (0..np2).map(|_| r.f32()).collect();
 
         let mut stdd = Array1::<f32>::new(np2);
-        highcor_f(nf, mf, np2, &mut cw1, &mut stdd, &rdna);
+        apply_radiation_and_invert(nf, mf, np2, &mut cw1, &mut stdd, &rdna);
 
         for i in 1..=np2 {
-            eq32(&format!("highcor_f np2={np2} cw1[{i}].re"), cw1[i].re, want_cw[i - 1].re);
-            eq32(&format!("highcor_f np2={np2} cw1[{i}].im"), cw1[i].im, want_cw[i - 1].im);
-            eq32(&format!("highcor_f np2={np2} stdd[{i}]"), stdd[i], want_stdd[i - 1]);
+            eq32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].re"), cw1[i].re, want_cw[i - 1].re);
+            eq32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].im"), cw1[i].im, want_cw[i - 1].im);
+            eq32(&format!("apply_radiation_and_invert np2={np2} stdd[{i}]"), stdd[i], want_stdd[i - 1]);
         }
         cases += 1;
     }
@@ -158,9 +164,9 @@ fn radfrq_lin_matches_fortran() {
 
         let (mut rng, _) = Pcg32::seed(seed);
         let mut rdna = Array1::<f32>::new(nfold);
-        let fr1 = radfrq_lin(&mut rng, stra, dipa, raka, pa, thaa, &dfr, nfold, cmp, nr, &mut rdna);
+        let fr1 = horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, thaa, &dfr, nfold, cmp, nr, &mut rdna);
 
-        let tag = format!("radfrq_lin case {cases} (cmp={cmp})");
+        let tag = format!("horizontal_radiation_spectrum case {cases} (cmp={cmp})");
         eq32(&format!("{tag} fr1 (clobbered)"), fr1, want_fr1);
         for i in 1..=nfold {
             eq32(&format!("{tag} rdna[{i}]"), rdna[i], want_rdna[i - 1]);
@@ -170,7 +176,7 @@ fn radfrq_lin_matches_fortran() {
         // deviates -- 5 per iteration, in the order th, fa, strX, dipX, rakX.
         for (k, w) in want_after.iter().enumerate() {
             eq32(&format!("{tag} post-call draw {k} (generator position)"),
-                 rng.rand_numb(), *w);
+                 rng.next_f32(), *w);
         }
         cases += 1;
     }
@@ -197,9 +203,9 @@ fn radv_lin_matches_fortran() {
         let want_rdna: Vec<f32> = (0..nfold).map(|_| r.f32()).collect();
 
         let mut rdna = Array1::<f32>::new(nfold);
-        let fr1 = radv_lin(stra, dipa, raka, pa, thaa, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
+        let fr1 = vertical_radiation_spectrum(stra, dipa, raka, pa, thaa, &dfr, nfold, &rna, &rnb, nr, &mut rdna);
 
-        let tag = format!("radv_lin case {cases}");
+        let tag = format!("vertical_radiation_spectrum case {cases}");
         eq32(&format!("{tag} fr1 (clobbered to 0.001)"), fr1, want_fr1);
         for i in 1..=nfold {
             eq32(&format!("{tag} rdna[{i}]"), rdna[i], want_rdna[i - 1]);

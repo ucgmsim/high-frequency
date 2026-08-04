@@ -4,7 +4,7 @@
 use crate::fft::fast;
 use crate::fort::{Array1, Complex32};
 
-/// `subroutine highcor_f(nf,mf,np2,cw1,stdd,rdna)` — `hb_high_ref.f:2234`.
+/// `subroutine apply_radiation_and_invert(nf,mf,np2,cw1,stdd,rdna)` — `hb_high_ref.f:2234`.
 ///
 /// Multiplies the spectrum in `cw1` by the signed radiation pattern `rdna`,
 /// mirrors it over the negative-frequency half, inverse-transforms, scales by
@@ -27,7 +27,7 @@ use crate::fort::{Array1, Complex32};
 /// not exactly zero. Fixing it would change every waveform's tail. If it is ever
 /// worth correcting, that is a Phase 3 re-baseline with a written justification,
 /// not a quiet cleanup. See `PORTING_RULES.md` §1.
-pub fn highcor_f(
+pub fn apply_radiation_and_invert(
     nf: usize,
     mf: usize,
     np2: usize,

@@ -5,10 +5,10 @@
 //! `PORTING_RULES.md` §10 names libm divergence and `**` expansion as the two
 //! likeliest residual causes of bit-identity failure, so they get their own
 //! sweep: if a future toolchain changes one of these, this test points straight
-//! at the cause instead of the failure surfacing inside `stoc_f`.
+//! at the cause instead of the failure surfacing inside `stochastic_spectrum`.
 //!
 //! Inputs span the magnitudes the program actually sees — frequencies from 1e-6
-//! to 100 Hz and the very large `Rxx` (range in cm) that appears in `stoc_f`'s
+//! to 100 Hz and the very large `Rxx` (range in cm) that appears in `stochastic_spectrum`'s
 //! exponentials.
 //!
 //! Regenerate with `harness/kernels/gen_intrinsics_golden.sh`.
@@ -112,7 +112,7 @@ fn rust_libm_matches_gfortran() {
 }
 
 /// Constant exponents do not all map the same way, and guessing costs a real
-/// bug — this cost one in `stoc_f`.
+/// bug — this cost one in `stochastic_spectrum`.
 ///
 /// gfortran folds `x**(-1.0)` into a reciprocal but leaves `x**0.5` as a `powf`
 /// call. Rust's `powf` agrees with neither folded form reliably. Measured over

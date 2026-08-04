@@ -19,7 +19,7 @@ use hb_high::config::{
 use hb_high::deck::ListReader;
 use hb_high::input::{read_stations, read_stoch, read_velocity_model};
 use hb_high::sim::{simulate, SimError};
-use hb_high::state::VmodIn;
+use hb_high::state::VelocityModelInput;
 
 
 
@@ -237,9 +237,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (config, io) = read_deck(&mut ListReader::new(&stdin))?;
 
     if io.nsite != 1 {
-        // The Fortran's station loop shares one generator: `ranu2` fills the
-        // `radv_lin` uniforms once before it, and each station's
-        // `normal_random_number` draw continues from wherever the previous station
+        // The Fortran's station loop shares one generator: `uniform_deviates` fills the
+        // `vertical_radiation_spectrum` uniforms once before it, and each station's
+        // `normal_deviates` draw continues from wherever the previous station
         // left the stream. A multi-station run is therefore NOT a concatenation of
         // single-station runs, and `simulate` -- one station, seeded from
         // `config.seed` -- cannot express it.
@@ -262,7 +262,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         read_stoch(&text, PU)?
     };
 
-    let mut vmod_in = VmodIn::new();
+    let mut vmod_in = VelocityModelInput::new();
     let j0 = {
         let text = std::fs::read_to_string(&io.velocity_model)
             .map_err(|e| format!("opening velocity model {}: {e}", io.velocity_model))?;

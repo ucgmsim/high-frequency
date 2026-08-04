@@ -3,7 +3,7 @@
 
 use crate::deck::{DeckError, ListReader};
 use crate::fort::Array2;
-use crate::state::{params, VmodIn};
+use crate::state::{params, VelocityModelInput};
 
 /// One fault segment from the `.stoch` file.
 ///
@@ -157,14 +157,14 @@ pub fn read_stoch(text: &str, pu: f32) -> Result<StochModel, DeckError> {
 /// thickness so reflected rays are computed correctly (2016-08-03).
 ///
 /// Note the mixed types on each record: `thic0`, `qp0` and `qs0` are `real*4`
-/// while `vp0`, `vsh0` and `rho0` are `real*8` — see `state::VmodIn`.
+/// while `vp0`, `vsh0` and `rho0` are `real*8` — see `state::VelocityModelInput`.
 ///
 /// If the *first* layer already exceeds `vsmoho` the Fortran reads `depth0(0)`,
 /// one before the array start. Not reachable with the production `vsmoho` of
 /// 999.9, and reproduced as a panic rather than a silent read.
 pub fn read_velocity_model(
     text: &str,
-    vmod_in: &mut VmodIn,
+    vmod_in: &mut VelocityModelInput,
     vsmoho: f64,
 ) -> Result<usize, DeckError> {
     let mut r = ListReader::new(text);
@@ -217,7 +217,7 @@ pub fn read_velocity_model(
 /// Note the shift copies seven fields down but only **five** are overwritten at
 /// index 1. `qp0(1)` and `qs0(1)` therefore keep the original first layer's Q
 /// values rather than getting air-like ones. Faithful to the Fortran.
-pub fn insert_air_layer(vmod_in: &mut VmodIn, j0: usize, nlskip: i32) -> (usize, i32) {
+pub fn insert_air_layer(vmod_in: &mut VelocityModelInput, j0: usize, nlskip: i32) -> (usize, i32) {
     if !(vmod_in.depth0[1] > 0.001 && vmod_in.vp0[1] > 0.01) {
         return (j0, nlskip);
     }
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn velocity_model_truncates_at_the_moho_and_zeroes_the_base() {
         let text = "3\n1.0 2.0 1.0 2.0 100 50\n2.0 4.0 2.5 2.5 200 100\n3.0 8.0 4.6 3.3 400 200\n";
-        let mut v = VmodIn::new();
+        let mut v = VelocityModelInput::new();
         // vsmoho below the third layer's 4.6 truncates there.
         let j0 = read_velocity_model(text, &mut v, 4.0).unwrap();
         assert_eq!(j0, 3);
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn velocity_model_without_moho_still_zeroes_the_base() {
         let text = "2\n1.0 2.0 1.0 2.0 100 50\n2.0 4.0 2.5 2.5 200 100\n";
-        let mut v = VmodIn::new();
+        let mut v = VelocityModelInput::new();
         let j0 = read_velocity_model(text, &mut v, 999.9).unwrap();
         assert_eq!(j0, 2);
         assert_eq!(v.thic0[2], 0.0);
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn air_layer_is_inserted_for_a_realistic_model() {
         let text = "2\n0.05 1.8 0.5 1.81 116.0 58.0\n2.0 4.0 2.5 2.5 200 100\n";
-        let mut v = VmodIn::new();
+        let mut v = VelocityModelInput::new();
         let j0 = read_velocity_model(text, &mut v, 999.9).unwrap();
         let qp1_before = v.qp0[1];
         let (j0b, nlskip) = insert_air_layer(&mut v, j0, -99);
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn air_layer_is_skipped_when_the_model_starts_at_the_surface() {
         let text = "2\n0.0 1.8 0.5 1.81 116.0 58.0\n2.0 4.0 2.5 2.5 200 100\n";
-        let mut v = VmodIn::new();
+        let mut v = VelocityModelInput::new();
         let j0 = read_velocity_model(text, &mut v, 999.9).unwrap();
         let (j0b, nlskip) = insert_air_layer(&mut v, j0, -99);
         assert_eq!((j0b, nlskip), (j0, -99));

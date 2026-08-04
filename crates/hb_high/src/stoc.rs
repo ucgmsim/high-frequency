@@ -1,11 +1,11 @@
-//! `stoc_f` — the stochastic source spectrum for one subfault.
+//! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
-use crate::fft::{fast, flzero};
+use crate::fft::{fast, remove_quadratic_trend};
 use crate::fort::{Array1, Complex32, Complex64};
-use crate::rng::{normal_random_number, Pcg32};
-use crate::special::dgamm;
+use crate::rng::{fill_normal_deviates, Pcg32};
+use crate::special::gamma;
 
-/// `subroutine stoc_f(...)` — `hb_high_ref.f:1670`.
+/// `subroutine stochastic_spectrum(...)` — `hb_high_ref.f:1670`.
 ///
 /// Builds the complex Fourier spectrum of one subfault's stochastic S-wave
 /// motion: a Brune omega-squared source, a kappa/fmax high-cut, path Q, and the
@@ -43,10 +43,10 @@ use crate::special::dgamm;
 /// unity, per Boore (1983) — a 2009-03-18 change from normalising the amplitude
 /// spectrum, which reduced motions about 10% and was offset by raising the
 /// default corner frequency 5%. This calibration assumes
-/// [`normal_random_number`]'s renormalisation, so substituting a plain N(0,1)
+/// [`normal_deviates`]'s renormalisation, so substituting a plain N(0,1)
 /// generator would silently change the output level.
 #[allow(clippy::too_many_arguments)]
-pub fn stoc_f(
+pub fn stochastic_spectrum(
     rng: &mut Pcg32,
     np2: usize,
     r: f32,
@@ -85,7 +85,7 @@ pub fn stoc_f(
     let c = b / eps / tw;
     // Computed in real*4, then widened -- gsa is real*8 but 2*b+1.0 is not.
     let gsa = (2.0 * b + 1.0) as f64;
-    let gm = dgamm(gsa);
+    let gm = gamma(gsa);
     // The power is real*4; the division by gm and the sqrt are real*8; the
     // result narrows back to real*4.
     let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
@@ -145,8 +145,8 @@ pub fn stoc_f(
     }
 
     let mut a = Array1::<f32>::new(np2);
-    normal_random_number(rng, np2, &mut a);
-    flzero(np2, dt, &mut a);
+    fill_normal_deviates(rng, np2, &mut a);
+    remove_quadratic_trend(np2, dt, &mut a);
 
     let mut ac = Array1::<Complex32>::filled(np2, Complex32::ZERO);
     for i in 1..=np2 {

@@ -6,9 +6,9 @@
 //!
 //! # One station per call
 //!
-//! The Fortran loops over `nsite` stations sharing a single generator: `ranu2` fills
-//! the `radv_lin` uniforms once before the loop, and each station's
-//! `normal_random_number` draw continues from wherever the previous station left the
+//! The Fortran loops over `nsite` stations sharing a single generator: `uniform_deviates` fills
+//! the `vertical_radiation_spectrum` uniforms once before the loop, and each station's
+//! `normal_deviates` draw continues from wherever the previous station left the
 //! stream. A multi-station run is therefore **not** a concatenation of
 //! single-station runs.
 //!
@@ -28,23 +28,23 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, StressParamAdjust,
 };
-use crate::fort::{nint, Array1, Array2, Complex32};
-use crate::geom::even_dist2;
-use crate::highcor::highcor_f;
+use crate::fort::{round_half_away_from_zero, Array1, Array2, Complex32};
+use crate::geom::subfault_geometry;
+use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, StochModel};
-use crate::radiation::{radfrq_lin, radv_lin};
-use crate::ray::gf_amp_tt;
-use crate::rng::{normal_random_number, ranu2, Pcg32};
-use crate::site::{get_sitefacs, siteamp};
-use crate::state::{params, RayState, Vmod, VmodIn};
-use crate::stoc::stoc_f;
+use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
+use crate::ray::green_function;
+use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
+use crate::site::{site_amplification_factors, apply_site_amplification};
+use crate::state::{params, RayState, VelocityModel, VelocityModelInput};
+use crate::stoc::stochastic_spectrum;
 
 /// `mm` and `mmv` as the **main program** sees them.
 ///
 /// Under `VERSION1` the main program includes `params_no_window.h`, so both are
 /// 262144 — not the 32769/180000 that every subroutine gets from `params.h`.
 /// This matters here because `ndata` is clamped to `mmv` and
-/// `normal_random_number(mmv, ...)` draws exactly this many deviates.
+/// `fill_normal_deviates(mmv, ...)` draws exactly this many deviates.
 const MM: usize = params::MM;
 const MMV: usize = params::MMV;
 
@@ -95,7 +95,7 @@ impl std::error::Error for SimError {}
 pub fn simulate(
     config: &HfConfig,
     slip: &StochModel,
-    vmod_in: &VmodIn,
+    vmod_in: &VelocityModelInput,
     j0_in: usize,
     station: crate::input::Station,
 ) -> Result<Simulation, SimError> {
@@ -187,7 +187,7 @@ pub fn simulate(
     // Seismic moment of the subevent, from the average stress on the fault.
     let subevent_moment = stress_average * dlm * dlm * dlm * 1.0e+21;
     // nsum is computed from `ratio` and then forced to 1 (2004-04-20), which is
-    // why the Frankel operator in stoc_f carries the scaling instead.
+    // why the Frankel operator in stochastic_spectrum carries the scaling instead.
     let nsum = 1usize;
 
     // The Fortran computes four candidate moment scalings in a row and lets the
@@ -217,10 +217,10 @@ pub fn simulate(
 
     let mut radv_rand_a = Array1::<f32>::new(MMV);
     let mut radv_rand_b = Array1::<f32>::new(MMV);
-    ranu2(&mut rng, nr, &mut radv_rand_a);
-    ranu2(&mut rng, nr, &mut radv_rand_b);
+    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_a);
+    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_b);
 
-    let mut vmod = Vmod::new();
+    let mut vmod = VelocityModel::new();
     let mut acc = Array2::<f32>::new(3, MMV);
     let mut normal_deviates = Array1::<f32>::new(MMV);
     let mut freq = Array1::<f32>::new(MM);
@@ -246,7 +246,7 @@ pub fn simulate(
 
     if config.draws_normal_deviates() {
         // mmv deviates, not np2: this is the full 262144 under VERSION1.
-        normal_random_number(&mut rng, MMV, &mut normal_deviates);
+        fill_normal_deviates(&mut rng, MMV, &mut normal_deviates);
     }
 
     for iv in 0..nevnt {
@@ -255,7 +255,7 @@ pub fn simulate(
         let dipa = seg.dipq * pu;
         let raka = seg.rakeq * pu;
 
-        let geom = even_dist2(
+        let geom = subfault_geometry(
             seg.elonq, seg.elatq, station.stlon, station.stlat,
             seg.strq, seg.dipq, seg.dtop, seg.astop, seg.dx, seg.dw,
             seg.nx, seg.nw,
@@ -368,7 +368,7 @@ pub fn simulate(
             };
             if ksrc == j0 + 1 {
                 // The Fortran prints 'wrong!' and carries on with
-                // ksrc = j0+1, which it then passes to get_sitefacs.
+                // ksrc = j0+1, which it then passes to site_amplification_factors.
                 println!(" wrong!");
             }
 
@@ -392,9 +392,9 @@ pub fn simulate(
                 let kind = ray_type.kind();
 
                 // The tracing runs even for a straight ray: the Fortran calls
-                // gf_amp_tt unconditionally and overwrites the results below,
+                // green_function unconditionally and overwrites the results below,
                 // and type 0 borrows type 1's tracing to do it.
-                let g = gf_amp_tt(
+                let g = green_function(
                     &mut ray, &vmod, j0, geom.depth_km[(i, j)], geom.horiz_km[(i, j)],
                     ray_type.trace_type(), mode,
                 );
@@ -416,7 +416,7 @@ pub fn simulate(
                     if fmx1 > 15.0 && kf == 3 {
                         fmx1 = 15.0;
                     }
-                    stoc_f(
+                    stochastic_spectrum(
                         &mut rng, np2, rpath, tw, tw_eps, tw_eta, bet, ro, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
                         &mut spectrum[kf - 1], &freq, qbar, qfexp, moment_scale,
@@ -424,9 +424,9 @@ pub fn simulate(
                 }
 
                 if config.site_amp {
-                    get_sitefacs(&vmod, ksrc, nsfac, &siteamp_log_freq, &mut siteamp_factors);
+                    site_amplification_factors(&vmod, ksrc, nsfac, &siteamp_log_freq, &mut siteamp_factors);
                     for k in 0..3 {
-                        siteamp(np2, &mut spectrum[k], &freq, nsfac, &siteamp_log_freq, &siteamp_factors);
+                        apply_site_amplification(np2, &mut spectrum[k], &freq, nsfac, &siteamp_log_freq, &siteamp_factors);
                     }
                 }
                 // famprand is dead: fasig1 = fasig2 = 0.
@@ -446,15 +446,15 @@ pub fn simulate(
                 let pa = geom.azimuth_rad[(i, j)];
 
                 let cmp = -90.0 * pu;
-                radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
-                highcor_f(nfold, mfold, np2, &mut spectrum[0], &mut subfault_acc[0], &radiation);
+                horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
+                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[0], &mut subfault_acc[0], &radiation);
 
                 let cmp = 0.0f32;
-                radfrq_lin(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
-                highcor_f(nfold, mfold, np2, &mut spectrum[1], &mut subfault_acc[1], &radiation);
+                horizontal_radiation_spectrum(&mut rng, stra, dipa, raka, pa, th, &freq, nfold, cmp, nr, &mut radiation);
+                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[1], &mut subfault_acc[1], &radiation);
 
-                radv_lin(stra, dipa, raka, pa, th, &freq, nfold, &radv_rand_a, &radv_rand_b, nr, &mut radiation);
-                highcor_f(nfold, mfold, np2, &mut spectrum[2], &mut subfault_acc[2], &radiation);
+                vertical_radiation_spectrum(stra, dipa, raka, pa, th, &freq, nfold, &radv_rand_a, &radv_rand_b, nr, &mut radiation);
+                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[2], &mut subfault_acc[2], &radiation);
 
                 // Rupture time at this subfault.
                 let mut ratim;
@@ -463,7 +463,7 @@ pub fn simulate(
                     let yra = seg.dhyp - (j as f32 - 0.5) * seg.dw;
                     ratim = (xra * xra + yra * yra).sqrt() / vr;
                     if irand > 0 {
-                        ratim += (rng.rand_numb() - 0.5) * 0.1 * ratim;
+                        ratim += (rng.next_f32() - 0.5) * 0.1 * ratim;
                     }
                 } else {
                     ratim = seg.rupt[(i, j)];
@@ -474,9 +474,9 @@ pub fn simulate(
                 let kst = (ratim / dt) as i32 + (sub_tstart / dt) as i32;
 
                 for _k in 1..=nsum {
-                    let si = rng.rand_numb();
+                    let si = rng.next_f32();
                     let dris = si * rise / dt;
-                    let mut k2 = nint(dris);
+                    let mut k2 = round_half_away_from_zero(dris);
                     if nsum == 1 {
                         k2 = 0;
                     }
@@ -591,7 +591,7 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
 /// point of the function is to model what the original does to its own storage.
 ///
 /// The accumulation loop runs `li = k2, kend` and reads `stdd(li-k2, l)`, so the
-/// first iteration reads **index 0** — one before the column. `highcor_f` fills
+/// first iteration reads **index 0** — one before the column. `apply_radiation_and_invert` fills
 /// only `1..=np2`.
 ///
 /// In the Fortran `stdd` is `stdd(mmv,3)` column-major, so `stdd(0,2)` aliases
@@ -642,7 +642,7 @@ struct SourceScale {
 fn normalise_source(
     stoch: &mut StochModel,
     j0: usize,
-    vmod_in: &VmodIn,
+    vmod_in: &VelocityModelInput,
     pu: f32,
     moment: Option<f32>,
 ) -> SourceScale {

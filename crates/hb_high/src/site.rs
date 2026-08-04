@@ -1,9 +1,9 @@
 //! Site amplification.
 
 use crate::fort::{Array1, Complex32};
-use crate::state::Vmod;
+use crate::state::VelocityModel;
 
-/// `subroutine get_sitefacs(j0,nfreq,fn,an)` — `hb_high_ref.f:3020`.
+/// `subroutine site_amplification_factors(j0,nfreq,fn,an)` — `hb_high_ref.f:3020`.
 ///
 /// Boore quarter-wavelength site amplification. For each log-frequency in `fn`,
 /// finds the depth whose one-way S travel time is a quarter period, then returns
@@ -24,8 +24,8 @@ use crate::state::Vmod;
 /// at the top of the loop and only ever increments by one, so it cannot step
 /// past. (An earlier analysis of mine claimed it could reach `j0+1`; that was
 /// wrong.)
-pub fn get_sitefacs(
-    vmod: &Vmod,
+pub fn site_amplification_factors(
+    vmod: &VelocityModel,
     j0: usize,
     nfreq: usize,
     fn_: &Array1<f32>,
@@ -62,7 +62,7 @@ pub fn get_sitefacs(
     }
 }
 
-/// `subroutine siteamp(np2,cw,dfr,nn,fn,an)` — `hb_high_ref.f:3120`.
+/// `subroutine apply_site_amplification(np2,cw,dfr,nn,fn,an)` — `hb_high_ref.f:3120`.
 ///
 /// Applies quarter-wavelength site amplification to a spectrum in place:
 /// piecewise-linear interpolation of `an` against `ln(freq)` from the table
@@ -71,13 +71,13 @@ pub fn get_sitefacs(
 ///
 /// `fn` must be sorted ascending. The interpolation pointer `kn` only ever
 /// advances, so an unsorted table silently produces wrong factors rather than
-/// an error. `get_sitefacs` is the only producer and does emit ascending
+/// an error. `site_amplification_factors` is the only producer and does emit ascending
 /// frequencies.
 ///
 /// `fn` and `an` are natural logs of frequency and amplification respectively,
 /// which is why the interpolation is linear in `freq = alog(dfr(i))` and the
 /// result is exponentiated.
-pub fn siteamp(
+pub fn apply_site_amplification(
     np2: usize,
     cw: &mut Array1<Complex32>,
     dfr: &Array1<f32>,

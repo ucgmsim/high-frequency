@@ -5,7 +5,7 @@
 //! The obvious design is "resample the same fault with different seeds". That
 //! holds the geometry fixed, which makes it blind to any error that depends on
 //! distance or take-off angle — and that is precisely where the ray tracing, the
-//! site amplification and the path-duration table live. A bug in `geom_terms`'
+//! site amplification and the path-duration table live. A bug in `geometric_spreading`'
 //! path accumulation would be invisible at one station and obvious at six.
 //!
 //! So the grid is **fault × station distance × seed**, with the distances chosen

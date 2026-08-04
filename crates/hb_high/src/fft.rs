@@ -74,7 +74,7 @@ pub fn fast(nnn: usize, ace: &mut Array1<Complex32>, ind: i32) {
 ///
 /// Note it modifies only `a(3..=n)`: `a(1)` and `a(2)` are left untouched
 /// because the correction loop starts at `I=3`. That asymmetry is preserved.
-pub fn flzero(n: usize, dt: f32, a: &mut Array1<f32>) {
+pub fn remove_quadratic_trend(n: usize, dt: f32, a: &mut Array1<f32>) {
     let mut ve = 0.0f32;
     let mut de = 0.0f32;
     let a1 = dt / 2.0;

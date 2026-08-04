@@ -17,9 +17,9 @@
 /// The commented-out alternative forms in the source are earlier versions using
 /// double-angle identities; they are *not* bit-equivalent to what is compiled
 /// and must not be substituted.
-pub fn rdatn(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f32, f32) {
+pub fn radiation_pattern(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f32, f32) {
     let sr = rak.sin();
-    let cr = rak.cos();
+    let vertical_slowness = rak.cos();
     let sd = dip.sin();
     let cd = dip.cos();
     let st = th.sin();
@@ -30,17 +30,17 @@ pub fn rdatn(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f32, f32) {
     // RDP is computed by the Fortran and then discarded -- the P radiation
     // coefficient is never returned or used. Kept so the two sources stay
     // line-comparable; see PORTING_RULES.md §7.
-    let _rdp = cr * sd * (st * st) * 2.0 * ss * cs - cr * cd * 2.0 * st * ct * cs
+    let _rdp = vertical_slowness * sd * (st * st) * 2.0 * ss * cs - vertical_slowness * cd * 2.0 * st * ct * cs
         + sr * 2.0 * sd * cd * ((ct * ct) - (st * st) * (ss * ss))
         + sr * ((cd * cd) - (sd * sd)) * 2.0 * st * ct * ss;
 
     let rdsv = sr * ((cd * cd) - (sd * sd)) * ((ct * ct) - (st * st)) * ss
-        - cr * cd * ((ct * ct) - (st * st)) * cs
-        + cr * sd * st * ct * 2.0 * ss * cs
+        - vertical_slowness * cd * ((ct * ct) - (st * st)) * cs
+        + vertical_slowness * sd * st * ct * 2.0 * ss * cs
         - sr * sd * cd * 2.0 * st * ct * (1.0 + (ss * ss));
 
-    let rdsh = cr * cd * ct * ss
-        + cr * sd * st * ((cs * cs) - (ss * ss))
+    let rdsh = vertical_slowness * cd * ct * ss
+        + vertical_slowness * sd * st * ((cs * cs) - (ss * ss))
         + sr * ((cd * cd) - (sd * sd)) * ct * cs
         - sr * sd * cd * st * 2.0 * ss * cs;
 
@@ -85,7 +85,7 @@ pub fn rdatn(str_: f32, dip: f32, rak: f32, az: f32, th: f32) -> (f32, f32) {
 /// `RNA` and `RNB` are declared in the Fortran signature and never read; they
 /// are omitted here.
 #[allow(clippy::too_many_arguments)]
-pub fn radfrq_lin(
+pub fn horizontal_radiation_spectrum(
     rng: &mut crate::rng::Pcg32,
     stra: f32,
     dipa: f32,
@@ -109,7 +109,7 @@ pub fn radfrq_lin(
     // purely theoretical rad pattern" -- 2009-02-10.
     radmin = 1.0;
 
-    let (rdsha, rdsva) = rdatn(stra, dipa, raka, pa, thaa);
+    let (rdsha, rdsva) = radiation_pattern(stra, dipa, raka, pa, thaa);
 
     // The Fortran computes RDX with a cos(THAA) factor and then immediately
     // recomputes it without. The first value is dead; kept so the two sources
@@ -132,13 +132,13 @@ pub fn radfrq_lin(
     let mut radv = 0.0f32;
     for _k in 1..=nr {
         // Five draws, in this exact order. 9*range*pu is 90 degrees in radians.
-        let th = thaa + 9.0 * range * pu * (0.5 - rng.rand_numb());
-        let fa = pa + 9.0 * range * pu * (0.5 - rng.rand_numb());
-        let strx = stra + 9.0 * range * pu * (0.5 - rng.rand_numb());
-        let dipx = dipa + 9.0 * range * pu * (0.5 - rng.rand_numb());
-        let rakx = raka + 9.0 * range * pu * (0.5 - rng.rand_numb());
+        let th = thaa + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let fa = pa + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let strx = stra + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let dipx = dipa + 9.0 * range * pu * (0.5 - rng.next_f32());
+        let rakx = raka + 9.0 * range * pu * (0.5 - rng.next_f32());
 
-        let (rdsha, rdsva) = rdatn(strx, dipx, rakx, fa, th);
+        let (rdsha, rdsva) = radiation_pattern(strx, dipx, rakx, fa, th);
         let rads = rdsva * (cmp - fa).cos() + rdsha * (cmp - fa).sin();
         // Squared to remove the sign; polarity is applied at the end, hence
         // the sqrt below.
@@ -164,7 +164,7 @@ pub fn radfrq_lin(
 
 /// `SUBROUTINE RADV_lin(...)` — `hb_high_ref.f:2140`.
 ///
-/// Vertical-component radiation coefficient. Unlike [`radfrq_lin`] this takes
+/// Vertical-component radiation coefficient. Unlike [`horizontal_radiation_spectrum`] this takes
 /// its random numbers from the caller-supplied `rna`/`rnb` arrays (filled once
 /// per run by `RANU2`), so it consumes **no** draws from the shared stream.
 ///
@@ -172,7 +172,7 @@ pub fn radfrq_lin(
 /// projection, and the pattern is `RDSV * sin(th)`.
 ///
 /// Returns the clobbered `fr1`, which the Fortran overwrites with `0.001`. As
-/// with [`radfrq_lin`] this mutates the caller's `flol`, and since `RADV_lin` is
+/// with [`horizontal_radiation_spectrum`] this mutates the caller's `flol`, and since `RADV_lin` is
 /// called *after* both `RADFRQ_lin` calls, `flol` ends the subfault at 0.001
 /// rather than the deck's 0.02. Inert only because `filter3d` is dead.
 ///
@@ -180,7 +180,7 @@ pub fn radfrq_lin(
 /// `fr2 = 1.5` before `fr2 = 0.01`, and `radvh = 0.7` before the computed
 /// average. The take-off range is clamped to `[90, 180]` degrees.
 #[allow(clippy::too_many_arguments)]
-pub fn radv_lin(
+pub fn vertical_radiation_spectrum(
     stra: f32,
     dipa: f32,
     raka: f32,
@@ -200,7 +200,7 @@ pub fn radv_lin(
     let fr2 = 0.01f32;
     let _radvh_superseded = 0.7f32;
 
-    let (_rdsha, rdsva) = rdatn(stra, dipa, raka, pa, thaa);
+    let (_rdsha, rdsva) = radiation_pattern(stra, dipa, raka, pa, thaa);
     let rdx = rdsva * thaa.sin();
 
     let range = 40.0f32;
@@ -218,7 +218,7 @@ pub fn radv_lin(
         // Uniform in cos(th) between the clamped limits.
         let th = ((1.0 - rna[k]) * tha1.cos() + rna[k] * tha2.cos()).acos();
         let fa = 360.0 * pu * rnb[k];
-        let (_rdsha, rdsva) = rdatn(stra, dipa, raka, fa, th);
+        let (_rdsha, rdsva) = radiation_pattern(stra, dipa, raka, fa, th);
         let rads = rdsva * th.sin();
         radv = radv + rads.abs();
     }

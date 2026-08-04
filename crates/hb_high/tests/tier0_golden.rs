@@ -8,15 +8,21 @@
 //!
 //! Regenerate with `harness/kernels/gen_tier0_golden.sh`.
 //!
+//!
+//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
+//! written by the Fortran driver, which dumps one file per subprogram it exercises,
+//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
+//! them would mean editing the drivers and regenerating every golden, and the names
+//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 //! Every comparison is exact. See `PORTING_RULES.md` §10.
 
-use hb_high::fft::{fast, flzero};
+use hb_high::fft::{fast, remove_quadratic_trend};
 use hb_high::fort::{Array1, Complex32, Complex64};
-use hb_high::geom::delaz5;
-use hb_high::radiation::rdatn;
-use hb_high::ray::cr;
-use hb_high::site::siteamp;
-use hb_high::special::dgamm;
+use hb_high::geom::distance_azimuth;
+use hb_high::radiation::radiation_pattern;
+use hb_high::ray::vertical_slowness;
+use hb_high::site::apply_site_amplification;
+use hb_high::special::gamma;
 use std::path::PathBuf;
 
 /// Sequential reader over an `access='stream'` Fortran file.
@@ -100,9 +106,9 @@ fn rdatn_matches_fortran() {
     while !r.done() {
         let (str_, dip, rak, az, th) = (r.f32(), r.f32(), r.f32(), r.f32(), r.f32());
         let (w_sh, w_sv) = (r.f32(), r.f32());
-        let (sh, sv) = rdatn(str_, dip, rak, az, th);
-        eq32(&format!("rdatn case {n} rdsh"), sh, w_sh);
-        eq32(&format!("rdatn case {n} rdsv"), sv, w_sv);
+        let (sh, sv) = radiation_pattern(str_, dip, rak, az, th);
+        eq32(&format!("radiation_pattern case {n} rdsh"), sh, w_sh);
+        eq32(&format!("radiation_pattern case {n} rdsv"), sv, w_sv);
         n += 1;
     }
     r.assert_exhausted();
@@ -117,12 +123,12 @@ fn delaz5_matches_fortran() {
         let (thei, alei, thsi, alsi) = (r.f32(), r.f32(), r.f32(), r.f32());
         let iflag = r.i32();
         let want = [r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32()];
-        let g = delaz5(thei, alei, thsi, alsi, iflag);
+        let g = distance_azimuth(thei, alei, thsi, alsi, iflag);
         let got = [g.delt, g.deltdg, g.deltkm, g.azes, g.azesdg, g.azse, g.azsedg];
         let names = ["delt", "deltdg", "deltkm", "azes", "azesdg", "azse", "azsedg"];
         for k in 0..7 {
             eq32(
-                &format!("delaz5 case {n} ({thei},{alei})->({thsi},{alsi}) {}", names[k]),
+                &format!("distance_azimuth case {n} ({thei},{alei})->({thsi},{alsi}) {}", names[k]),
                 got[k], want[k],
             );
         }
@@ -139,7 +145,7 @@ fn dgamm_matches_fortran() {
     while !r.done() {
         let x = r.f64();
         let want = r.f64();
-        eq64(&format!("dgamm({x})"), dgamm(x), want);
+        eq64(&format!("gamma({x})"), gamma(x), want);
         n += 1;
     }
     r.assert_exhausted();
@@ -154,9 +160,9 @@ fn cr_matches_fortran() {
         let p = Complex64::new(r.f64(), r.f64());
         let v = r.f64();
         let want = Complex64::new(r.f64(), r.f64());
-        let got = cr(p, v);
-        eq64(&format!("cr({p:?},{v}) re"), got.re, want.re);
-        eq64(&format!("cr({p:?},{v}) im"), got.im, want.im);
+        let got = vertical_slowness(p, v);
+        eq64(&format!("vertical_slowness({p:?},{v}) re"), got.re, want.re);
+        eq64(&format!("vertical_slowness({p:?},{v}) im"), got.im, want.im);
         n += 1;
     }
     r.assert_exhausted();
@@ -177,14 +183,14 @@ fn flzero_matches_fortran() {
         let a_in = a.clone();
         let want: Vec<f32> = (0..n).map(|_| r.f32()).collect();
 
-        flzero(n, dt, &mut a);
+        remove_quadratic_trend(n, dt, &mut a);
         for i in 1..=n {
-            eq32(&format!("flzero n={n} dt={dt} a[{i}]"), a[i], want[i - 1]);
+            eq32(&format!("remove_quadratic_trend n={n} dt={dt} a[{i}]"), a[i], want[i - 1]);
         }
         // The correction loop starts at I=3, so the first two samples must come
         // back untouched. Pinned explicitly because it is easy to "fix".
-        eq32(&format!("flzero n={n} a[1] must be untouched"), a[1], a_in[1]);
-        eq32(&format!("flzero n={n} a[2] must be untouched"), a[2], a_in[2]);
+        eq32(&format!("remove_quadratic_trend n={n} a[1] must be untouched"), a[1], a_in[1]);
+        eq32(&format!("remove_quadratic_trend n={n} a[2] must be untouched"), a[2], a_in[2]);
         cases += 1;
     }
     r.assert_exhausted();
@@ -244,10 +250,10 @@ fn siteamp_matches_fortran() {
         let want: Vec<Complex32> =
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
-        siteamp(np2, &mut cw, &dfr, nn, &fn_, &an);
+        apply_site_amplification(np2, &mut cw, &dfr, nn, &fn_, &an);
         for i in 1..=np2 {
-            eq32(&format!("siteamp np2={np2} [{i}].re"), cw[i].re, want[i - 1].re);
-            eq32(&format!("siteamp np2={np2} [{i}].im"), cw[i].im, want[i - 1].im);
+            eq32(&format!("apply_site_amplification np2={np2} [{i}].re"), cw[i].re, want[i - 1].re);
+            eq32(&format!("apply_site_amplification np2={np2} [{i}].im"), cw[i].im, want[i - 1].im);
         }
         cases += 1;
     }

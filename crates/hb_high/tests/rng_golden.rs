@@ -11,7 +11,7 @@
 //! plausible. See `PORTING_RULES.md` §10.
 
 use hb_high::fort::Array1;
-use hb_high::rng::{normal_random_number, ranu2, Pcg32, SEED_WORDS};
+use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32, SEED_WORDS};
 use std::path::PathBuf;
 
 fn golden_dir() -> PathBuf {
@@ -81,8 +81,8 @@ fn rand_numb_matches_fortran() {
     for seed in SEEDS {
         let want = read_f32s(&format!("rand_numb_{seed}.bin"));
         let (mut g, _) = Pcg32::seed(seed);
-        let got: Vec<f32> = (0..want.len()).map(|_| g.rand_numb()).collect();
-        assert_f32_bit_identical(&format!("rand_numb seed {seed}"), &got, &want);
+        let got: Vec<f32> = (0..want.len()).map(|_| g.next_f32()).collect();
+        assert_f32_bit_identical(&format!("next_f32 seed {seed}"), &got, &want);
     }
 }
 
@@ -92,9 +92,9 @@ fn ranu2_matches_fortran() {
         let want = read_f32s(&format!("ranu2_{seed}.bin"));
         let (mut g, _) = Pcg32::seed(seed);
         let mut rn = Array1::<f32>::new(want.len());
-        ranu2(&mut g, want.len(), &mut rn);
+        fill_uniform_deviates(&mut g, want.len(), &mut rn);
         assert_f32_bit_identical(
-            &format!("ranu2 seed {seed}"),
+            &format!("uniform_deviates seed {seed}"),
             rn.as_slice(),
             &want,
         );
@@ -110,7 +110,7 @@ fn normal_random_number_matches_fortran() {
         assert_eq!(want.len(), n);
         let (mut g, _) = Pcg32::seed(123456789);
         let mut acc = Array1::<f32>::new(n);
-        normal_random_number(&mut g, n, &mut acc);
+        fill_normal_deviates(&mut g, n, &mut acc);
         assert_f32_bit_identical(&format!("normal nr={n}"), acc.as_slice(), &want);
     }
 }

@@ -34,7 +34,7 @@ const C: [f64; 20] = [
 const IN: usize = 19;
 
 /// The sentinel the Fortran returns on both error paths.
-pub const DGAMM_ERROR: f64 = 1.0e75;
+pub const GAMMA_ERROR: f64 = 1.0e75;
 
 /// `FUNCTION DGAMM(X)` — `hb_high_ref.f:2745`. Gamma function, `real*8`.
 ///
@@ -43,15 +43,15 @@ pub const DGAMM_ERROR: f64 = 1.0e75;
 /// Two error paths in the original write a diagnostic to unit 6 (stdout) and
 /// return `1.0D75`: `x > 57`, and a non-positive integer argument where gamma
 /// has a pole. Both are reproduced, including the return value, because
-/// `stoc_f` does not check for it — so the sentinel propagates into the
+/// `stochastic_spectrum` does not check for it — so the sentinel propagates into the
 /// spectrum and any change here would change output. The message goes to
 /// stderr rather than stdout: unit 6 would corrupt nothing today (the waveform
 /// goes to unit 22 and the distance to unit 0), but stdout is not a channel
 /// this program otherwise uses, and `hf_sim.py` captures stderr.
-pub fn dgamm(x: f64) -> f64 {
+pub fn gamma(x: f64) -> f64 {
     if x > 57.0 {
         eprintln!(" (FUNC.DGAMM) X(={x:.16E}) MUST BE SMALLER THAN 57.0");
-        return DGAMM_ERROR;
+        return GAMMA_ERROR;
     }
 
     let mut xx = x;
@@ -69,7 +69,7 @@ pub fn dgamm(x: f64) -> f64 {
             if aa == 0.0 {
                 // Pole: gamma is undefined at non-positive integers.
                 eprintln!(" (FUNC.DGAMM) INVALID ARGUMENT X ={x:.16E}");
-                return DGAMM_ERROR;
+                return GAMMA_ERROR;
             }
             let mg = if aa >= -0.5 {
                 m.abs() + 1
@@ -127,10 +127,10 @@ mod tests {
             (6.0, 120.0),
             (10.0, 362880.0),
         ] {
-            let got = dgamm(n);
+            let got = gamma(n);
             assert!(
                 (got / want - 1.0).abs() < 1e-12,
-                "dgamm({n}) = {got}, want {want}"
+                "gamma({n}) = {got}, want {want}"
             );
         }
     }
@@ -138,18 +138,18 @@ mod tests {
     #[test]
     fn gamma_of_half() {
         // Gamma(1/2) = sqrt(pi)
-        let got = dgamm(0.5);
+        let got = gamma(0.5);
         let want = std::f64::consts::PI.sqrt();
         assert!(
             (got / want - 1.0).abs() < 1e-12,
-            "dgamm(0.5) = {got}, want {want}"
+            "gamma(0.5) = {got}, want {want}"
         );
     }
 
     #[test]
     fn error_paths_return_sentinel() {
-        assert_eq!(dgamm(58.0), DGAMM_ERROR);
-        assert_eq!(dgamm(0.0), DGAMM_ERROR);
-        assert_eq!(dgamm(-3.0), DGAMM_ERROR);
+        assert_eq!(gamma(58.0), GAMMA_ERROR);
+        assert_eq!(gamma(0.0), GAMMA_ERROR);
+        assert_eq!(gamma(-3.0), GAMMA_ERROR);
     }
 }

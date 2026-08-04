@@ -1,12 +1,18 @@
-//! Bit-identity gate for `stoc_f` and `gf_amp_tt`.
+//! Bit-identity gate for `stochastic_spectrum` and `green_function`.
 //!
 //! Regenerate with `harness/kernels/gen_tier4_golden.sh`.
+//!
+//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
+//! written by the Fortran driver, which dumps one file per subprogram it exercises,
+//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
+//! them would mean editing the drivers and regenerating every golden, and the names
+//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
 use hb_high::fort::{Array1, Complex32};
-use hb_high::ray::gf_amp_tt;
+use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
-use hb_high::state::{RayState, Vmod};
-use hb_high::stoc::stoc_f;
+use hb_high::state::{RayState, VelocityModel};
+use hb_high::stoc::stochastic_spectrum;
 use std::path::PathBuf;
 
 struct Reader {
@@ -77,19 +83,19 @@ fn stoc_f_matches_fortran() {
 
         let (mut rng, _) = Pcg32::seed(seed);
         let mut cw = Array1::<Complex32>::filled(np2, Complex32::ZERO);
-        stoc_f(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
+        stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
                fc, fmx, akapp, &mut cw, &dfr, qb, qfe, bigc);
 
-        let tag = format!("stoc_f case {cases} (np2={np2} akapp={akapp})");
+        let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
         for i in 1..=np2 {
             eq32(&format!("{tag} cw[{i}].re"), cw[i].re, want[i - 1].re);
             eq32(&format!("{tag} cw[{i}].im"), cw[i].im, want[i - 1].im);
         }
-        // Generator position: stoc_f consumes np2 deviates via
-        // normal_random_number, and the shared stream must stay in step.
+        // Generator position: stochastic_spectrum consumes np2 deviates via
+        // normal_deviates, and the shared stream must stay in step.
         for (k, w) in want_after.iter().enumerate() {
             eq32(&format!("{tag} post-call draw {k} (generator position)"),
-                 rng.rand_numb(), *w);
+                 rng.next_f32(), *w);
         }
         cases += 1;
     }
@@ -117,7 +123,7 @@ fn gf_amp_tt_matches_fortran() {
         let src_depth = r.f32();
         let range = r.f32();
 
-        let mut vmod = Vmod::new();
+        let mut vmod = VelocityModel::new();
         for k in 1..=j0 { vmod.thic[k] = r.f64(); }
         for k in 1..=j0 { vmod.vp[k] = r.f64(); }
         for k in 1..=j0 { vmod.vsh[k] = r.f64(); }
@@ -131,9 +137,9 @@ fn gf_amp_tt_matches_fortran() {
         let (w_rp0, w_stime, w_rpath, w_qbar) = (r.f32(), r.f32(), r.f32(), r.f32());
 
         let mut st = RayState::default();
-        let g = gf_amp_tt(&mut st, &vmod, j0, src_depth, range, itype, md);
+        let g = green_function(&mut st, &vmod, j0, src_depth, range, itype, md);
 
-        let tag = format!("gf_amp_tt case {cases} (itype={itype} md={md} \
+        let tag = format!("green_function case {cases} (itype={itype} md={md} \
                            depth={src_depth} range={range})");
         // The ray description itself, before the derived quantities: a wrong
         // segment list would otherwise only show up as a wrong travel time.

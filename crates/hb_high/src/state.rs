@@ -39,7 +39,7 @@ use params::NLAYMAX;
 /// `real*8`-ness solely from `implicit real*8 (a-h,o-z)`, so the types here are
 /// not negotiable.
 #[derive(Clone, Debug)]
-pub struct Vmod {
+pub struct VelocityModel {
     /// `dep` / `dpt` — cumulative depth to the base of each layer.
     pub depth: Array1<f64>,
     /// `th` — layer thickness.
@@ -54,13 +54,13 @@ pub struct Vmod {
     pub qs: Array1<f32>,
 }
 
-impl Default for Vmod {
+impl Default for VelocityModel {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Vmod {
+impl VelocityModel {
     pub fn new() -> Self {
         Self {
             depth: Array1::new(NLAYMAX),
@@ -82,7 +82,7 @@ impl Vmod {
 /// fall to implicit `real*4`. Adding `implicit none` to either Fortran scope
 /// would shift the whole block. See `PORTING_RULES.md` §2.
 #[derive(Clone, Debug)]
-pub struct VmodIn {
+pub struct VelocityModelInput {
     pub depth0: Array1<f32>,
     pub thic0: Array1<f32>,
     pub vp0: Array1<f64>,
@@ -94,13 +94,13 @@ pub struct VmodIn {
     pub grand: Array1<f32>,
 }
 
-impl Default for VmodIn {
+impl Default for VelocityModelInput {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl VmodIn {
+impl VelocityModelInput {
     pub fn new() -> Self {
         Self {
             depth0: Array1::new(NLAYMAX),
@@ -115,7 +115,7 @@ impl VmodIn {
     }
 }
 
-/// `common /rays/` — the ray segment description. Written only by `gf_amp_tt`.
+/// `common /rays/` — the ray segment description. Written only by `green_function`.
 ///
 /// The Fortran declares `nh(1,nlaymax)` and `nm(1,nlaymax)` with a degenerate
 /// leading dimension, and every routine hardwires the ray index to 1. The
@@ -150,13 +150,13 @@ impl Rays {
     }
 }
 
-/// `common /travel/` — per-layer path multipliers. Written only by `trav`.
+/// `common /travel/` — per-layer path multipliers. Written only by `build_ray_path`.
 ///
 /// `alp` and `als` are `real*4` by *explicit* declaration inside routines that
 /// are otherwise `implicit real*8`; that explicit declaration is load-bearing.
 ///
-/// The third slot is written by `trav` as `ndeep` but read as `nd` by `cagcon`
-/// and `dtdp` and as `ndp` by `pnot` — and it is **not** the same quantity as
+/// The third slot is written by `build_ray_path` as `ndeep` but read as `nd` by `cagniard_time`
+/// and `cagniard_time_derivative` and as `ndp` by `stationary_ray_parameter` — and it is **not** the same quantity as
 /// `Rays::nd`, which those same routines also declare. See `PORTING_RULES.md`
 /// §6.
 #[derive(Clone, Debug)]
@@ -167,7 +167,7 @@ pub struct Travel {
     pub als: Array1<f32>,
     /// Deepest layer the ray penetrates. Read as `nd`/`ndp` by consumers.
     pub ndeep: i32,
-    /// Written by `trav`; read by nothing.
+    /// Written by `build_ray_path`; read by nothing.
     pub nup: i32,
 }
 
@@ -183,42 +183,42 @@ impl Travel {
     }
 }
 
-/// `common /coff/` — interface interaction types. Written only by `trav`.
+/// `common /coff/` — interface interaction types. Written only by `build_ray_path`.
 ///
 /// Do not conflate with the dead `gencof`'s dummy argument, also named `it`.
 #[derive(Clone, Debug)]
-pub struct Coff {
+pub struct Coefficients {
     /// 0 = transmission, 1 = reflection, 2 = direct ray.
     pub it: Array1<i32>,
     /// Segment direction: +1 up, -1 down.
     pub nup1: Array1<i32>,
 }
 
-impl Default for Coff {
+impl Default for Coefficients {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Coff {
+impl Coefficients {
     pub fn new() -> Self {
         Self { it: Array1::new(NLAYMAX), nup1: Array1::new(NLAYMAX) }
     }
 }
 
-/// The full ray-tracing state, threaded through the `gf_amp_tt` cluster.
+/// The full ray-tracing state, threaded through the `green_function` cluster.
 ///
-/// The Fortran passes none of this in arguments — `gf_amp_tt` writes `/rays/`,
-/// `trav` writes `/travel/` and `/coff/`, and `pnot`/`ttime`/`geom_terms` read
+/// The Fortran passes none of this in arguments — `green_function` writes `/rays/`,
+/// `build_ray_path` writes `/travel/` and `/coff/`, and `stationary_ray_parameter`/`travel_time`/`geometric_spreading` read
 /// them back. Making the dataflow explicit is the point of this struct.
 ///
-/// `/rmode/love` is included for fidelity: `trav` writes it, but its only
+/// `/rmode/love` is included for fidelity: `build_ray_path` writes it, but its only
 /// readers (`refft`, `tranm`) are unreachable, so nothing live consumes it.
 #[derive(Clone, Debug, Default)]
 pub struct RayState {
     pub rays: Rays,
     pub travel: Travel,
-    pub coff: Coff,
-    /// `/rmode/love` — 1 for P-SV, 2 for SH. Written by `trav`, never read.
+    pub coff: Coefficients,
+    /// `/rmode/love` — 1 for P-SV, 2 for SH. Written by `build_ray_path`, never read.
     pub love: i32,
 }

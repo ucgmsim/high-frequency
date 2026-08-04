@@ -249,11 +249,11 @@ impl_complex!(f64);
 // Intrinsic shims
 // ---------------------------------------------------------------------------
 
-/// `nint(x)` — round half **away from zero**.
+/// `round_half_away_from_zero(x)` — round half **away from zero**.
 ///
 /// Not `round_ties_even` (which rounds half to even) and not a bare `as i32`
 /// (which truncates).
-pub fn nint(x: f32) -> i32 {
+pub fn round_half_away_from_zero(x: f32) -> i32 {
     x.round() as i32
 }
 
@@ -261,7 +261,7 @@ pub fn nint(x: f32) -> i32 {
 ///
 /// `k2` at line 1371 of the original depends on this and can come out negative;
 /// see `PORTING_RULES.md` §7.
-pub fn int_trunc(x: f32) -> i32 {
+pub fn truncate_toward_zero(x: f32) -> i32 {
     x.trunc() as i32
 }
 
@@ -301,18 +301,18 @@ mod tests {
 
     #[test]
     fn nint_rounds_half_away_from_zero() {
-        assert_eq!(nint(0.5), 1);
-        assert_eq!(nint(1.5), 2);
-        assert_eq!(nint(2.5), 3); // round_ties_even would give 2
-        assert_eq!(nint(-0.5), -1);
-        assert_eq!(nint(-2.5), -3);
+        assert_eq!(round_half_away_from_zero(0.5), 1);
+        assert_eq!(round_half_away_from_zero(1.5), 2);
+        assert_eq!(round_half_away_from_zero(2.5), 3); // round_ties_even would give 2
+        assert_eq!(round_half_away_from_zero(-0.5), -1);
+        assert_eq!(round_half_away_from_zero(-2.5), -3);
     }
 
     #[test]
     fn int_truncates_toward_zero() {
-        assert_eq!(int_trunc(1.7), 1);
-        assert_eq!(int_trunc(-1.7), -1); // toward zero, not floor
-        assert_eq!(int_trunc(-0.2), 0);
+        assert_eq!(truncate_toward_zero(1.7), 1);
+        assert_eq!(truncate_toward_zero(-1.7), -1); // toward zero, not floor
+        assert_eq!(truncate_toward_zero(-0.2), 0);
     }
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
         // -O0 -ffp-contract=off -fno-fast-math. The naive (ac+bd)/(c^2+d^2)
         // form differs in the last bit on all three of these.
         let cases: [(Complex64, Complex64, u64, u64); 3] = [
-            // real / complex, the form dtdp uses: th(i)*alp(i) / ea
+            // real / complex, the form cagniard_time_derivative uses: th(i)*alp(i) / ea
             (Complex64::from_real(3.25), Complex64::new(0.75, -2.5),
              0x3FD6E62A46756E62, 0x3FF315233AB73152),
             (Complex64::new(1.5, 0.25), Complex64::new(0.75, -2.5),

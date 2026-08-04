@@ -1,9 +1,9 @@
-//! Source-receiver geometry. Tier 0 holds `DELAZ5`; `even_dist2` lands here in
+//! Source-receiver geometry. Tier 0 holds `DELAZ5`; `subfault_geometry` lands here in
 //! tier 1.
 
-/// Outputs of [`delaz5`].
+/// Outputs of [`distance_azimuth`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Delaz5 {
+pub struct DistanceAzimuth {
     /// Angular separation, radians.
     pub delt: f32,
     /// Angular separation, degrees.
@@ -28,7 +28,7 @@ pub struct Delaz5 {
 /// The original selects this with an arithmetic `IF(I) 50,50,51`, so zero and
 /// negative both take the degrees path.
 ///
-/// **The `i > 0` path is dead code.** `even_dist2` assigns `i=0` immediately
+/// **The `i > 0` path is dead code.** `subfault_geometry` assigns `i=0` immediately
 /// before its first call (`:2626`) and passes the literal `0` at its second
 /// (`:2658`), and those are the only live call sites. The branch is kept for
 /// line-by-line comparability but is deliberately not covered by the goldens.
@@ -44,7 +44,7 @@ pub struct Delaz5 {
 ///
 /// Three separation regimes avoid catastrophic cancellation near 0 and 180
 /// degrees, selected by arithmetic `IF`s on `C1-0.94` and `C1+0.94`.
-pub fn delaz5(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> Delaz5 {
+pub fn distance_azimuth(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> DistanceAzimuth {
     let (the, ale, ths, als): (f32, f32, f32, f32);
 
     if i <= 0 {
@@ -125,10 +125,10 @@ pub fn delaz5(thei: f32, alei: f32, thsi: f32, alsi: f32, i: i32) -> Delaz5 {
     let azesdg = 57.29577951 * azes;
     let azsedg = 57.29577951 * azse;
 
-    Delaz5 { delt, deltdg, deltkm, azes, azesdg, azse, azsedg }
+    DistanceAzimuth { delt, deltdg, deltkm, azes, azesdg, azse, azsedg }
 }
 
-/// `subroutine even_dist2(...)` — `hb_high_ref.f:2593`.
+/// `subroutine subfault_geometry(...)` — `hb_high_ref.f:2593`.
 ///
 /// Per-subfault source-to-receiver geometry for a single planar fault segment.
 /// Fills five `(nq, np)` arrays, indexed `(i, j)` for along-strike and down-dip:
@@ -171,7 +171,7 @@ pub struct SubfaultGeometry {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn even_dist2(
+pub fn subfault_geometry(
     xlonq: f32,
     ylatq: f32,
     slon: f32,
@@ -211,7 +211,7 @@ pub fn even_dist2(
         } else {
             (thei + 1.0, alsi)
         };
-        let g = delaz5(thei, alei, thsi, alsi2, 0);
+        let g = distance_azimuth(thei, alei, thsi, alsi2, 0);
         let az = g.azesdg;
         let dis = g.deltkm;
         let x = dis * (pi * az / 180.0).sin();
@@ -246,7 +246,7 @@ pub fn even_dist2(
 
             let zm1 = zm + b1;
 
-            let g = delaz5(stlat, stlon, slat, slon, 0);
+            let g = distance_azimuth(stlat, stlon, slat, slon, 0);
             let dis = g.deltkm;
 
             dst[(i, j)] = dis;

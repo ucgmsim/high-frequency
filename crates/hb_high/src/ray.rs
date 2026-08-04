@@ -1,10 +1,10 @@
-//! Ray theory. `cagcon`, `dtdp`, `pnot`, `ttime` and `gf_amp_tt` follow in
+//! Ray theory. `cagniard_time`, `cagniard_time_derivative`, `stationary_ray_parameter`, `travel_time` and `green_function` follow in
 //! tiers 2-4.
 
 use crate::fort::Complex64;
-use crate::state::{RayState, Vmod};
+use crate::state::{RayState, VelocityModel};
 
-/// `function cr(p,v)` — `hb_high_ref.f:3349`. Complex vertical slowness
+/// `function vertical_slowness(p,v)` — `hb_high_ref.f:3349`. Complex vertical slowness
 /// `eta = sqrt(1/v^2 - p^2)`, with an explicit branch-cut choice.
 ///
 /// This is the numerically delicate heart of the ray code. It evaluates the
@@ -19,7 +19,7 @@ use crate::state::{RayState, Vmod};
 /// * the local named `pi` is `dimag(p)`, the **imaginary part of p**, not
 ///   3.14159. The actual pi appears separately as the truncated 10-digit
 ///   literal `3.141592654d0`, which is copied verbatim.
-pub fn cr(p: Complex64, v: f64) -> Complex64 {
+pub fn vertical_slowness(p: Complex64, v: f64) -> Complex64 {
     let t1 = 1.0e-08f64;
     let rsq = 1.0f64 / (v * v);
     let pr = p.re;
@@ -54,7 +54,7 @@ pub fn cr(p: Complex64, v: f64) -> Complex64 {
     Complex64::new(a, b)
 }
 
-/// `subroutine trav(ir,hs,hr)` — `hb_high_ref.f:3507`.
+/// `subroutine build_ray_path(ir,hs,hr)` — `hb_high_ref.f:3507`.
 ///
 /// Builds the per-layer path multipliers for one ray. Sole writer of
 /// `/travel/` (`alp`, `als`, `ndeep`, `nup`), `/coff/` (`it`, `nup1`) and
@@ -71,7 +71,7 @@ pub fn cr(p: Complex64, v: f64) -> Complex64 {
 /// previous ray. Harmless at the ~34 layers production uses, but it is not
 /// widened here: doing so would change results for any deeper model, silently.
 /// See `PORTING_RULES.md` §7.
-pub fn trav(st: &mut RayState, vmod: &Vmod, ir: usize, hs: f64, hr: f64) {
+pub fn build_ray_path(st: &mut RayState, vmod: &VelocityModel, ir: usize, hs: f64, hr: f64) {
     assert_eq!(ir, 1, "/rays/ has a degenerate leading dimension; ir must be 1");
 
     st.love = 1;
@@ -208,7 +208,7 @@ pub fn trav(st: &mut RayState, vmod: &Vmod, ir: usize, hs: f64, hr: f64) {
     st.travel.ndeep = ndeep;
 }
 
-/// `subroutine geom_terms(hs,p0,itype,rp,qb)` — `hb_high_ref.f:3918`.
+/// `subroutine geometric_spreading(hs,p0,itype,rp,qb)` — `hb_high_ref.f:3918`.
 ///
 /// Returns `(rp, qb)`: total ray path length in km, and the path-integrated
 /// attenuation operator `sum(t_i / Qs_i)`.
@@ -228,9 +228,9 @@ pub fn trav(st: &mut RayState, vmod: &Vmod, ir: usize, hs: f64, hr: f64) {
 /// precision even in this `real*8` routine — see `PORTING_RULES.md` §1b. This
 /// is why they are written `0.999999f32 as f64` rather than as plain `f64`
 /// literals; the difference shows up around the 30th bit.
-pub fn geom_terms(
+pub fn geometric_spreading(
     st: &RayState,
-    vmod: &Vmod,
+    vmod: &VelocityModel,
     hs: f64,
     p0: f64,
     itype: i32,
@@ -250,7 +250,7 @@ pub fn geom_terms(
     } else {
         // The Fortran has two IFs and no else, so a negative odd itype would
         // leave th1 undefined. Every call site passes itype >= 1.
-        panic!("geom_terms: itype {itype} gives mod {m}, leaving th1 undefined");
+        panic!("geometric_spreading: itype {itype} gives mod {m}, leaving th1 undefined");
     };
 
     let clamp = 0.999999f32 as f64;
@@ -289,31 +289,31 @@ pub fn geom_terms(
     (rsum, qb)
 }
 
-/// `function cagcon(p,ir,r)` — `hb_high_ref.f:3327`.
+/// `function cagniard_time(p,ir,r)` — `hb_high_ref.f:3327`.
 ///
 /// Cagniard complex travel time as a function of complex ray parameter:
 /// `tau(p) = p*r + sum_i [eta_p(i)*alp(i)*th(i) + eta_s(i)*als(i)*th(i)]`.
 ///
-/// The loop bound is `/travel/` slot 3, which `trav` writes as `ndeep` and this
+/// The loop bound is `/travel/` slot 3, which `build_ray_path` writes as `ndeep` and this
 /// routine declares as `nd`. It is **not** `/rays/nd`, which this routine also
 /// has in scope. See `PORTING_RULES.md` §6.
 ///
 /// `ir` is unused — kept to match the Fortran signature.
 ///
-/// Note the guard is `alp(i) > 0`, whereas [`dtdp`] uses `alp(i) /= 0`. `alp`
-/// can be negative after `trav`'s source- and receiver-layer adjustments, so
-/// the two routines genuinely disagree about negative multipliers: `cagcon`
-/// skips them, `dtdp` does not. Preserved as-is.
-pub fn cagcon(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Complex64 {
+/// Note the guard is `alp(i) > 0`, whereas [`cagniard_time_derivative`] uses `alp(i) /= 0`. `alp`
+/// can be negative after `build_ray_path`'s source- and receiver-layer adjustments, so
+/// the two routines genuinely disagree about negative multipliers: `cagniard_time`
+/// skips them, `cagniard_time_derivative` does not. Preserved as-is.
+pub fn cagniard_time(st: &RayState, vmod: &VelocityModel, p: Complex64, _ir: usize, r: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 1..=st.travel.ndeep as usize {
         let mut ea = Complex64::ZERO;
         let mut eb = Complex64::ZERO;
         if st.travel.alp[i] > 0.0 {
-            ea = cr(p, vmod.vp[i]);
+            ea = vertical_slowness(p, vmod.vp[i]);
         }
         if st.travel.als[i] > 0.0 {
-            eb = cr(p, vmod.vsh[i]);
+            eb = vertical_slowness(p, vmod.vsh[i]);
         }
         a = a + ea * (st.travel.alp[i] as f64) * vmod.thic[i]
               + eb * (st.travel.als[i] as f64) * vmod.thic[i];
@@ -321,7 +321,7 @@ pub fn cagcon(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> C
     p * r + a
 }
 
-/// `function dtdp(p,ir,r)` — `hb_high_ref.f:3413`.
+/// `function cagniard_time_derivative(p,ir,r)` — `hb_high_ref.f:3413`.
 ///
 /// `dtau/dp = r - p * sum_i [th(i)*alp(i)/eta_p(i) + th(i)*als(i)/eta_s(i)]`.
 ///
@@ -329,18 +329,18 @@ pub fn cagcon(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> C
 /// the numerator to complex and doing a full complex division — Smith's
 /// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fort::Complex`]'s `Div`.
 ///
-/// `ir` is unused. The guard here is `/= 0` rather than `> 0`; see [`cagcon`].
-pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Complex64 {
+/// `ir` is unused. The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
+pub fn cagniard_time_derivative(st: &RayState, vmod: &VelocityModel, p: Complex64, _ir: usize, r: f64) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 1..=st.travel.ndeep as usize {
         let mut b = Complex64::ZERO;
         let mut c = Complex64::ZERO;
         if st.travel.alp[i] != 0.0 {
-            let ea = cr(p, vmod.vp[i]);
+            let ea = vertical_slowness(p, vmod.vp[i]);
             b = Complex64::from_real(vmod.thic[i] * st.travel.alp[i] as f64) / ea;
         }
         if st.travel.als[i] != 0.0 {
-            let eb = cr(p, vmod.vsh[i]);
+            let eb = vertical_slowness(p, vmod.vsh[i]);
             c = Complex64::from_real(vmod.thic[i] * st.travel.als[i] as f64) / eb;
         }
         a = a + b + c;
@@ -348,7 +348,7 @@ pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Com
     Complex64::from_real(r) - p * a
 }
 
-/// `subroutine pnot(ir,p0,t0,r)` — `hb_high_ref.f:3441`.
+/// `subroutine stationary_ray_parameter(ir,p0,t0,r)` — `hb_high_ref.f:3441`.
 ///
 /// Finds the geometric ray parameter `p0` and its travel time `t0`, returned as
 /// `(p0, t0)`.
@@ -360,7 +360,7 @@ pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Com
 /// # Silent real-part extraction, three times
 ///
 /// `a`, `pn`, `p0` and `t0` are all `real*8` under `implicit real*8 (a-h,o-z)`
-/// while `dtdp` and `cagcon` return `complex*16`. Fortran assigns the real part
+/// while `cagniard_time_derivative` and `cagniard_time` return `complex*16`. Fortran assigns the real part
 /// without comment. These are not typos for `dreal(...)` — they are the
 /// intended behaviour, and the `.re` accesses below are the same operation made
 /// visible.
@@ -373,10 +373,10 @@ pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Com
 /// "add another factor of 10 just to be sure-> problems on Linux". Reproduced
 /// exactly, including the redundant first assignment.
 ///
-/// The `> 0` guard on `alp`/`als` matches [`cagcon`], not [`dtdp`]. That
+/// The `> 0` guard on `alp`/`als` matches [`cagniard_time`], not [`cagniard_time_derivative`]. That
 /// mismatch has a consequence: `v` is the largest velocity among layers with a
-/// *positive* multiplier, while `dtdp` sums over every layer with a *nonzero*
-/// one. So the layer defining `v` is always in `dtdp`'s sum, and as `p`
+/// *positive* multiplier, while `cagniard_time_derivative` sums over every layer with a *nonzero*
+/// one. So the layer defining `v` is always in `cagniard_time_derivative`'s sum, and as `p`
 /// approaches `1/v` that layer's `eta` approaches zero and its term diverges.
 ///
 /// # The immediate-return path is unreachable
@@ -386,7 +386,7 @@ pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Com
 /// Measured over 72 cases with `r` from 0.5 to 400 km, the largest `a` seen was
 /// -2106. Every case also exits on the `|a| <= 0.01` tolerance; the
 /// 40-iteration cap never fires. Both facts are pinned in `tier3_golden.rs`.
-pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
+pub fn stationary_ray_parameter(st: &RayState, vmod: &VelocityModel, ir: usize, r: f64) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
     let mut v = 0.0f64;
     for i in 1..=st.travel.ndeep as usize {
@@ -417,7 +417,7 @@ pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
     let mut p = Complex64::from_real(ptest - 10.0 * eps);
 
     // Real part of a complex*16, assigned to a real*8.
-    let mut a = dtdp(st, vmod, p, ir, r).re;
+    let mut a = cagniard_time_derivative(st, vmod, p, ir, r).re;
 
     if a < 0.0 {
         // Label 11: bisect between pn (where dtau/dp < 0) and pp.
@@ -427,7 +427,7 @@ pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
         loop {
             k += 1;
             p = Complex64::from_real((pn + pp) / 2.0);
-            a = dtdp(st, vmod, p, ir, r).re;
+            a = cagniard_time_derivative(st, vmod, p, ir, r).re;
             if a.abs() <= 0.01 || k >= 40 {
                 break;
             }
@@ -441,11 +441,11 @@ pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
 
     // Label 12.
     let p0 = p.re;
-    let t = cagcon(st, vmod, p, ir, r);
+    let t = cagniard_time(st, vmod, p, ir, r);
     (p0, t.re)
 }
 
-/// `subroutine ttime(ir,p0,t0,p1,t1,r)` — `hb_high_ref.f:3610`.
+/// `subroutine travel_time(ir,p0,t0,p1,t1,r)` — `hb_high_ref.f:3610`.
 ///
 /// Clamps the ray parameter to the smallest `1/v` over every segment and both
 /// sides of each reflecting interface, then evaluates the travel time there.
@@ -453,8 +453,8 @@ pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
 ///
 /// # Both outputs are discarded by the only caller
 ///
-/// `gf_amp_tt` passes `p1`/`t1` at `:3313` and never reads them. The call is
-/// side-effect-free — `ttime` writes no common block — so it could be elided
+/// `green_function` passes `p1`/`t1` at `:3313` and never reads them. The call is
+/// side-effect-free — `travel_time` writes no common block — so it could be elided
 /// entirely. It is kept so the two sources stay line-comparable, and because
 /// removing it would be a behaviour-neutral change that still deserves to be
 /// recorded rather than assumed. See `PORTING_RULES.md` §7.
@@ -464,16 +464,16 @@ pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
 /// # Mostly inert under the production ray
 ///
 /// The interface clamp only runs where `it(i) == 1`, i.e. a reflection, which
-/// `trav` sets only when consecutive segments share a layer. The production ray
+/// `build_ray_path` sets only when consecutive segments share a layer. The production ray
 /// is strictly descending (`nh` running `ksrc` down to 2), so `it` is 0
 /// throughout and only the first clamp applies. The branch matters for the
 /// Moho-multiple ray shapes.
 ///
 /// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
 /// velocities are considered, for every segment.
-pub fn ttime(
+pub fn travel_time(
     st: &RayState,
-    vmod: &Vmod,
+    vmod: &VelocityModel,
     ir: usize,
     p0: f64,
     _t0: f64,
@@ -512,7 +512,7 @@ pub fn ttime(
     }
 
     let p = Complex64::from_real(p1);
-    let t = cagcon(st, vmod, p, ir, r);
+    let t = cagniard_time(st, vmod, p, ir, r);
     (p1, t.re)
 }
 
@@ -520,15 +520,15 @@ pub fn ttime(
 ///
 /// Two cases matter and they differ: a loop that runs to completion leaves
 /// `hi + 1`, while a loop whose range is empty leaves `lo` untouched.
-/// `gf_amp_tt` reads the loop variable after the loop (`kbot = j`), so getting
+/// `green_function` reads the loop variable after the loop (`kbot = j`), so getting
 /// this wrong silently changes the ray description.
 fn do_end(lo: usize, hi: usize) -> usize {
     if lo > hi { lo } else { hi + 1 }
 }
 
-/// Outputs of [`gf_amp_tt`].
+/// Outputs of [`green_function`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GfAmp {
+pub struct GreenFunction {
     /// Ray parameter.
     pub rp0: f32,
     /// Travel time, seconds.
@@ -539,10 +539,10 @@ pub struct GfAmp {
     pub qbar: f32,
 }
 
-/// `subroutine gf_amp_tt(...)` — `hb_high_ref.f:3174`.
+/// `subroutine green_function(...)` — `hb_high_ref.f:3174`.
 ///
 /// Builds the ray segment description for a given source depth and ray type,
-/// then drives [`trav`], [`pnot`], [`ttime`] and [`geom_terms`] to return ray
+/// then drives [`build_ray_path`], [`stationary_ray_parameter`], [`travel_time`] and [`geometric_spreading`] to return ray
 /// parameter, travel time, path length and path attenuation.
 ///
 /// Sole writer of `/rays/`. `md` is the wave mode (3 = SV, 4 = SH, 5 = P);
@@ -567,20 +567,20 @@ pub struct GfAmp {
 /// past the model. See `PORTING_RULES.md` §7.
 ///
 /// Note also that if `ksrc < krec` (a source shallower than layer 2) the upgoing
-/// segment loop produces zero segments and `nd` is 0, which `trav` is not
+/// segment loop produces zero segments and `nd` is 0, which `build_ray_path` is not
 /// written to handle.
 ///
 /// `hs_tol = 0.02` is an unsuffixed literal in an `implicit real*8` routine, so
 /// it carries only `f32` precision — see `PORTING_RULES.md` §1b.
-pub fn gf_amp_tt(
+pub fn green_function(
     st: &mut RayState,
-    vmod: &Vmod,
+    vmod: &VelocityModel,
     j0: usize,
     src_depth: f32,
     range: f32,
     itype: i32,
     md: i32,
-) -> GfAmp {
+) -> GreenFunction {
     let krec = 2usize;
     let ir = 1usize;
 
@@ -678,14 +678,14 @@ pub fn gf_amp_tt(
     }
     st.rays.nd[ir] = l as i32;
 
-    trav(st, vmod, ir, hs, hr);
-    let (p0, t0) = pnot(st, vmod, ir, rr);
+    build_ray_path(st, vmod, ir, hs, hr);
+    let (p0, t0) = stationary_ray_parameter(st, vmod, ir, rr);
     // Outputs discarded by the Fortran; the call is kept for comparability.
-    let (_p1, _t1) = ttime(st, vmod, ir, p0, t0, rr);
+    let (_p1, _t1) = travel_time(st, vmod, ir, p0, t0, rr);
 
-    let (rpd, qbar) = geom_terms(st, vmod, hs, p0, itype);
+    let (rpd, qbar) = geometric_spreading(st, vmod, hs, p0, itype);
 
-    GfAmp {
+    GreenFunction {
         rp0: p0 as f32,
         stime: t0 as f32,
         rpath: rpd as f32,

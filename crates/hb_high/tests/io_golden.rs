@@ -8,7 +8,7 @@
 //! Regenerate with `harness/kernels/gen_io_golden.sh`.
 
 use hb_high::input::{insert_air_layer, read_stations, read_stoch, read_velocity_model};
-use hb_high::state::VmodIn;
+use hb_high::state::VelocityModelInput;
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
@@ -112,7 +112,7 @@ fn check(golden: &str, stoch_name: &str) {
     // Velocity model, including the air-layer insertion.
     let vel_text =
         std::fs::read_to_string(root().join("harness/fixtures/velocity_model")).unwrap();
-    let mut v = VmodIn::new();
+    let mut v = VelocityModelInput::new();
     let j0 = read_velocity_model(&vel_text, &mut v, 999.9).unwrap();
     let (j0, nlskip) = insert_air_layer(&mut v, j0, -99);
 

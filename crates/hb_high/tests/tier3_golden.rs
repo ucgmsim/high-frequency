@@ -1,14 +1,20 @@
-//! Bit-identity gate for `pnot` and `ttime`.
+//! Bit-identity gate for `stationary_ray_parameter` and `travel_time`.
 //!
-//! The driver runs the real `trav` first and dumps the resulting `/travel/` and
+//! The driver runs the real `build_ray_path` first and dumps the resulting `/travel/` and
 //! `/coff/` state, so these tests load that state directly rather than
-//! re-deriving it. That keeps each kernel's gate independent — `trav` has its
+//! re-deriving it. That keeps each kernel's gate independent — `build_ray_path` has its
 //! own in `tier1_golden.rs`.
 //!
 //! Regenerate with `harness/kernels/gen_tier3_golden.sh`.
+//!
+//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
+//! written by the Fortran driver, which dumps one file per subprogram it exercises,
+//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
+//! them would mean editing the drivers and regenerating every golden, and the names
+//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::ray::{pnot, ttime};
-use hb_high::state::{RayState, Vmod};
+use hb_high::ray::{stationary_ray_parameter, travel_time};
+use hb_high::state::{RayState, VelocityModel};
 use std::path::PathBuf;
 
 struct Reader {
@@ -46,8 +52,8 @@ impl Reader {
     }
 
     /// `dump_state`: th, vp, vs (`f64`) then alp, als (`f32`), for `1..=ndeep`.
-    fn state(&mut self, ndeep: usize) -> (RayState, Vmod) {
-        let mut vmod = Vmod::new();
+    fn state(&mut self, ndeep: usize) -> (RayState, VelocityModel) {
+        let mut vmod = VelocityModel::new();
         for k in 1..=ndeep { vmod.thic[k] = self.f64(); }
         for k in 1..=ndeep { vmod.vp[k] = self.f64(); }
         for k in 1..=ndeep { vmod.vsh[k] = self.f64(); }
@@ -70,14 +76,14 @@ fn eq64(what: &str, got: f64, want: f64) {
 fn pnot_matches_fortran() {
     let mut r = Reader::open("pnot.bin");
     let mut n = 0;
-    // pnot appears to have two paths: return immediately at the branch cut when
+    // stationary_ray_parameter appears to have two paths: return immediately at the branch cut when
     // dtau/dp >= 0 there, or bisect down towards zero. Measured across this
     // corpus, the immediate path NEVER fires, and it looks structurally
     // unreachable rather than merely uncovered:
     //
     //   v is the largest velocity among layers with a POSITIVE multiplier, and
-    //   dtdp sums th(i)*mult(i)/eta(i) over every layer with a NONZERO
-    //   multiplier. So the layer that defines v is necessarily in dtdp's sum,
+    //   cagniard_time_derivative sums th(i)*mult(i)/eta(i) over every layer with a NONZERO
+    //   multiplier. So the layer that defines v is necessarily in cagniard_time_derivative's sum,
     //   and as p approaches 1/v that layer's eta approaches 0, making its term
     //   diverge. Hence a = r - p*sum is large and negative at the starting
     //   point, for any finite r.
@@ -96,8 +102,8 @@ fn pnot_matches_fortran() {
         let want_p0 = r.f64();
         let want_t0 = r.f64();
 
-        let (p0, t0) = pnot(&st, &vmod, 1, rr);
-        let tag = format!("pnot case {n} (ndeep={ndeep} r={rr})");
+        let (p0, t0) = stationary_ray_parameter(&st, &vmod, 1, rr);
+        let tag = format!("stationary_ray_parameter case {n} (ndeep={ndeep} r={rr})");
         // p0 pins the whole search: the eps growth loop, the 0.01 tolerance and
         // the 40-iteration cap all feed into it.
         eq64(&format!("{tag} p0"), p0, want_p0);
@@ -160,8 +166,8 @@ fn ttime_matches_fortran() {
         let want_t1 = r.f64();
 
         // t0 is passed and never read by the Fortran; 0.0 stands in.
-        let (p1, t1) = ttime(&st, &vmod, 1, p0, 0.0, rr);
-        let tag = format!("ttime case {n} (ndeep={ndeep} n={nseg})");
+        let (p1, t1) = travel_time(&st, &vmod, 1, p0, 0.0, rr);
+        let tag = format!("travel_time case {n} (ndeep={ndeep} n={nseg})");
         eq64(&format!("{tag} p1"), p1, want_p1);
         eq64(&format!("{tag} t1"), t1, want_t1);
         n += 1;

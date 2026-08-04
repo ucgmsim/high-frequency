@@ -5,12 +5,18 @@
 //! golden is a specification of the whole seam, not just of return values.
 //!
 //! Regenerate with `harness/kernels/gen_tier1_golden.sh`.
+//!
+//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
+//! written by the Fortran driver, which dumps one file per subprogram it exercises,
+//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
+//! them would mean editing the drivers and regenerating every golden, and the names
+//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
 use hb_high::fort::Array1;
-use hb_high::geom::even_dist2;
-use hb_high::ray::{geom_terms, trav};
-use hb_high::site::get_sitefacs;
-use hb_high::state::{RayState, Vmod};
+use hb_high::geom::subfault_geometry;
+use hb_high::ray::{geometric_spreading, build_ray_path};
+use hb_high::site::site_amplification_factors;
+use hb_high::state::{RayState, VelocityModel};
 use std::path::PathBuf;
 
 struct Reader {
@@ -64,10 +70,10 @@ impl Reader {
         );
     }
 
-    /// Read `th`, `vsh`, `rho` for layers `1..=j0` into a fresh `Vmod`,
+    /// Read `th`, `vsh`, `rho` for layers `1..=j0` into a fresh `VelocityModel`,
     /// matching the driver's `dump_vmod`.
-    fn vmod(&mut self, j0: usize) -> Vmod {
-        let mut v = Vmod::new();
+    fn vmod(&mut self, j0: usize) -> VelocityModel {
+        let mut v = VelocityModel::new();
         for k in 1..=j0 {
             v.thic[k] = self.f64();
         }
@@ -114,9 +120,9 @@ fn get_sitefacs_matches_fortran() {
         let want: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
 
         let mut an = Array1::<f32>::new(nfreq);
-        get_sitefacs(&vmod, j0, nfreq, &fn_, &mut an);
+        site_amplification_factors(&vmod, j0, nfreq, &fn_, &mut an);
         for k in 1..=nfreq {
-            eq32(&format!("get_sitefacs j0={j0} an[{k}]"), an[k], want[k - 1]);
+            eq32(&format!("site_amplification_factors j0={j0} an[{k}]"), an[k], want[k - 1]);
         }
         cases += 1;
     }
@@ -129,7 +135,7 @@ fn trav_matches_fortran() {
     let mut r = Reader::open("trav.bin");
 
     // ONE state across every case, mirroring the Fortran's persistent common
-    // block. This is deliberate: `trav` zeroes only alp(1:100) of 500, so
+    // block. This is deliberate: `build_ray_path` zeroes only alp(1:100) of 500, so
     // whether higher indices carry values from a previous ray is part of the
     // behaviour under test. A fresh state per case would not exercise it.
     let mut st = RayState::default();
@@ -159,9 +165,9 @@ fn trav_matches_fortran() {
         let w_alp: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
         let w_als: Vec<f32> = (0..j0).map(|_| r.f32()).collect();
 
-        trav(&mut st, &vmod, ir, hs, hr);
+        build_ray_path(&mut st, &vmod, ir, hs, hr);
 
-        let tag = format!("trav case {cases} (j0={j0} n={n} ndeg={ndeg})");
+        let tag = format!("build_ray_path case {cases} (j0={j0} n={n} ndeg={ndeg})");
         assert_eq!(st.love, w_love, "{tag} love");
         assert_eq!(st.travel.nup, w_nup, "{tag} nup");
         assert_eq!(st.travel.ndeep, w_ndeep, "{tag} ndeep");
@@ -190,7 +196,7 @@ fn geom_terms_matches_fortran() {
         let hs = r.f64();
         let p0 = r.f64();
 
-        let mut vmod = Vmod::new();
+        let mut vmod = VelocityModel::new();
         for k in 1..=j0 {
             vmod.thic[k] = r.f64();
         }
@@ -210,8 +216,8 @@ fn geom_terms_matches_fortran() {
         let w_rp = r.f64();
         let w_qb = r.f32();
 
-        let (rp, qb) = geom_terms(&st, &vmod, hs, p0, itype);
-        let tag = format!("geom_terms case {cases} (itype={itype} p0={p0})");
+        let (rp, qb) = geometric_spreading(&st, &vmod, hs, p0, itype);
+        let tag = format!("geometric_spreading case {cases} (itype={itype} p0={p0})");
         eq64(&format!("{tag} rp"), rp, w_rp);
         // The single-precision accumulation of qb is exactly what this pins.
         eq32(&format!("{tag} qb"), qb, w_qb);
@@ -232,14 +238,14 @@ fn even_dist2_matches_fortran() {
         let (azmq, dipangq, zm, astop) = (r.f32(), r.f32(), r.f32(), r.f32());
         let (dx, dy) = (r.f32(), r.f32());
 
-        let g = even_dist2(
+        let g = subfault_geometry(
             xlonq, ylatq, slon, slat, azmq, dipangq, zm, astop, dx, dy, nx, nw,
         );
 
         // Driver dump order: ((dst,rl,th,ph,zet), j=1,nw), i=1,nx)
         for i in 1..=nx {
             for j in 1..=nw {
-                let tag = format!("even_dist2 case {cases} ({i},{j})");
+                let tag = format!("subfault_geometry case {cases} ({i},{j})");
                 eq32(&format!("{tag} dst"), g.horiz_km[(i, j)], r.f32());
                 eq32(&format!("{tag} rl"), g.slant_km[(i, j)], r.f32());
                 eq32(&format!("{tag} th"), g.takeoff_rad[(i, j)], r.f32());

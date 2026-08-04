@@ -1,7 +1,7 @@
 //! Random number generation.
 //!
 //! `Pcg32` mirrors `reference/pcg32.f` line for line; the two are meant to be
-//! diffed side by side. `normal_random_number` and `ranu2` are transliterations
+//! diffed side by side. `normal_deviates` and `uniform_deviates` are transliterations
 //! of the Fortran routines at `hb_high_ref.f:4033` and `:2428`, unchanged from
 //! the original — they are algorithm, not generator.
 //!
@@ -69,29 +69,29 @@ impl Pcg32 {
         xorshifted.rotate_right(rot)
     }
 
-    /// Equivalent of `rand_numb(0)`. Returns `f32` in `[0, 1 - 2^-24]`.
+    /// Equivalent of `next_f32(0)`. Returns `f32` in `[0, 1 - 2^-24]`.
     ///
     /// Takes the top 24 bits and divides by `2^24`: the integer-to-`f32`
     /// conversion is lossless and the divisor is a power of two, so the result
     /// carries no rounding. Dividing a full 32-bit value by `2^32` would round,
     /// and values near 1 would round *up* to exactly 1.0, breaking the `[0,1)`
-    /// contract that `normal_random_number`'s zero-rejection loops assume.
-    pub fn rand_numb(&mut self) -> f32 {
+    /// contract that `normal_deviates`'s zero-rejection loops assume.
+    pub fn next_f32(&mut self) -> f32 {
         (self.next_u32() >> 8) as f32 / 16777216.0
     }
 }
 
-/// `subroutine normal_random_number(nr,acc)` — `hb_high_ref.f:4033`.
+/// `subroutine fill_normal_deviates(nr,acc)` — `hb_high_ref.f:4033`.
 ///
 /// Box-Muller pairs, then the whole vector is rescaled so that
 /// `sum(acc**2) == nr` exactly. That renormalisation is **not** cosmetic:
-/// `stoc_f`'s amplitude calibration is tuned against a unit-RMS sequence, so
+/// `stochastic_spectrum`'s amplitude calibration is tuned against a unit-RMS sequence, so
 /// substituting a plain N(0,1) generator changes the output level.
 ///
 /// Draw accounting, which the shared stream depends on: `2*ceil(nr/2)` draws
 /// plus one extra per rejected zero. When `nr` is odd the sine partner of the
 /// final pair is generated and discarded.
-pub fn normal_random_number(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
+pub fn fill_normal_deviates(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
     // x1 and x2 persist across iterations: the odd-numbered draw computes the
     // pair and returns the cosine component, the even-numbered one returns the
     // sine component from the *same* pair. In the Fortran they are ordinary
@@ -103,13 +103,13 @@ pub fn normal_random_number(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
 
     for n in 1..=nr {
         let w = if j == 1 {
-            x1 = rng.rand_numb();
+            x1 = rng.next_f32();
             while x1 == 0.0 {
-                x1 = rng.rand_numb();
+                x1 = rng.next_f32();
             }
-            x2 = rng.rand_numb();
+            x2 = rng.next_f32();
             while x2 == 0.0 {
-                x2 = rng.rand_numb();
+                x2 = rng.next_f32();
             }
             x2 = 6.2831853 * x2;
             x1 = -x1.ln();
@@ -136,9 +136,9 @@ pub fn normal_random_number(rng: &mut Pcg32, nr: usize, acc: &mut Array1<f32>) {
 }
 
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
-pub fn ranu2(rng: &mut Pcg32, nrr: usize, rn: &mut Array1<f32>) {
+pub fn fill_uniform_deviates(rng: &mut Pcg32, nrr: usize, rn: &mut Array1<f32>) {
     for i in 1..=nrr {
-        rn[i] = rng.rand_numb();
+        rn[i] = rng.next_f32();
     }
 }
 
@@ -160,8 +160,8 @@ mod tests {
     fn rand_numb_stays_in_unit_interval() {
         let (mut g, _) = Pcg32::seed(123456789);
         for _ in 0..100_000 {
-            let u = g.rand_numb();
-            assert!((0.0..1.0).contains(&u), "rand_numb returned {u}");
+            let u = g.next_f32();
+            assert!((0.0..1.0).contains(&u), "next_f32 returned {u}");
         }
     }
 
@@ -170,7 +170,7 @@ mod tests {
         let (mut g, _) = Pcg32::seed(42);
         for nr in [1usize, 2, 3, 15, 16, 1000] {
             let mut a = Array1::<f32>::new(nr);
-            normal_random_number(&mut g, nr, &mut a);
+            fill_normal_deviates(&mut g, nr, &mut a);
             let ss: f32 = (1..=nr).map(|i| a[i] * a[i]).sum();
             // Renormalised so sum of squares == nr, to f32 rounding.
             assert!((ss / nr as f32 - 1.0).abs() < 1e-4,
@@ -186,11 +186,11 @@ mod tests {
         for nr in [1usize, 2, 3, 4, 7, 8] {
             let (mut a, _) = Pcg32::seed(7);
             let mut acc = Array1::<f32>::new(nr);
-            normal_random_number(&mut a, nr, &mut acc);
+            fill_normal_deviates(&mut a, nr, &mut acc);
 
             let (mut b, _) = Pcg32::seed(7);
             for _ in 0..2 * nr.div_ceil(2) {
-                b.rand_numb();
+                b.next_f32();
             }
             assert_eq!(a.next_u32(), b.next_u32(),
                        "nr={nr}: stream position diverged");

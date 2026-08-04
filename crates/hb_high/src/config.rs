@@ -58,7 +58,7 @@ pub mod defaults {
 
 /// One entry of the deck's `rayset`.
 ///
-/// The integer is kept because `gf_amp_tt` needs it, but the two things the program
+/// The integer is kept because `green_function` needs it, but the two things the program
 /// actually asks about it are exposed as methods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RayType(pub i32);
@@ -93,7 +93,7 @@ impl RayType {
     }
 
     /// The `itype` to trace with. A straight ray still gets traced, as type 1,
-    /// because the Fortran calls `gf_amp_tt` before it checks for type 0 and only
+    /// because the Fortran calls `green_function` before it checks for type 0 and only
     /// afterwards overwrites the results.
     pub fn trace_type(self) -> i32 {
         match self.kind() {
