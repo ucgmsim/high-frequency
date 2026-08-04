@@ -6,10 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic high-frequency seismogram generator"
 
-# No dependencies by design. The port must not pull in FFTW or any C library,
-# and no crate may be allowed to substitute its own float arithmetic for the
-# Fortran's. Complex arithmetic is hand-written in fort.rs for the same reason.
+# No RUNTIME dependencies by design. The port must not pull in FFTW or any C
+# library, and no crate may be allowed to substitute its own float arithmetic for
+# the Fortran's. Complex arithmetic is hand-written in fort.rs for the same
+# reason.
+#
+# dev-dependencies are a different matter: they do not enter the dependency graph
+# of anything that links this crate, so criterion cannot affect the numerics.
 [dependencies]
+
+[dev-dependencies]
+# Pinned to versions already in ~/.cargo/registry -- the network is blocked, so
+# resolution must succeed offline.
+criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bin]]
 name = "hb_high"
@@ -18,3 +27,11 @@ path = "src/main.rs"
 [lib]
 name = "hb_high"
 path = "src/lib.rs"
+
+[[bench]]
+name = "kernels"
+harness = false
+
+[[bench]]
+name = "whole"
+harness = false

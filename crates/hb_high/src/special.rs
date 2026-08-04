@@ -118,11 +118,20 @@ mod tests {
     #[test]
     fn gamma_of_small_integers() {
         // Gamma(n) = (n-1)!
-        for (n, want) in [(1.0, 1.0), (2.0, 1.0), (3.0, 2.0), (4.0, 6.0),
-                          (5.0, 24.0), (6.0, 120.0), (10.0, 362880.0)] {
+        for (n, want) in [
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (3.0, 2.0),
+            (4.0, 6.0),
+            (5.0, 24.0),
+            (6.0, 120.0),
+            (10.0, 362880.0),
+        ] {
             let got = dgamm(n);
-            assert!((got / want - 1.0).abs() < 1e-12,
-                    "dgamm({n}) = {got}, want {want}");
+            assert!(
+                (got / want - 1.0).abs() < 1e-12,
+                "dgamm({n}) = {got}, want {want}"
+            );
         }
     }
 
@@ -131,7 +140,10 @@ mod tests {
         // Gamma(1/2) = sqrt(pi)
         let got = dgamm(0.5);
         let want = std::f64::consts::PI.sqrt();
-        assert!((got / want - 1.0).abs() < 1e-12, "dgamm(0.5) = {got}, want {want}");
+        assert!(
+            (got / want - 1.0).abs() < 1e-12,
+            "dgamm(0.5) = {got}, want {want}"
+        );
     }
 
     #[test]
