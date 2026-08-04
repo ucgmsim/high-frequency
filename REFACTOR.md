@@ -199,8 +199,9 @@ but a guard documents *why* the branch is gone.
 Extract along the seams the Fortran already has, and which are currently marked
 only by comments:
 
-- config parsing
-- path-duration table construction
+- config parsing — **done** (`c29e40b`: `Deck` + `read_deck`)
+- path-duration table construction — **done** (`PathDuration`)
+- the rupture-velocity taper — **done** (`RuptureVelocity::factor`)
 - per-station model setup
 - the **window pass** (`j` outer, `i` inner)
 - the **subfault pass** (`i` outer, `j` inner — the opposite order, and it is
@@ -210,6 +211,71 @@ only by comments:
 That opposite-order pair is exactly the sort of thing that should be a named
 function with the constraint in its doc comment, not a comment 200 lines into a
 loop nest.
+
+Note that this step *grows* the file: `c29e40b` took `run()` from 730 to 597 lines
+while `main.rs` went 865 → 963, because structs and their doc comments cost more
+than the inlining saved. That is the correct trade here — the reduction is Stage 2's
+job, and `Deck` is the scaffold §1.1 needs.
+
+### 1.3b Rustify the control flow — iterators, enums, and grouped state
+
+Still Stage 1: **tier A gates this, and that is precisely what makes it safe to
+attempt.** Converting a Fortran loop to an iterator chain is exactly the kind of
+change where a subtle mistake is invisible to inspection and instantly visible to
+`cmp`.
+
+**The one hard constraint: preserve accumulation order.** Every float reduction in
+this program is a left-to-right fold, and `f32` addition is not associative. So:
+
+- `arr.as_slice().iter().sum::<f32>()` is safe — Rust's `Sum for f32` folds
+  left-to-right, matching `do i = 1, n; s = s + x(i)`.
+- `.fold(0.0, |a, b| a + b)` is safe for the same reason.
+- Anything that reassociates is **not**: `rayon`'s parallel reductions, tree/pairwise
+  summation, `chunks().map(sum).sum()`, or reordering a loop to iterate a different
+  axis first. If the gate goes red on an iterator conversion, suspect this before
+  suspecting an off-by-one.
+
+Worth doing, in rough order of payoff:
+
+- **The subfault grid as two named iterators.** The window pass runs `j` outer /
+  `i` inner and the subfault pass runs `i` outer / `j` inner, and that difference is
+  load-bearing because `irandcnt` is consumed in the second order. Today it is a
+  comment. Give `Segment` two iterator methods — `by_row()` and `by_column()`,
+  yielding `(i, j)` — and the constraint becomes a type-level fact with the
+  explanation attached to the method that embodies it.
+- **Enums for the magic integers.** `irtype` is dispatched as
+  `if irtype[ir] == 0 { … } else if irtype[ir] % 2 == 1 { … }`, meaning
+  "straight-ray approximation" / "upgoing" / "downgoing". That is an enum with three
+  variants and a method, not arithmetic on an `i32`. Same for `ipdur_model`
+  (already half-done via `PathDuration`) and `ispar_adjust`.
+- **Group the per-segment geometry.** `rlsu`, `phsu`, `thsu`, `dst`, `zet` are
+  allocated together, filled together by `even_dist2`, and indexed together at
+  `(i, j)`. One `SubfaultGeometry` struct replaces five parallel arrays and five
+  arguments.
+- **Group the per-component state.** `cs` and `stdd` are already `[_; 3]`; the three
+  component blocks that follow are near-identical apart from which radiation routine
+  they call. Note they are *not* uniform — 090/000 call `radfrq_lin` and draw from
+  the live RNG, `ver` calls `radv_lin` and uses the pre-drawn `rna`/`rnb` (this
+  asymmetry is what the Tier D finding turns on). A `match` over a component enum
+  models that honestly; a trait would have to smuggle the difference through an
+  associated type and would read worse. **Prefer the enum.**
+- **`Iterator` over layers for the depth lookup.** The
+  `for kk in 1..=j0 { if zdep <= depth0[kk] { k = kk; break } }` pattern appears
+  three times and is `position()`. Careful: two of the three fall through with
+  `k = j0 + 1` and the Fortran then *indexes* that, so the `None` case is
+  load-bearing, not an error.
+
+Where traits genuinely earn their place is narrower than it first looks. This is
+one concrete program with one configuration, not a framework; most candidate traits
+would have exactly one implementor. Reach for them only if Stage 2's library swaps
+want to abstract over a transform (e.g. so `realfft` and the vendored radix-2 can be
+compared side by side during the migration) — that is a real use, and a temporary
+one.
+
+**Ordering caveat.** Deep rustification wants plain 0-based slices, which is §2.3 in
+Stage 2. Read-only reductions can go through `Array1::as_slice().iter()` today, so
+do that subset now; leave anything that wants `zip` over two arrays or `chunks_mut`
+until after §2.3, and expect a second, smaller 1.3b pass then.
 
 ### 1.4 Naming
 
@@ -432,8 +498,11 @@ Stage 1, each with `run_parity.sh` green in both profiles:
 1. Delete dead items (1.2). Smallest possible first commit, proves the gate works.
    — **done**, `d0e8720`, 56 lines, 22/22 in both profiles.
 2. Split `main.rs` (1.3), no renaming yet — pure code motion, easy to review.
-3. Naming pass (1.4).
-4. `HfConfig` + `simulate()` + deck shim (1.1). Largest Stage 1 commit; consider
+   — **in progress**: `c29e40b` did the deck, path-duration table and rupture
+   velocity taper; the station loop and the two subfault passes remain.
+3. Rustify control flow (1.3b) — iterators and enums, watching accumulation order.
+4. Naming pass (1.4). Cheapest after 1.3b, since 1.3b deletes some of the names.
+5. `HfConfig` + `simulate()` + deck shim (1.1). Largest Stage 1 commit; consider
    splitting into "add typed config alongside deck" then "move the binary onto it".
 
 (`special.rs` was originally item 2 here and has moved to Stage 2 — see §1.5.)
@@ -444,15 +513,16 @@ changed nothing.
 
 Stage 2, each with Tier B then C:
 
-5. `special.rs` → real gamma (2.2b). Smallest Stage 2 change, so it is the right
+6. `special.rs` → real gamma (2.2b). Smallest Stage 2 change, so it is the right
    one to exercise Tier B on first — a near-invisible delta is easier to read than
    a large one.
-6. FFT (2.1) — expect a real Tier B delta; verify it is the one you intended.
-7. `num-complex` (2.2).
-8. `powf` cleanup (2.4).
-9. `delaz5` (2.5).
-10. The two science decisions (2.6), separately, each with its Tier C delta recorded.
-11. `Array1`/`Array2` (2.3), module by module, last.
+7. FFT (2.1) — expect a real Tier B delta; verify it is the one you intended.
+8. `num-complex` (2.2).
+9. `powf` cleanup (2.4).
+10. `delaz5` (2.5).
+11. The two science decisions (2.6), separately, each with its Tier C delta recorded.
+12. `Array1`/`Array2` (2.3), module by module, last.
+13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
 Re-run Tier D at the end of Stage 2 as a release gate, comparing Rust-before vs
 Rust-after rather than against production.
