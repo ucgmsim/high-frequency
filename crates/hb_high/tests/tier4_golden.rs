@@ -16,6 +16,7 @@ use hb_high::stoc::stochastic_spectrum;
 
 mod common;
 use common::*;
+use hb_high::state::WaveMode;
 
 #[test]
 fn stoc_f_matches_fortran() {
@@ -100,7 +101,7 @@ fn gf_amp_tt_matches_fortran() {
         let (w_rp0, w_stime, w_rpath, w_qbar) = (r.f32(), r.f32(), r.f32(), r.f32());
 
         let mut st = RayState::default();
-        let g = green_function(&mut st, &vmod, j0, src_depth, range, itype, md);
+        let g = green_function(&mut st, &vmod, j0, src_depth, range, itype, WaveMode::from_fortran(md));
 
         let tag = format!("green_function case {cases} (itype={itype} md={md} \
                            depth={src_depth} range={range})");
@@ -110,7 +111,7 @@ fn gf_amp_tt_matches_fortran() {
         for k in 0..want_nd {
             // 0-based layer index against the golden's 1-based layer number.
             assert_eq!(st.rays.nh[k] + 1, want_nh[k], "{tag} nh[{k}]");
-            assert_eq!(st.rays.nm[k], want_nm[k], "{tag} nm[{k}]");
+            assert_eq!(st.rays.nm[k].as_fortran(), want_nm[k], "{tag} nm[{k}]");
         }
         assert_eq!(st.travel.ndeep + 1, want_ndeep, "{tag} ndeep");
         assert_eq!(st.love, want_love, "{tag} love");

@@ -190,6 +190,156 @@ impl std::ops::IndexMut<usize> for VelocityModelInput {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The three-valued and two-valued quantities the Fortran spells as integers
+// ---------------------------------------------------------------------------
+
+/// Wave mode of a ray segment — the Fortran's `nm`.
+///
+/// Never added, subtracted, ordered or used as a magnitude; only ever compared against
+/// the literals 3, 4 and 5 at six sites. The `md` in every golden driver takes exactly
+/// these three values, so the enum is total over the test corpus as well as production
+/// (which is hardwired to SH).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveMode {
+    /// `3` — vertically polarised shear.
+    Sv,
+    /// `4` — horizontally polarised shear. What production runs.
+    Sh,
+    /// `5` — compressional.
+    P,
+}
+
+impl WaveMode {
+    /// True for `Sv` and `Sh` — the test the Fortran writes out as
+    /// `nm == 3 .or. nm == 4` in four separate places.
+    #[inline]
+    pub fn is_shear(self) -> bool {
+        matches!(self, Self::Sv | Self::Sh)
+    }
+
+    /// Decode a golden fixture's stored mode.
+    pub fn from_fortran(v: i32) -> Self {
+        match v {
+            3 => Self::Sv,
+            4 => Self::Sh,
+            5 => Self::P,
+            _ => panic!("wave mode {v} is not one of 3 (SV), 4 (SH) or 5 (P)"),
+        }
+    }
+
+    /// Re-encode for comparison against a golden fixture.
+    pub fn as_fortran(self) -> i32 {
+        match self {
+            Self::Sv => 3,
+            Self::Sh => 4,
+            Self::P => 5,
+        }
+    }
+}
+
+impl Default for WaveMode {
+    /// Arbitrary, and unobservable. `Rays::nm` is allocated at `NLAYMAX` but every read
+    /// is inside `0..nd`, which `green_function` always writes in full, so no consumer
+    /// can reach an unwritten slot. `Sh` is chosen because it is what production writes.
+    fn default() -> Self {
+        Self::Sh
+    }
+}
+
+/// What happens at the interface below a ray segment — the Fortran's `it`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Interaction {
+    /// `0` — the ray passes into the next layer. No second velocity clamp in
+    /// `travel_time`.
+    #[default]
+    Transmission,
+    /// `1` — the ray reflects, so `travel_time` must also clamp against the layer on the
+    /// far side of the interface.
+    Reflection,
+    /// `2` — a single-segment direct ray. Written by `build_ray_path`, read by nothing
+    /// live; the tier-1 golden compares it.
+    Direct,
+}
+
+impl Interaction {
+    pub fn from_fortran(v: i32) -> Self {
+        match v {
+            0 => Self::Transmission,
+            1 => Self::Reflection,
+            2 => Self::Direct,
+            _ => panic!("interface type {v} is not one of 0, 1 or 2"),
+        }
+    }
+
+    pub fn as_fortran(self) -> i32 {
+        match self {
+            Self::Transmission => 0,
+            Self::Reflection => 1,
+            Self::Direct => 2,
+        }
+    }
+}
+
+/// Direction a ray segment travels — the Fortran's `nup` and `nup1`, `+1` and `-1`.
+///
+/// Nothing about these is numeric. The Fortran derives the first from
+/// `(-1)**nl` — integer exponentiation used to extract a parity bit — and negates it to
+/// mean "flip", not "negate a quantity".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Direction {
+    /// `+1`.
+    #[default]
+    Up,
+    /// `-1`.
+    Down,
+}
+
+impl Direction {
+    /// The Fortran's `(-1)**nl`: an even count gives `+1` (up), an odd count `-1`.
+    #[inline]
+    pub fn from_parity(crossings: i32) -> Self {
+        if crossings % 2 == 0 { Self::Up } else { Self::Down }
+    }
+
+    #[inline]
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
+
+    /// The layer on the other side of the interface below a segment in `layer`.
+    ///
+    /// A layer STEP, so it is the same +-1 in either index base. Upgoing from layer 0
+    /// would underflow, as the Fortran read `vs(0)` there; unreachable, and loud if it
+    /// ever is not.
+    #[inline]
+    pub fn step_from(self, layer: usize) -> usize {
+        match self {
+            Self::Up => layer - 1,
+            Self::Down => layer + 1,
+        }
+    }
+
+    pub fn from_fortran(v: i32) -> Self {
+        match v {
+            1 => Self::Up,
+            -1 => Self::Down,
+            _ => panic!("segment direction {v} is not +1 or -1"),
+        }
+    }
+
+    pub fn as_fortran(self) -> i32 {
+        match self {
+            Self::Up => 1,
+            Self::Down => -1,
+        }
+    }
+}
+
 /// `common /rays/` — the ray segment description. Written only by `green_function`.
 ///
 /// The Fortran declares `nh(1,nlaymax)` and `nm(1,nlaymax)` with a degenerate
@@ -200,8 +350,8 @@ impl std::ops::IndexMut<usize> for VelocityModelInput {
 pub struct Rays {
     /// Layer index of each ray segment. **Indexed 0-based by segment**, `0..nd`.
     pub nh: Vec<i32>,
-    /// Wave mode of each segment: 3 = SV, 4 = SH, 5 = P. 0-based by segment.
-    pub nm: Vec<i32>,
+    /// Wave mode of each segment. 0-based by segment.
+    pub nm: Vec<WaveMode>,
     /// Ray degeneracy; negative means the ray is upgoing.
     ///
     /// A scalar, not an array. The Fortran declares `ndeg(1)` and `nd(1)` -- indexed by
@@ -223,7 +373,7 @@ impl Rays {
     pub fn new() -> Self {
         Self {
             nh: vec![0; NLAYMAX],
-            nm: vec![0; NLAYMAX],
+            nm: vec![WaveMode::default(); NLAYMAX],
             ndeg: 0,
             nd: 0,
         }
@@ -248,8 +398,9 @@ pub struct Travel {
     /// Deepest layer the ray penetrates, as a **0-based layer index**. Read as `nd`/`ndp`
     /// by consumers, which iterate `0..=ndeep`.
     pub ndeep: i32,
-    /// Written by `build_ray_path`; read by nothing.
-    pub nup: i32,
+    /// Direction the ray leaves the source. Written by `build_ray_path`; read by nothing
+    /// live, but the tier-1 golden compares it.
+    pub nup: Direction,
 }
 
 impl Default for Travel {
@@ -260,7 +411,12 @@ impl Default for Travel {
 
 impl Travel {
     pub fn new() -> Self {
-        Self { alp: vec![0.0; NLAYMAX], als: vec![0.0; NLAYMAX], ndeep: 0, nup: 0 }
+        Self {
+            alp: vec![0.0; NLAYMAX],
+            als: vec![0.0; NLAYMAX],
+            ndeep: 0,
+            nup: Direction::default(),
+        }
     }
 }
 
@@ -269,10 +425,10 @@ impl Travel {
 /// Do not conflate with the dead `gencof`'s dummy argument, also named `it`.
 #[derive(Clone, Debug)]
 pub struct Coefficients {
-    /// 0 = transmission, 1 = reflection, 2 = direct ray. 0-based by segment.
-    pub it: Vec<i32>,
-    /// Segment direction: +1 up, -1 down. 0-based by segment.
-    pub nup1: Vec<i32>,
+    /// What happens at the interface below each segment. 0-based by segment.
+    pub it: Vec<Interaction>,
+    /// Direction of each segment. 0-based by segment.
+    pub nup1: Vec<Direction>,
 }
 
 impl Default for Coefficients {
@@ -283,7 +439,10 @@ impl Default for Coefficients {
 
 impl Coefficients {
     pub fn new() -> Self {
-        Self { it: vec![0; NLAYMAX], nup1: vec![0; NLAYMAX] }
+        Self {
+            it: vec![Interaction::default(); NLAYMAX],
+            nup1: vec![Direction::default(); NLAYMAX],
+        }
     }
 }
 

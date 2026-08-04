@@ -31,6 +31,7 @@ use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::{site_amplification_factors, apply_site_amplification};
 use hb_high::state::{params, RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
+use hb_high::state::WaveMode;
 
 /// Transform lengths the program actually produces. `np2` is built by doubling
 /// from 2 until it exceeds `2*tmax/dt`, so it is always a power of two; 65536 is
@@ -75,7 +76,7 @@ fn ray_state(ksrc: usize) -> RayState {
     let mut j = ksrc as i64;
     while j >= 2 {
         st.rays.nh[l] = j as i32;
-        st.rays.nm[l] = 4;
+        st.rays.nm[l] = WaveMode::Sh;
         l += 1;
         j -= 1;
     }
@@ -302,7 +303,7 @@ fn bench_ray(c: &mut Criterion) {
             RayState::default,
             |st| {
                 black_box(green_function(
-                    st, &v, 35, black_box(28.0), black_box(60.0), 1, 4,
+                    st, &v, 35, black_box(28.0), black_box(60.0), 1, WaveMode::Sh,
                 ))
             },
             criterion::BatchSize::SmallInput,

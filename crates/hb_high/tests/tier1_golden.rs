@@ -19,6 +19,7 @@ use hb_high::state::{RayState, VelocityModel};
 
 mod common;
 use common::*;
+use hb_high::state::WaveMode;
 
 /// `dump_vmod`: `thickness_km`, `vsh_km_s`, `density_g_cm3` as `f64` for `j0` layers.
 ///
@@ -93,7 +94,7 @@ fn trav_matches_fortran() {
             st.rays.nh[k] = r.i32() - 1;
         }
         for k in 0..n {
-            st.rays.nm[k] = r.i32();
+            st.rays.nm[k] = WaveMode::from_fortran(r.i32());
         }
         st.rays.nd = n as i32;
         st.rays.ndeg = ndeg;
@@ -108,12 +109,12 @@ fn trav_matches_fortran() {
 
         let tag = format!("build_ray_path case {cases} (j0={j0} n={n} ndeg={ndeg})");
         assert_eq!(st.love, w_love, "{tag} love");
-        assert_eq!(st.travel.nup, w_nup, "{tag} nup");
+        assert_eq!(st.travel.nup.as_fortran(), w_nup, "{tag} nup");
         // A 0-based layer index here against a 1-based layer number in the golden.
         assert_eq!(st.travel.ndeep + 1, w_ndeep, "{tag} ndeep");
         for k in 0..n {
-            assert_eq!(st.coff.it[k], w_it[k], "{tag} it[{k}]");
-            assert_eq!(st.coff.nup1[k], w_nup1[k], "{tag} nup1[{k}]");
+            assert_eq!(st.coff.it[k].as_fortran(), w_it[k], "{tag} it[{k}]");
+            assert_eq!(st.coff.nup1[k].as_fortran(), w_nup1[k], "{tag} nup1[{k}]");
         }
         for k in 0..j0 {
             eq32(&format!("{tag} alp[{k}]"), st.travel.alp[k], w_alp[k]);

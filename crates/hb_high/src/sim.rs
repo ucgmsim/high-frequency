@@ -36,7 +36,7 @@ use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectru
 use crate::ray::green_function;
 use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use crate::site::{site_amplification_factors, apply_site_amplification};
-use crate::state::{params, RayState, VelocityModel, VelocityModelInput};
+use crate::state::{params, RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::stochastic_spectrum;
 
 /// `mm` and `mmv` as the **main program** sees them.
@@ -47,13 +47,65 @@ use crate::stoc::stochastic_spectrum;
 /// `fill_normal_deviates(mmv, ...)` draws exactly this many deviates.
 const MMV: usize = params::MMV;
 
-/// Index of the vertical component in the three-element per-component arrays.
+/// The three output components, in the order the Fortran computes them.
 ///
-/// The three are ordered 090, 000, vertical throughout, and that order is load-bearing:
-/// the two horizontals draw 5,000 deviates each from the shared stream and the vertical
-/// draws none. A `Component` enum is the right home for this — §2.8 batch 5 — but the
-/// magic `3` it replaces was worth removing on its own.
-const VERTICAL: usize = 2;
+/// **The order is load-bearing and this enum does not make it safe to change.** The two
+/// horizontals each draw 5,000 deviates from the shared stream inside
+/// `horizontal_radiation_spectrum`; the vertical draws none, reading the uniforms filled
+/// once before the station loop. Reordering these three, or iterating them in anything
+/// that does not preserve declaration order, moves every waveform. `REFACTOR.md`'s Tier D
+/// finding turns on exactly that asymmetry.
+///
+/// `REFACTOR.md` §1.3b called for this and argued against the alternative: a trait would
+/// have to smuggle the horizontal/vertical difference through an associated type and
+/// would read worse. **Prefer the enum**, and match on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Component {
+    /// `090` — east, the Fortran's first.
+    E090,
+    /// `000` — north.
+    N000,
+    /// The vertical. Capped at 15 Hz where the horizontals are not.
+    Vertical,
+}
+
+impl Component {
+    /// Declaration order, which is stream order. Iterate this, never a collection built
+    /// some other way.
+    const ALL: [Component; 3] = [Self::E090, Self::N000, Self::Vertical];
+
+    /// Index into the three-element per-component arrays.
+    #[inline]
+    fn index(self) -> usize {
+        match self {
+            Self::E090 => 0,
+            Self::N000 => 1,
+            Self::Vertical => 2,
+        }
+    }
+
+    /// Horizontal projection angle, in degrees. `None` for the vertical, which needs no
+    /// projection — and that `None` is what selects the other radiation routine.
+    #[inline]
+    fn azimuth_offset_deg(self) -> Option<f32> {
+        match self {
+            Self::E090 => Some(-90.0),
+            Self::N000 => Some(0.0),
+            Self::Vertical => None,
+        }
+    }
+
+    /// `fmax`, capped at 15 Hz for the vertical only. The Fortran writes this as
+    /// `if (fmx1 > 15.0 .and. kf == 3) fmx1 = 15.0`, where `kf` is simultaneously a
+    /// 1-based array index and a behaviour flag.
+    #[inline]
+    fn capped_fmax(self, fmax_hz: f32) -> f32 {
+        match self {
+            Self::Vertical => fmax_hz.min(15.0),
+            _ => fmax_hz,
+        }
+    }
+}
 
 /// One station's synthetic record.
 pub struct Simulation {
@@ -408,7 +460,6 @@ pub fn simulate(
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
             let fce = fc_coeff * rvf * shear_velocity_km_s / dlm / pi;
 
-            let mode = 4; // hardwired SH
             for &ray_type in &config.rayset {
                 let kind = ray_type.kind();
 
@@ -417,7 +468,7 @@ pub fn simulate(
                 // and type 0 borrows type 1's tracing to do it.
                 let g = green_function(
                     &mut ray, &vmod, j0, ray_geometry.depth_km, ray_geometry.horiz_km,
-                    ray_type.trace_type(), mode,
+                    ray_type.trace_type(), WaveMode::Sh,
                 );
                 let mut stime = g.stime;
                 let mut rpath = g.rpath;
@@ -434,9 +485,8 @@ pub fn simulate(
                 // 0-based, so the vertical is component 2 rather than the Fortran's
                 // `kf == 3`. The three calls stay in this order: each draws `np2` normal
                 // deviates from the shared stream.
-                for (component, spec) in spectrum.iter_mut().enumerate() {
-                    // Only the vertical is capped at 15 Hz.
-                    let fmx1 = if component == VERTICAL { fmx.min(15.0) } else { fmx };
+                for (component, spec) in Component::ALL.into_iter().zip(spectrum.iter_mut()) {
+                    let fmx1 = component.capped_fmax(fmx);
                     stochastic_spectrum(
                         &mut rng, np2, rpath, subfault_window_s, tw_eps, tw_eta,
                         shear_velocity_km_s, density_g_cm3, dt,
@@ -451,9 +501,9 @@ pub fn simulate(
                         &vmod, ksrc, nsfac, &siteamp_log_freq,
                         &mut siteamp_factors,
                     );
-                    for component in &mut spectrum {
+                    for spec in &mut spectrum {
                         apply_site_amplification(
-                            component, &freq, nsfac,
+                            spec, &freq, nsfac,
                             &siteamp_log_freq, &siteamp_factors,
                         );
                     }
@@ -474,26 +524,28 @@ pub fn simulate(
                 };
                 let pa = ray_geometry.azimuth_rad;
 
-                let component_rad = -90.0 * deg_to_rad;
-                horizontal_radiation_spectrum(
-                        &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
-                        nfold, component_rad, nr, &mut radiation,
+                // Three near-identical blocks collapse to one loop over the enum. The
+                // ONLY difference between them is which radiation routine runs, and the
+                // `Option` from `azimuth_offset_deg` is what carries it: `Some` means a
+                // horizontal, which draws 5,000 deviates; `None` means the vertical,
+                // which draws none. Iterating `Component::ALL` preserves the order those
+                // draws happen in, which is the whole constraint.
+                for component in Component::ALL {
+                    match component.azimuth_offset_deg() {
+                        Some(offset_deg) => horizontal_radiation_spectrum(
+                            &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
+                            nfold, offset_deg * deg_to_rad, nr, &mut radiation,
+                        ),
+                        None => vertical_radiation_spectrum(
+                            strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold,
+                            &radv_rand_a, &radv_rand_b, nr, &mut radiation,
+                        ),
+                    };
+                    let k = component.index();
+                    apply_radiation_and_invert(
+                        nfold, mfold, &mut spectrum[k], &mut subfault_acc[k], &radiation,
                     );
-                apply_radiation_and_invert(nfold, mfold, &mut spectrum[0], &mut subfault_acc[0], &radiation);
-
-                let component_rad = 0.0f32;
-                horizontal_radiation_spectrum(
-                        &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
-                        nfold, component_rad, nr, &mut radiation,
-                    );
-                apply_radiation_and_invert(nfold, mfold, &mut spectrum[1], &mut subfault_acc[1], &radiation);
-
-                vertical_radiation_spectrum(
-                        strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold,
-                        &radv_rand_a, &radv_rand_b, nr,
-                        &mut radiation,
-                    );
-                apply_radiation_and_invert(nfold, mfold, &mut spectrum[2], &mut subfault_acc[2], &radiation);
+                }
 
                 // Rupture time at this subfault.
                 let mut ratim;

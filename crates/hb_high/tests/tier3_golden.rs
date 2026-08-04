@@ -17,6 +17,7 @@ use hb_high::ray::{stationary_ray_parameter, travel_time};
 
 mod common;
 use common::*;
+use hb_high::state::{Direction, Interaction, WaveMode};
 
 #[test]
 fn pnot_matches_fortran() {
@@ -103,9 +104,9 @@ fn ttime_matches_fortran() {
         let (mut st, vmod) = r.ray_seam_state(ndeep);
 
         for k in 0..nseg { st.rays.nh[k] = r.i32() - 1; }
-        for k in 0..nseg { st.rays.nm[k] = r.i32(); }
-        for k in 0..nseg { st.coff.it[k] = r.i32(); }
-        for k in 0..nseg { st.coff.nup1[k] = r.i32(); }
+        for k in 0..nseg { st.rays.nm[k] = WaveMode::from_fortran(r.i32()); }
+        for k in 0..nseg { st.coff.it[k] = Interaction::from_fortran(r.i32()); }
+        for k in 0..nseg { st.coff.nup1[k] = Direction::from_fortran(r.i32()); }
         st.rays.nd = nseg as i32;
 
         let want_p1 = r.f64();

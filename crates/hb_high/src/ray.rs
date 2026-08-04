@@ -2,7 +2,7 @@
 //! tiers 2-4.
 
 use crate::fort::Complex64;
-use crate::state::{RayState, VelocityModel};
+use crate::state::{Direction, Interaction, RayState, VelocityModel, WaveMode};
 
 /// `function vertical_slowness(ray_parameter,velocity_km_s)` — `hb_high_ref.f:3349`. Complex vertical slowness
 /// `eta = sqrt(1/velocity_km_s^2 - ray_parameter^2)`, with an explicit branch-cut choice.
@@ -76,10 +76,8 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
 /// See `PORTING_RULES.md` §7.
 pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_km: f64, receiver_depth_km: f64) {
 
-    state.love = 1;
-    if state.rays.nm[0] == 4 {
-        state.love = 2;
-    }
+    // `/rmode/love`: 2 for SH, 1 otherwise. Written here, read by nothing live.
+    state.love = if state.rays.nm[0] == WaveMode::Sh { 2 } else { 1 };
     let n = state.rays.nd as usize;
     // The n == 0 case the doc comment describes would underflow every `n - 1` below.
     // The Fortran read past the array start instead; both are broken, but a named panic
@@ -97,10 +95,12 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
     for (&layer, &mode) in state.rays.nh[..n].iter().zip(&state.rays.nm[..n]) {
         let h = layer as usize;
-        if mode == 5 {
+        // Note these are two independent `if`s in the Fortran, not an if/else: a mode
+        // outside {3,4,5} would increment neither. The enum makes that unrepresentable.
+        if mode == WaveMode::P {
             state.travel.alp[h] += 1.0;
         }
-        if mode == 3 || mode == 4 {
+        if mode.is_shear() {
             state.travel.als[h] += 1.0;
         }
     }
@@ -112,15 +112,16 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     let lir = state.rays.nh[n - 1] as usize;
     // Starts at 1, not 0: the Fortran's `nl = 1` before the count.
     let nl = 1 + state.rays.nh[..n].iter().filter(|&&h| h as usize == lis).count() as i32;
-    let mut nup = (-1i32).pow(nl as u32);
+    // `(-1)**nl` in the Fortran -- integer exponentiation extracting a parity bit.
+    let mut nup = Direction::from_parity(nl);
     if lir > lis {
-        nup = -nup;
+        nup = nup.flipped();
     }
     if state.rays.ndeg < 0 {
-        nup = 1;
+        nup = Direction::Up;
     }
     if n == 1 && receiver_depth_km >= source_depth_km {
-        nup = -1;
+        nup = Direction::Down;
     }
     state.travel.nup = nup;
 
@@ -131,22 +132,20 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
         for i in 0..n1 {
             let k = state.rays.nh[i];
             let m = state.rays.nh[i + 1];
-            state.coff.it[i] = if m == k { 1 } else { 0 };
-            state.coff.nup1[i + 1] = match (state.coff.nup1[i], state.coff.it[i]) {
-                (1, 1) => -1,
-                (-1, 1) => 1,
-                (1, 0) => 1,
-                (-1, 0) => -1,
-                // The Fortran is four independent IFs with no else, so an
-                // unexpected pair would leave nup1(i+1) at its previous value.
-                // That cannot arise: it is 0 or 1 by construction just above,
-                // and nup1 is +-1 by induction from nup.
-                (a, b) => panic!("unreachable nup1/it combination ({a},{b})"),
+            // Consecutive segments in the same layer means the ray turned around.
+            state.coff.it[i] = if m == k { Interaction::Reflection } else { Interaction::Transmission };
+            // A reflection flips the direction, a transmission keeps it. The Fortran
+            // writes this as four independent IFs over (nup1, it) pairs with no else,
+            // which needed a `panic!` arm here to cover the combinations that cannot
+            // arise. With both operands enums the match is total and the arm is gone.
+            state.coff.nup1[i + 1] = match state.coff.it[i] {
+                Interaction::Reflection => state.coff.nup1[i].flipped(),
+                Interaction::Transmission | Interaction::Direct => state.coff.nup1[i],
             };
         }
     }
     if n == 1 {
-        state.coff.it[0] = 2;
+        state.coff.it[0] = Interaction::Direct;
     }
 
     // Receiver position within its layer: total thickness of everything above it.
@@ -160,46 +159,30 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     let a1 = hrl / vmod[lir].thickness_km;
     let a2 = (vmod[lir].thickness_km - hrl) / vmod[lir].thickness_km;
     let nupa = state.coff.nup1[n - 1];
-    // Labels 23/24: mode 5 takes the P multiplier, modes 3 and 4 the S one,
-    // and anything else falls through to P.
-    if state.rays.nm[n - 1] == 3 || state.rays.nm[n - 1] == 4 {
-        if nupa == 1 {
-            state.travel.als[lir] = (state.travel.als[lir] as f64 - a1) as f32;
-        }
-        if nupa == -1 {
-            state.travel.als[lir] = (state.travel.als[lir] as f64 - a2) as f32;
-        }
+    // Labels 23/24: a shear mode takes the S multiplier, anything else the P one.
+    let trim = match nupa { Direction::Up => a1, Direction::Down => a2 };
+    let multiplier = if state.rays.nm[n - 1].is_shear() {
+        &mut state.travel.als
     } else {
-        if nupa == 1 {
-            state.travel.alp[lir] = (state.travel.alp[lir] as f64 - a1) as f32;
-        }
-        if nupa == -1 {
-            state.travel.alp[lir] = (state.travel.alp[lir] as f64 - a2) as f32;
-        }
-    }
+        &mut state.travel.alp
+    };
+    multiplier[lir] = (multiplier[lir] as f64 - trim) as f32;
 
     // Source position within its layer, same as the receiver block above.
     let thtot: f64 = vmod.layers()[..lis].iter().map(|l| l.thickness_km).sum();
     let hsl = source_depth_km - thtot;
     let a1 = hsl / vmod[lis].thickness_km;
     let a2 = (vmod[lis].thickness_km - hsl) / vmod[lis].thickness_km;
-    // Note the a1/a2 roles are swapped relative to the receiver block above:
-    // nup == 1 subtracts a2 here but a1 there. That is what the Fortran does.
-    if state.rays.nm[0] == 3 || state.rays.nm[0] == 4 {
-        if nup == 1 {
-            state.travel.als[lis] = (state.travel.als[lis] as f64 - a2) as f32;
-        }
-        if nup == -1 {
-            state.travel.als[lis] = (state.travel.als[lis] as f64 - a1) as f32;
-        }
+    // Note the a1/a2 roles are SWAPPED relative to the receiver block above: `Up`
+    // subtracts a2 here but a1 there. That is what the Fortran does, and it is the one
+    // asymmetry that makes these two blocks not quite the same function.
+    let trim = match nup { Direction::Up => a2, Direction::Down => a1 };
+    let multiplier = if state.rays.nm[0].is_shear() {
+        &mut state.travel.als
     } else {
-        if nup == 1 {
-            state.travel.alp[lis] = (state.travel.alp[lis] as f64 - a2) as f32;
-        }
-        if nup == -1 {
-            state.travel.alp[lis] = (state.travel.alp[lis] as f64 - a1) as f32;
-        }
-    }
+        &mut state.travel.alp
+    };
+    multiplier[lis] = (multiplier[lis] as f64 - trim) as f32;
 
     // Deepest layer the ray penetrates.
     // Folded from 0 rather than `max().unwrap()`: the Fortran seeds `ndeep = 0`, so a ray
@@ -484,7 +467,7 @@ pub fn travel_time(
 
         let mut vb = vmod[nhi].vsh_km_s;
         let mut va = vb;
-        if state.rays.nm[0] != 4 {
+        if state.rays.nm[0] != WaveMode::Sh {
             va = vmod[nhi].vp_km_s;
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
@@ -494,17 +477,15 @@ pub fn travel_time(
             continue;
         }
         // Transmission needs no second clamp; only reflections do.
-        if state.coff.it[i] == 0 {
+        if state.coff.it[i] == Interaction::Transmission {
             continue;
         }
 
-        // Label 10 for upgoing, otherwise the layer below. A layer STEP, so it is the
-        // same +-1 in either index base. Upgoing from layer 0 would underflow, as the
-        // Fortran read `vs(0)` there; unreachable, and loud if it ever is not.
-        let k = if nup == 1 { nhi - 1 } else { nhi + 1 };
+        // Label 10 for upgoing, otherwise the layer below.
+        let k = nup.step_from(nhi);
         vb = vmod[k].vsh_km_s;
         va = vb;
-        if state.rays.nm[0] != 4 {
+        if state.rays.nm[0] != WaveMode::Sh {
             va = vmod[k].vp_km_s;
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
@@ -544,8 +525,7 @@ pub struct GreenFunction {
 /// then drives [`build_ray_path`], [`stationary_ray_parameter`], [`travel_time`] and [`geometric_spreading`] to return ray
 /// parameter, travel time, path length and path attenuation.
 ///
-/// Sole writer of `/rays/`. `wave_mode` is the wave mode (3 = SV, 4 = SH, 5 = P);
-/// production passes 4. `ray_type` odd means an upgoing ray, even means
+/// Sole writer of `/rays/`. Production passes [`WaveMode::Sh`]. `ray_type` odd means an upgoing ray, even means
 /// down-going then Moho-reflected, and values above 2 add Moho multiples —
 /// production passes 1, so the multiple loops never run.
 ///
@@ -563,14 +543,14 @@ pub struct GreenFunction {
 /// at `layer_count + 1`, which then becomes the first ray segment's layer index. That is
 /// a latent out-of-range read in the original. It is reproduced rather than
 /// clamped; in Rust it surfaces as a bounds panic instead of silently reading
-/// past the model. See `PORTING_RULES.wave_mode` §7.
+/// past the model. See `PORTING_RULES.md` §7.
 ///
 /// Note also that if `ksrc < krec` (a source shallower than layer 2) the upgoing
 /// segment loop produces zero segments and `nd` is 0, which `build_ray_path` is not
 /// written to handle.
 ///
 /// `hs_tol = 0.02` is an unsuffixed literal in an `implicit real*8` routine, so
-/// it carries only `f32` precision — see `PORTING_RULES.wave_mode` §1b.
+/// it carries only `f32` precision — see `PORTING_RULES.md` §1b.
 pub fn green_function(
     state: &mut RayState,
     vmod: &VelocityModel,
@@ -578,7 +558,7 @@ pub fn green_function(
     src_depth: f32,
     range: f32,
     ray_type: i32,
-    wave_mode: i32,
+    wave_mode: WaveMode,
 ) -> GreenFunction {
     // The receiver sits in the second layer -- index 1 since §2.3, not 2.
     let krec = 1usize;
