@@ -349,7 +349,7 @@ fn bench_spectrum(c: &mut Criterion) {
             let mut stdd = Array1::<f32>::new(np2);
             b.iter_batched_ref(
                 || src.clone(),
-                |cw| apply_radiation_and_invert(nf, mf, np2, cw, &mut stdd, &rdna),
+                |cw| apply_radiation_and_invert(nf, mf, cw.as_mut_slice(), stdd.as_mut_slice(), rdna.as_slice()),
                 criterion::BatchSize::SmallInput,
             )
         });

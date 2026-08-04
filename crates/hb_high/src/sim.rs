@@ -444,14 +444,14 @@ pub fn simulate(
 
                 let component_rad = -90.0 * deg_to_rad;
                 horizontal_radiation_spectrum(&mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, component_rad, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[0], &mut subfault_acc[0], &radiation);
+                apply_radiation_and_invert(nfold, mfold, spectrum[0].as_mut_slice(), subfault_acc[0].as_mut_slice(), radiation.as_slice());
 
                 let component_rad = 0.0f32;
                 horizontal_radiation_spectrum(&mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, component_rad, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[1], &mut subfault_acc[1], &radiation);
+                apply_radiation_and_invert(nfold, mfold, spectrum[1].as_mut_slice(), subfault_acc[1].as_mut_slice(), radiation.as_slice());
 
                 vertical_radiation_spectrum(strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold, &radv_rand_a, &radv_rand_b, nr, &mut radiation);
-                apply_radiation_and_invert(nfold, mfold, np2, &mut spectrum[2], &mut subfault_acc[2], &radiation);
+                apply_radiation_and_invert(nfold, mfold, spectrum[2].as_mut_slice(), subfault_acc[2].as_mut_slice(), radiation.as_slice());
 
                 // Rupture time at this subfault.
                 let mut ratim;

@@ -171,7 +171,7 @@ fn highcor_f_matches_fortran() {
         let want_stdd: Vec<f32> = (0..np2).map(|_| r.f32()).collect();
 
         let mut stdd = Array1::<f32>::new(np2);
-        apply_radiation_and_invert(nf, mf, np2, &mut cw1, &mut stdd, &rdna);
+        apply_radiation_and_invert(nf, mf, cw1.as_mut_slice(), stdd.as_mut_slice(), rdna.as_slice());
 
         let cw_scale = want_cw.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
         let stdd_scale = want_stdd.iter().fold(0.0f32, |a, v| a.max(v.abs()));

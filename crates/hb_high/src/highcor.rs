@@ -2,7 +2,7 @@
 //! domain.
 
 use crate::fft::fast;
-use crate::fort::{Array1, Complex32};
+use crate::fort::Complex32;
 
 /// `subroutine apply_radiation_and_invert(fold_count,mirror_count,np2,spectrum,time_series,radiation)` — `hb_high_ref.f:2234`.
 ///
@@ -30,37 +30,50 @@ use crate::fort::{Array1, Complex32};
 pub fn apply_radiation_and_invert(
     fold_count: usize,
     mirror_count: usize,
-    np2: usize,
-    spectrum: &mut Array1<Complex32>,
-    time_series: &mut Array1<f32>,
-    radiation: &Array1<f32>,
+    spectrum: &mut [Complex32],
+    time_series: &mut [f32],
+    radiation: &[f32],
 ) {
     let radiation_norm = 0.63f32;
     let partition_factor = 0.71f32;
+    // `np2` was a separate argument and is the spectrum's length at every call site.
+    let np2 = spectrum.len();
+
+    // 0-based since §2.3. Every index below is the Fortran's minus one; the loop bounds
+    // moved with them rather than a `- 1` being sprinkled at each access, since a
+    // half-converted expression is the thing that hides an off-by-one.
 
     // Positive frequencies, signed radiation pattern (sign preserved since
     // 2004-12-21; the older code took abs()).
-    for i in 1..=fold_count {
-        spectrum[i] = spectrum[i] * radiation[i];
+    for i in 0..fold_count {
+        spectrum[i] *= radiation[i];
     }
 
-    // Negative-frequency half, mirrored about fold_count.
-    for i in fold_count + 1..=fold_count + mirror_count {
-        let mm = 2 * fold_count - i;
-        spectrum[i] = spectrum[i] * radiation[mm];
+    // Negative-frequency half, mirrored about `fold_count`. The Fortran computes
+    // `mm = 2*fold_count - i` from its 1-based `i`; with `j = i - 1` that is
+    // `2*fold_count - j - 2` 0-based. Checked against np2 = 16, fold_count = 9:
+    // Fortran i = 10 takes radiation(8), storage element 7; here j = 9 gives
+    // 18 - 9 - 2 = 7.
+    for j in fold_count..fold_count + mirror_count {
+        spectrum[j] *= radiation[2 * fold_count - j - 2];
     }
 
-    fast(spectrum.as_mut_slice(), 1);
+    fast(spectrum, 1);
 
     let fac = 1.0 / (radiation_norm * partition_factor * np2 as f32);
-    for i in 1..=np2 {
-        time_series[i] = fac * spectrum[i].re;
+    for (sample, bin) in time_series[..np2].iter_mut().zip(spectrum.iter()) {
+        *sample = fac * bin.re;
     }
 
+    // Raised-cosine taper over the final np2/10 samples. `dd` is 3.14159625, a
+    // transposition of pi's digits in the original and reproduced deliberately -- see
+    // the note above and `PORTING_RULES.md` §1.
     let n0 = np2 / 10;
     let dd = 3.14159625 / (n0 as f32);
     for i in 1..=n0 {
         let arg = 0.5 * (1.0 + (i as f32 * dd).cos());
-        time_series[np2 - n0 + i] = time_series[np2 - n0 + i] * arg;
+        // Fortran writes time_series(np2 - n0 + i) for i = 1..=n0, i.e. the last n0
+        // samples; 0-based that is index np2 - n0 + i - 1.
+        time_series[np2 - n0 + i - 1] *= arg;
     }
 }
