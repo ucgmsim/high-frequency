@@ -645,6 +645,50 @@ built for (`site_amplification_factors` produces log amplitudes) and the one 819
 8193 bins already use. Changing the interior to match the ends would be the wrong
 direction and would move every waveform.
 
+### 2.6b Size the buffers from the deck, not from a compile-time ceiling
+
+Every large array is currently allocated at `mmv = 262144`, the `params_no_window.h`
+constant, regardless of what the deck asks for. That is both a waste and a **capability
+limit**: the Fortran aborts with "need to recompile with larger array size" once
+`np2 > mm`, so a long enough waveform cannot be run at all without rebuilding. The port
+reproduces that abort (`SimError::TransformTooLong`).
+
+Both problems have the same fix — compute the sizes.
+
+What is oversized today, per `simulate` call:
+
+| buffer | allocated | actually needed |
+| --- | --- | --- |
+| `acc` | `3 × 262144` f32 = 3.0 MB | `3 × ndata` |
+| `normal_deviates` | 262144 f32 = 1.0 MB | `np2`, not `mmv` — see below |
+| `radv_rand_a`, `radv_rand_b` | 262144 f32 each = 2.0 MB | `nr` = 1000, so **0.4%** of what is reserved |
+| `freq`, `radiation` | `mm` = 262144 f32 each | `np2/2 + 1` and `np2` |
+
+At the production `duration = 20`, `dt = 0.005` that is `ndata = 4000` and
+`np2 = 16384`, so roughly **7 MB reserved against a few hundred kilobytes used** — and
+the pages are touched, because the arrays are zero-initialised.
+
+Two traps to respect while doing it:
+
+1. **`normal_deviates` is drawn at `mmv`, not `np2`**, and the draw *count* is part of
+   the RNG stream — `fill_normal_deviates(rng, MMV, …)` consumes 262144 deviates
+   whether or not they are read. Shrinking the allocation is safe; shrinking the
+   **draw** changes every waveform. Those are separate decisions and only the first is
+   free. See `PORTING_RULES.md` §5.
+2. **`np2` is derived, not given.** It comes from `tmax`, which comes from the
+   time-window pass over every subfault, so it is not known until after that pass. So
+   either allocate the `np2`-sized buffers after it (they are per-segment already), or
+   compute an upper bound first.
+
+Once sizes are computed, **delete the `np2 > mm` abort entirely** rather than raising
+the ceiling: there is no fixed ceiling left to exceed, and a tool that refuses long
+records for a reason the user cannot act on is worse than a slow one. That is a
+behaviour improvement over the Fortran rather than a port of it, so it belongs here
+with a note in `PROVENANCE.md`.
+
+Ordering: after §2.6's defect fixes (which settle the `stdd` layout question) and
+alongside or before §2.3, since both touch the same allocations.
+
 ### 2.7 `rng.rs` → `rand` / `rand_pcg` — LAST, and carefully
 
 Queued deliberately at the very end of Stage 2, because it is the one replacement that
@@ -810,7 +854,8 @@ Stage 2, each with Tier B then C:
     these **unblocks** step 12 — see §2.3.
 12. `Array1`/`Array2` (2.3) → plain slices, module by module, after step 11 removes
     the layout constraint.
-13. `rng.rs` → `rand_pcg` (2.7). **Very last**, gated on a draw-for-draw equality test
+13. Size buffers from the deck (2.6b) and delete the recompile-to-go-longer ceiling.
+14. `rng.rs` → `rand_pcg` (2.7). **Very last**, gated on a draw-for-draw equality test
     against the current generator, and with Tier D run before and after.
 13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
