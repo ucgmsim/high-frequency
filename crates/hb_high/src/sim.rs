@@ -157,7 +157,7 @@ pub fn simulate(
     }
 
     // ------------------------------------------------- path duration model ---
-    let PathDuration { ndur, rdur, dpth, dpdr } = path_duration_table(config.path_duration);
+    let path_duration = path_duration_table(config.path_duration);
 
     // ------------------------------------------------------- air layer -------
     let (j0_air, nlskip_air) = insert_air_layer(&mut vmod_in, j0, nlskip);
@@ -307,24 +307,26 @@ pub fn simulate(
             let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
 
-            // Path duration bin. Strict `>` means r0/d0/slp stay unset
-            // if rlsu is exactly rdur(1) = 0.0; zero here rather than
-            // the Fortran's undefined.
-            let mut r0 = 0.0f32;
-            let mut d0 = 0.0f32;
-            let mut slp = 0.0f32;
-            for kk in 0..ndur {
-                if ray.slant_km > rdur[kk] {
-                    r0 = rdur[kk];
-                    d0 = dpth[kk];
-                    slp = dpdr[kk];
-                }
-            }
+            // The last segment this distance is past. The Fortran scans the whole table
+            // letting later matches overwrite earlier ones, which is `.last()` -- NOT
+            // `.find()`, and the difference matters because the table is ascending so the
+            // first match is the wrong end.
+            //
+            // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches
+            // NOTHING and the duration terms stay zero. The Fortran leaves them
+            // undefined there; zero is this port's choice, and `unwrap_or` is where it
+            // now lives rather than three loose initialisers.
+            let bin = path_duration
+                .iter()
+                .take_while(|s| ray.slant_km > s.start_km)
+                .last()
+                .copied()
+                .unwrap_or(DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km: 0.0 });
 
             let fce = fc_coeff * rvf * shear_velocity_km_s / (dlm * pi);
             let tw0 = 1.0 / fce;
             let tw0 = moment_scale.sqrt() * tw0;
-            let dpath = d0 + slp * (ray.slant_km - r0);
+            let dpath = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
             // VERSION1: no 81.92 s cap.
             let window = 2.12 * (tw0 + dpath);
             window_s[seg.grid_index(i, j)] = window;
@@ -596,21 +598,27 @@ pub fn simulate(
     Ok(Simulation { ndata, dt, acc: out, d10_km: d10 })
 }
 
+/// One segment of the piecewise-linear duration-versus-distance table.
+///
+/// The Fortran keeps these as three parallel `real dur(50)` arrays plus an `ndur` count.
+/// Every read of one is at the same index as the other two, so this is one value per
+/// segment — the same argument `Subfault` and `SubfaultRay` already make (§2.3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DurationSegment {
+    /// `rdur` — distance at which this segment starts, km.
+    start_km: f32,
+    /// `dpth` — duration at that distance, s.
+    duration_s: f32,
+    /// `dpdr` — slope of this segment, s/km.
+    slope_s_per_km: f32,
+}
+
 /// The path-duration model: a piecewise-linear duration-versus-distance table.
 ///
-/// `dpdr` is the slope of each segment. For the single-segment models it is given
-/// directly; for the multi-segment ones it is differenced from `rdur`/`dpth`, and
-/// the last segment repeats the second-to-last slope so distances beyond the table
-/// extrapolate rather than flatten.
-struct PathDuration {
-    ndur: usize,
-    /// Segment start distances, km.
-    rdur: Vec<f32>,
-    /// Duration at each segment start, s.
-    dpth: Vec<f32>,
-    /// Slope of each segment, s/km.
-    dpdr: Vec<f32>,
-}
+/// The `50` the Fortran sized its arrays at is gone with the parallel arrays. It was a
+/// ceiling nothing enforced and the largest model uses 8 of it; `len()` is now the count,
+/// so `ndur` is gone too — a length and a capacity can no longer disagree.
+type PathDuration = Vec<DurationSegment>;
 
 /// Build the path-duration table.
 ///
@@ -618,48 +626,52 @@ struct PathDuration {
 /// undefined-`ndur` path is unrepresentable, and rejecting a bad integer happens
 /// once, in `PathDurationModel::from_deck`.
 fn path_duration_table(model: PathDurationModel) -> PathDuration {
-    // 0-based since §2.3: segment k occupies index k, not k + 1.
-    let mut rdur = vec![0.0f32; 50];
-    let mut dpth = vec![0.0f32; 50];
-    let mut dpdr = vec![0.0f32; 50];
-
-    // (distances, durations) for the multi-segment models; slope-only for the rest.
-    let ndur = match model {
-        PathDurationModel::Gp2010 => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.063; 1 }
-        PathDurationModel::Wus => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.07; 1 }
-        PathDurationModel::Ena => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.1; 1 }
-        PathDurationModel::Bt2014Wus => {
-            // BT2014 WUS. The breakpoints at 7, 45, 125 and 175 km are what the
-            // Phase 2 distance ladder is chosen to straddle.
-            let r = [0.0, 7.0, 45.0, 125.0, 175.0, 270.0];
-            let d = [0.0, 2.4, 8.4, 10.9, 17.4, 34.2];
-            for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
-                rdur[i] = ri;
-                dpth[i] = di;
-            }
-            r.len()
-        }
-        PathDurationModel::Bt2015Ena => {
-            // BT2015 ENA.
-            let r = [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0];
-            let d = [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1];
-            for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
-                rdur[i] = ri;
-                dpth[i] = di;
-            }
-            r.len()
-        }
-    };
-
-    if ndur != 1 {
-        for i in 0..ndur - 1 {
-            dpdr[i] = (dpth[i + 1] - dpth[i]) / (rdur[i + 1] - rdur[i]);
-        }
-        // The last segment repeats the previous slope, so distances past the table
-        // extrapolate rather than flatten.
-        dpdr[ndur - 1] = dpdr[ndur - 2];
+    /// The single-segment models give their slope directly and have no breakpoints.
+    fn constant_slope(slope_s_per_km: f32) -> PathDuration {
+        vec![DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km }]
     }
-    PathDuration { ndur, rdur, dpth, dpdr }
+
+    /// The multi-segment models give (distance, duration) breakpoints; the slopes are
+    /// differenced from consecutive pairs.
+    ///
+    /// The last segment repeats the previous slope so distances past the table
+    /// extrapolate rather than flatten — which is why the fold looks one short and then
+    /// pushes a copy.
+    fn from_breakpoints<const N: usize>(start_km: [f32; N], duration_s: [f32; N]) -> PathDuration {
+        let mut table: PathDuration = start_km
+            .windows(2)
+            .zip(duration_s.windows(2))
+            .map(|(r, d)| DurationSegment {
+                start_km: r[0],
+                duration_s: d[0],
+                slope_s_per_km: (d[1] - d[0]) / (r[1] - r[0]),
+            })
+            .collect();
+        let last_slope = table.last().expect("a breakpoint table has at least two entries")
+            .slope_s_per_km;
+        table.push(DurationSegment {
+            start_km: start_km[N - 1],
+            duration_s: duration_s[N - 1],
+            slope_s_per_km: last_slope,
+        });
+        table
+    }
+
+    match model {
+        PathDurationModel::Gp2010 => constant_slope(0.063),
+        PathDurationModel::Wus => constant_slope(0.07),
+        PathDurationModel::Ena => constant_slope(0.1),
+        // BT2014 WUS. The breakpoints at 7, 45, 125 and 175 km are what the Phase 2
+        // distance ladder is chosen to straddle.
+        PathDurationModel::Bt2014Wus => from_breakpoints(
+            [0.0, 7.0, 45.0, 125.0, 175.0, 270.0],
+            [0.0, 2.4, 8.4, 10.9, 17.4, 34.2],
+        ),
+        PathDurationModel::Bt2015Ena => from_breakpoints(
+            [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0],
+            [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1],
+        ),
+    }
 }
 
 

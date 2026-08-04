@@ -226,13 +226,24 @@ pub fn subfault_geometry(
     let ylat = fault_lat_deg;
     let xlon = fault_lon_deg;
 
-    // DO 20 I=1,NX / DO 20 J=1,NW share one terminator: i outer, j inner.
-    for i in 1..=along_strike_count {
-        for j in 1..=down_dip_count {
-            let down_dip = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
-            let a1 = down_dip * dip.cos();
-            let b1 = down_dip * dip.sin();
+    // The Fortran runs `i` outer / `j` inner while the storage is strike-fastest, so its
+    // writes are strided. Unlike the subfault pass in `sim`, the order here is FREE:
+    // every entry is a pure function of `(i, j)` with no accumulation and no RNG draw, so
+    // nothing downstream can observe which order they were computed in. Walking depth
+    // rows writes sequentially and computes no index at all.
+    //
+    // The 1-based subfault numbers survive as `+ 1` on the enumerations, because they are
+    // physics -- the along-strike coordinate of subfault `i` is `(i - 0.5) * length`, so
+    // the first subfault sits half a cell from the edge. See the note on `SubfaultRay`.
+    for (row, down_dip_row) in rays.chunks_mut(along_strike_count).enumerate() {
+        let j = row + 1;
+        let down_dip = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
+        let a1 = down_dip * dip.cos();
+        let b1 = down_dip * dip.sin();
+        let zm1 = top_depth_km + b1;
 
+        for (col, ray) in down_dip_row.iter_mut().enumerate() {
+            let i = col + 1;
             let along = (i as f32 - 0.5) * subfault_length_km - along_strike_offset_km;
             let dlon = along * az.sin() + a1 * az.cos();
             let dlat = along * az.cos() - a1 * az.sin();
@@ -240,12 +251,10 @@ pub fn subfault_geometry(
             let stlon = xlon + dlon / ddx;
             let stlat = ylat + dlat / ddy;
 
-            let zm1 = top_depth_km + b1;
-
             let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg);
             let dis = g.deltkm;
 
-            rays[(j - 1) * along_strike_count + (i - 1)] = SubfaultRay {
+            *ray = SubfaultRay {
                 horiz_km: dis,
                 slant_km: (dis * dis + zm1 * zm1).sqrt(),
                 takeoff_rad: pi - dis.atan2(zm1),

@@ -311,11 +311,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // left to exceed.
         let sim = simulate(&config, &slip, &vmod_in, j0, station)?;
 
-        let mut bytes = Vec::with_capacity(sim.acc.len() * 4);
+        // Streamed through a BufWriter rather than materialised: the previous form built
+        // a second Vec the size of the whole record -- 12000 samples x 3 x 4 bytes for a
+        // 20 s record at dt=0.005 -- allocated fresh inside the station loop, purely to
+        // hand it to one write_all. `to_le_bytes` per sample keeps the byte order
+        // explicit rather than depending on the host's.
+        let mut writer = std::io::BufWriter::new(&mut out);
         for v in &sim.acc {
-            bytes.extend_from_slice(&v.to_le_bytes());
+            writer.write_all(&v.to_le_bytes())?;
         }
-        out.write_all(&bytes)?;
+        writer.flush()?;
+        drop(writer);
 
         // `(1x,f10.4)`: a leading blank from the 1x, THEN a width-10 field.
         // Dropping the 1x would give 10 characters instead of 11 -- harmless to
