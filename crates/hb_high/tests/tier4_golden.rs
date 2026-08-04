@@ -57,6 +57,26 @@ fn eq32(what: &str, got: f32, want: f32) {
                got.to_bits(), want.to_bits());
 }
 
+/// Relative comparison against a per-record scale, for the values that pass through
+/// the transform.
+///
+/// `REFACTOR.md` §2.1 replaced the vendored radix-2 kernel with `rustfft`, which sums
+/// the butterflies in a different order. The physics either side of the transform is
+/// unchanged and still worth checking against the Fortran, so these comparisons are
+/// loosened rather than deleted — but they can no longer be exact.
+///
+/// `1e-4` of the record's peak. The measured whole-program deviation from the swap is
+/// ~1e-6 of peak, so this is 100x headroom against rounding while still catching
+/// anything structural: a wrong scale factor, a dropped taper, a mirrored half.
+fn near32(what: &str, got: f32, want: f32, scale: f32) {
+    let tol = 1e-4 * scale.max(f32::MIN_POSITIVE);
+    assert!(
+        (got - want).abs() <= tol,
+        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
+        (got - want).abs()
+    );
+}
+
 #[test]
 fn stoc_f_matches_fortran() {
     let mut r = Reader::open("stoc_f.bin");
@@ -87,9 +107,12 @@ fn stoc_f_matches_fortran() {
                fc, fmx, akapp, &mut cw, &dfr, qb, qfe, bigc);
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
+        // Scale from the Fortran record, so the tolerance does not float with our
+        // own output.
+        let scale = want.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
         for i in 1..=np2 {
-            eq32(&format!("{tag} cw[{i}].re"), cw[i].re, want[i - 1].re);
-            eq32(&format!("{tag} cw[{i}].im"), cw[i].im, want[i - 1].im);
+            near32(&format!("{tag} cw[{i}].re"), cw[i].re, want[i - 1].re, scale);
+            near32(&format!("{tag} cw[{i}].im"), cw[i].im, want[i - 1].im, scale);
         }
         // Generator position: stochastic_spectrum consumes np2 deviates via
         // normal_deviates, and the shared stream must stay in step.

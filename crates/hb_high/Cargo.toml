@@ -18,6 +18,7 @@ description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic h
 # replaced the transcribed DGAMM in special.rs.
 [dependencies]
 libm = "0.2"
+rustfft = "6.4.1"
 
 # dev-dependencies do not enter the dependency graph of anything that links this
 # crate, so criterion and proptest cannot affect the numerics.

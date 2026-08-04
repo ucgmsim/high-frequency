@@ -114,6 +114,26 @@ fn dtdp_matches_fortran() {
     assert_eq!(n, 200);
 }
 
+/// Relative comparison against a per-record scale, for the values that pass through
+/// the transform.
+///
+/// `REFACTOR.md` §2.1 replaced the vendored radix-2 kernel with `rustfft`, which sums
+/// the butterflies in a different order. The physics either side of the transform is
+/// unchanged and still worth checking against the Fortran, so these comparisons are
+/// loosened rather than deleted — but they can no longer be exact.
+///
+/// `1e-4` of the record's peak. The measured whole-program deviation from the swap is
+/// ~1e-6 of peak, so this is 100x headroom against rounding while still catching
+/// anything structural: a wrong scale factor, a dropped taper, a mirrored half.
+fn near32(what: &str, got: f32, want: f32, scale: f32) {
+    let tol = 1e-4 * scale.max(f32::MIN_POSITIVE);
+    assert!(
+        (got - want).abs() <= tol,
+        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
+        (got - want).abs()
+    );
+}
+
 #[test]
 fn highcor_f_matches_fortran() {
     let mut r = Reader::open("highcor_f.bin");
@@ -134,10 +154,12 @@ fn highcor_f_matches_fortran() {
         let mut stdd = Array1::<f32>::new(np2);
         apply_radiation_and_invert(nf, mf, np2, &mut cw1, &mut stdd, &rdna);
 
+        let cw_scale = want_cw.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
+        let stdd_scale = want_stdd.iter().fold(0.0f32, |a, v| a.max(v.abs()));
         for i in 1..=np2 {
-            eq32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].re"), cw1[i].re, want_cw[i - 1].re);
-            eq32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].im"), cw1[i].im, want_cw[i - 1].im);
-            eq32(&format!("apply_radiation_and_invert np2={np2} stdd[{i}]"), stdd[i], want_stdd[i - 1]);
+            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].re"), cw1[i].re, want_cw[i - 1].re, cw_scale);
+            near32(&format!("apply_radiation_and_invert np2={np2} cw1[{i}].im"), cw1[i].im, want_cw[i - 1].im, cw_scale);
+            near32(&format!("apply_radiation_and_invert np2={np2} stdd[{i}]"), stdd[i], want_stdd[i - 1], stdd_scale);
         }
         cases += 1;
     }

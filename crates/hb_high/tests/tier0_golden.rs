@@ -15,6 +15,13 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 //!
+//! **`fast` no longer has a golden here either.** §2.1 replaced the radix-2 kernel
+//! with `rustfft`, and unlike `stoc_f` and `highcor_f` — where the transform is one
+//! step of five and the surrounding physics is still worth checking — this test's
+//! entire content was "does our FFT match the Fortran's FFT". That question is now
+//! answered by `tests/properties.rs`: round-trip proportionality, linearity, and a real
+//! DC bin for real input, all of which held across the swap unchanged.
+//!
 //! **`gamma` no longer has a golden here.** `REFACTOR.md` §2.2b replaced the
 //! transcribed `DGAMM` with `libm::tgamma`, so a bit-for-bit comparison against the
 //! old series is a comparison against code that no longer exists. Its contract is now
@@ -24,7 +31,7 @@
 //! place as a record of what the Fortran produced; nothing reads it.
 //! Every comparison is exact. See `PORTING_RULES.md` §10.
 
-use hb_high::fft::{fast, remove_quadratic_trend};
+use hb_high::fft::remove_quadratic_trend;
 use hb_high::fort::{Array1, Complex32, Complex64};
 use hb_high::geom::distance_azimuth;
 use hb_high::radiation::radiation_pattern;
@@ -188,31 +195,6 @@ fn flzero_matches_fortran() {
     }
     r.assert_exhausted();
     assert_eq!(cases, 6);
-}
-
-#[test]
-fn fast_matches_fortran() {
-    let mut r = Reader::open("fast.bin");
-    let mut cases = 0;
-    while !r.done() {
-        let nnn = r.i32() as usize;
-        let ind = r.i32();
-        let mut ace = Array1::<Complex32>::filled(nnn, Complex32::ZERO);
-        for i in 1..=nnn {
-            ace[i] = Complex32::new(r.f32(), r.f32());
-        }
-        let want: Vec<Complex32> =
-            (0..nnn).map(|_| Complex32::new(r.f32(), r.f32())).collect();
-
-        fast(nnn, &mut ace, ind);
-        for i in 1..=nnn {
-            eq32(&format!("fast n={nnn} ind={ind} [{i}].re"), ace[i].re, want[i - 1].re);
-            eq32(&format!("fast n={nnn} ind={ind} [{i}].im"), ace[i].im, want[i - 1].im);
-        }
-        cases += 1;
-    }
-    r.assert_exhausted();
-    assert_eq!(cases, 26, "13 lengths x 2 directions");
 }
 
 #[test]

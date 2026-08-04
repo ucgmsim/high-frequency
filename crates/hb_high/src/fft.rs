@@ -1,10 +1,51 @@
-//! `FAST` — the radix-2 FFT — and `FLZERO`, the baseline correction.
+//! The complex transform, and the baseline correction that shares its callers.
 //!
-//! Transliterated from `hb_high_ref.f`. The FFTW variant of `FAST` is not
-//! ported; see `reference/PROVENANCE.md` and `harness/PHASE0C_RESULTS.md` for
-//! the measurement that justified dropping it.
+//! # The transform is `rustfft`, not the vendored radix-2 kernel
+//!
+//! `REFACTOR.md` §2.1. The transliterated radix-2 `FAST` accounted for 48.5% of
+//! runtime in self time, with a further 27.1% in `libm` computing its twiddles — 75.6%
+//! of the program between them. It recomputed `CEXP(THETA)` once per `(stage, k)` pair
+//! on every call, three `libm` calls each, about 295k per subfault at `np2 = 16384`.
+//!
+//! `rustfft` caches twiddles in its plan and dispatches to SIMD kernels, so this
+//! replaces the algorithm, the twiddle problem and the large-`np2` cache penalty in one
+//! change. See `PROFILE.md`, whose items 1, 2 and 5 this supersedes.
+//!
+//! # Convention
+//!
+//! Verified empirically rather than taken from the old comment, since a sign error here
+//! is silent: feeding `x[k] = exp(+2*pi*i*m*k/n)` to the vendored kernel with `ind = -1`
+//! produced its peak at bin `m`, which is the standard forward DFT
+//! `X[j] = sum_k x[k] exp(-2*pi*i*j*k/n)`. So `ind = -1` maps to `FftDirection::Forward`
+//! and `ind = +1` to `Inverse`, with no conjugation. Neither direction is scaled, which
+//! matches both the original and `rustfft`.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use rustfft::num_complex::Complex as RustComplex;
+use rustfft::{Fft, FftDirection, FftPlanner};
 
 use crate::fort::{Array1, Complex32};
+
+thread_local! {
+    /// Plans are cached per `(length, direction)`: building one is where `rustfft`
+    /// does its twiddle precomputation, so planning per call would reintroduce
+    /// exactly the cost this change removes.
+    ///
+    /// Thread-local rather than a global mutex because `simulate` is called once per
+    /// station and a future caller will want stations on separate threads; a shared
+    /// lock would serialise them on the hottest path in the program.
+    static PLANS: RefCell<HashMap<(usize, bool), Arc<dyn Fft<f32>>>> =
+        RefCell::new(HashMap::new());
+    /// Scratch buffer for the conversion to `rustfft`'s complex type. Reused so the
+    /// per-call cost is a copy rather than an allocation.
+    ///
+    /// The copy exists only because `fort::Complex32` is this crate's own type.
+    /// §2.2 (`num-complex`) removes it.
+    static SCRATCH: RefCell<Vec<RustComplex<f32>>> = const { RefCell::new(Vec::new()) };
+}
 
 /// `SUBROUTINE FAST(NNN,ACE,IND)` — in-place unnormalised complex radix-2 FFT.
 ///
@@ -21,52 +62,26 @@ use crate::fort::{Array1, Complex32};
 /// changes the last bits of every transform. See `PORTING_RULES.md` §1.
 pub fn fast(nnn: usize, ace: &mut Array1<Complex32>, ind: i32) {
     assert!(nnn.is_power_of_two(), "FAST requires a power-of-two length, got {nnn}");
+    assert!(ind == 1 || ind == -1, "FAST direction must be +/-1, got {ind}");
+    let forward = ind == -1;
 
-    // Bit-reversal permutation (DO 100 / labels 110, 120, 130).
-    let mut j = 1usize;
-    for i in 1..=nnn {
-        if i < j {
-            let temp = ace[j];
-            ace[j] = ace[i];
-            ace[i] = temp;
-        }
-        let mut m = nnn / 2;
-        // 120: IF(J.LE.M) GO TO 130 / J=J-M / M=M/2 / IF(M.GE.2) GO TO 120
-        while j > m {
-            j -= m;
-            m /= 2;
-            if m < 2 {
-                break;
-            }
-        }
-        j += m;
-    }
+    let plan = PLANS.with(|plans| {
+        Arc::clone(plans.borrow_mut().entry((nnn, forward)).or_insert_with(|| {
+            let direction =
+                if forward { FftDirection::Forward } else { FftDirection::Inverse };
+            FftPlanner::new().plan_fft(nnn, direction)
+        }))
+    });
 
-    // Butterflies (label 140 loop).
-    let mut kmax = 1usize;
-    while kmax < nnn {
-        let istep = kmax * 2;
-        for k in 1..=kmax {
-            let theta = Complex32::new(
-                0.0,
-                3.141593 * ((ind * (k as i32 - 1)) as f32) / (kmax as f32),
-            );
-            // Hoisted out of the inner loop. gfortran does this itself at -O2
-            // (confirmed by disassembly in the EMOD3D profiling work), and
-            // since CEXP is a pure function of THETA the value is identical
-            // either way.
-            let w = theta.exp();
-            let mut i = k;
-            while i <= nnn {
-                let jj = i + kmax;
-                let temp = ace[jj] * w;
-                ace[jj] = ace[i] - temp;
-                ace[i] = ace[i] + temp;
-                i += istep;
-            }
+    SCRATCH.with(|scratch| {
+        let mut buffer = scratch.borrow_mut();
+        buffer.clear();
+        buffer.extend((1..=nnn).map(|i| RustComplex::new(ace[i].re, ace[i].im)));
+        plan.process(&mut buffer);
+        for (i, value) in buffer.iter().enumerate() {
+            ace[i + 1] = Complex32::new(value.re, value.im);
         }
-        kmax = istep;
-    }
+    });
 }
 
 /// `SUBROUTINE FLZERO(N,DT,A)` — remove the quadratic acceleration trend that
