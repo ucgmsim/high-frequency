@@ -226,9 +226,40 @@ fn siteamp_matches_fortran() {
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
         apply_site_amplification(np2, &mut cw, &dfr, nn, &fn_, &an);
+
+        // §2.6 defect 2: the Fortran scales the DC bin (1) and the Nyquist bin
+        // (np2/2 + 1) by the raw factor while exponentiating every bin between, two
+        // conventions in one routine. That is fixed, so those two bins DELIBERATELY no
+        // longer match the Fortran and are excluded here rather than the whole
+        // comparison being loosened -- the rest of this golden checks the
+        // log-frequency interpolation across the table, which is untouched and still
+        // worth an exact check.
+        //
+        // The Hermitian mirror means the negative-frequency partner of Nyquist is the
+        // same bin, so only these two indices move.
+        let nyquist = np2 / 2 + 1;
         for i in 1..=np2 {
+            if i == 1 || i == nyquist {
+                continue;
+            }
             eq32(&format!("apply_site_amplification np2={np2} [{i}].re"), cw[i].re, want[i - 1].re);
             eq32(&format!("apply_site_amplification np2={np2} [{i}].im"), cw[i].im, want[i - 1].im);
+        }
+
+        // And assert the two excluded bins differ in exactly the way intended: the
+        // fixed code applies exp(factor) where the Fortran applied factor. A silent
+        // agreement here would mean the fix did not take.
+        for (i, factor) in [(1usize, an[1]), (nyquist, an[nn])] {
+            let fortran_gain = factor;
+            let fixed_gain = factor.exp();
+            if want[i - 1].re.abs() > 1e-20 && (fortran_gain - fixed_gain).abs() > 1e-6 {
+                let ratio = cw[i].re / want[i - 1].re;
+                let expected = fixed_gain / fortran_gain;
+                assert!(
+                    (ratio / expected - 1.0).abs() < 1e-3,
+                    "bin {i}: gain ratio {ratio} vs expected exp({factor})/{factor} = {expected}"
+                );
+            }
         }
         cases += 1;
     }

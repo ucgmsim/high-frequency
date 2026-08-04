@@ -94,7 +94,14 @@ pub fn apply_site_amplification(
     let mut fp = log_frequency[kn];
     let mut ap = factors[kn];
 
-    spectrum[1] = spectrum[1] * factors[1];
+    // DC. The factors are LOG amplitudes, so this exponentiates like every interior
+    // bin does. The Fortran multiplied by the raw factor here and at Nyquist while
+    // exponentiating everything between -- two conventions in one routine, disagreeing
+    // by a factor of 3.3 at a log-amplitude of 0.5. See REFACTOR.md §2.6 defect 2.
+    //
+    // There is no interpolation to do at zero frequency: `ln(0)` is undefined, so the
+    // bottom table entry is used, which is what the original did too.
+    spectrum[1] = spectrum[1] * factors[1].exp();
 
     for i in 2..=np {
         let freq = frequency_hz[i].ln();
@@ -130,6 +137,9 @@ pub fn apply_site_amplification(
         spectrum[np2 - i + 1] = spectrum[i + 1].conj();
     }
 
-    // Nyquist bin takes the top of the table.
-    spectrum[nf] = spectrum[nf] * factors[table_count];
+    // Nyquist takes the top of the table, exponentiated for the same reason as DC.
+    // This is the half of defect 2 that was actually live: unlike DC -- which
+    // `stochastic_spectrum` sets to zero, making the wrong gain unobservable -- this bin
+    // carries a value.
+    spectrum[nf] = spectrum[nf] * factors[table_count].exp();
 }

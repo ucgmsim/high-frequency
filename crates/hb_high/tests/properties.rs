@@ -570,9 +570,10 @@ proptest! {
     /// reading — that a table of ones is the identity — is wrong, and a test written
     /// on it would have failed for the right reason and invited a loosened tolerance.
     ///
-    /// Restricted to bins `2..=np2/2` on purpose; see
-    /// `dc_and_nyquist_are_scaled_linearly_not_exponentially` for why the two ends
-    /// are excluded.
+    /// Since §2.6 reconciled the DC and Nyquist bins to the same convention, the gain
+    /// is uniform across the whole half-spectrum. The loop still starts at bin 2
+    /// because DC is identically zero on entry from `stochastic_spectrum`, so its gain
+    /// is unobservable rather than wrong.
     #[test]
     fn a_flat_table_applies_a_uniform_exponential_gain(
         exponent in 4u32..9,
@@ -639,55 +640,6 @@ proptest! {
             );
         }
     }
-}
-
-/// The DC and Nyquist bins are scaled by the factor **directly**, while every bin
-/// between them is scaled by its exponential.
-///
-/// Two conventions in one routine — `spectrum[1] * factors[1]` and
-/// `spectrum[nf] * factors[table_count]` against `exp(...)` everywhere else — so a
-/// table of log-amplitude 0.5 amplifies the interior by 1.65 while *attenuating* the
-/// two end bins to 0.5, a disagreement of 3.3x.
-///
-/// The numerical consequence is nonetheless negligible, which is worth stating so
-/// nobody treats this as urgent:
-///
-/// * **DC is inert.** `stochastic_spectrum` sets `as(1) = 0`, so the bin is
-///   identically zero on entry and the wrong gain changes nothing.
-/// * **Nyquist is live but irrelevant.** It sits at `1/(2*dt) = 100 Hz`, where the
-///   kappa filter has already attenuated the spectrum by `exp(-pi*100*0.045) ~ 7e-7`.
-///   One bin in 8193 at `np2 = 16384`.
-///
-/// So this is pinned as a *clarity* defect, not a science one. It stays because Stage 1
-/// is bit-identical; the test exists so the inconsistency cannot be lost track of, and
-/// so that whoever reconciles it in Stage 2 has to delete a test that explains why.
-/// See `REFACTOR.md` §2.6 and `PORTING_RULES.md` §7.
-#[test]
-fn dc_and_nyquist_are_scaled_linearly_not_exponentially() {
-    let np2 = 64usize;
-    let level = 0.5f32;
-    let mut spec = spectrum(np2, 41);
-    let original = spec.clone();
-    let (frequency, log_frequency, factors) = site_table(np2, level);
-    apply_site_amplification(np2, &mut spec, &frequency, 6, &log_frequency, &factors);
-
-    let dc_gain = spec[1].re / original[1].re;
-    assert!(
-        (dc_gain - level).abs() < 1e-4,
-        "DC gain {dc_gain} should be the raw factor {level}, not exp({level})"
-    );
-
-    let interior_gain = spec[4].norm() / original[4].norm();
-    assert!(
-        (interior_gain - level.exp()).abs() < 1e-3,
-        "interior gain {interior_gain} should be exp({level}) = {}",
-        level.exp()
-    );
-    assert!(
-        (dc_gain - interior_gain).abs() > 0.5,
-        "the two conventions should visibly disagree; if they no longer do, the \
-         inconsistency has been fixed and this test should be deleted"
-    );
 }
 
 /// A frequency axis and a flat site table at `level`, spanning the whole axis so no
