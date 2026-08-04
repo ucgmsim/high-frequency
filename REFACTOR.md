@@ -586,6 +586,32 @@ worth taking seriously rather than reflexively reaching for slices.
 > off-by-one risk is real (one was already caught in `rng.rs`) and the payoff is
 > readability alone.
 
+> **`Array2` is gone, and the replacement is 1-based on purpose — `d6aa8f3`.** This
+> section said to convert "**properly to 0-based**, never to a 1-based `Vec`". That rule
+> is right for storage offsets and wrong for the eight subfault grids, and the
+> distinction is worth stating because it also decides `state.rs`.
+>
+> `geom`'s five arrays and `Segment`'s three were never grids: every read of one was at
+> the same `(i, j)` as its siblings, so they are **one value per subfault** and became
+> `Vec<SubfaultRay>` and `Vec<Subfault>`. That deleted `fort::Array2` outright (`fort.rs`
+> 211 → 152 lines) and took `window_s`'s `(NQ, NP)` = 600×100 allocation with it.
+>
+> The accessors `SubfaultGeometry::at` and `Segment::at` stay **1-based**, because `(i,
+> j)` is a subfault *number* rather than a storage offset — the along-strike coordinate of
+> subfault `i` is `(i - 0.5) * length`, so the numbering is part of the physics. Going
+> 0-based would put a `+ 1` into every such formula. What the change *did* achieve is
+> confining the 1-based-ness to two `at()` methods instead of five `Index` impls, and
+> making the layout private.
+>
+> Measured: **−0.01%**, i.e. nothing, exactly as predicted for short branchy loops. The
+> payoff was size and readability, and that is the honest accounting.
+>
+> The order-dependence that had to be preserved was **not** an index question:
+> `normalise_source`'s two accumulations sum in depth-major order and floating-point
+> addition is not associative. Storing the strike index fastest makes depth-major *be*
+> sequential, so both passes now walk a slice and compute no index at all —
+> `Segment::depth_rows` names that and its doc says why it is load-bearing.
+
 > **§2.3 has a performance benefit after all, measured.** This section and `PROFILE.md`
 > both said it was size and readability only. Converting `rng.rs` alone cut instructions
 > retired by **5.13%** for the whole program. The wrapper's `Index` impl is
