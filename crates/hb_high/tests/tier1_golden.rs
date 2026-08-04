@@ -234,9 +234,22 @@ fn geom_terms_matches_fortran() {
 }
 
 #[test]
-fn even_dist2_matches_fortran() {
+fn subfault_geometry_stays_close_to_fortran() {
+    // Bit-exactness ended with §2.5: this routine's only source of position is
+    // `distance_azimuth`, which is now a WGS84 geodesic rather than DELAZ5. Kept as a
+    // bounded check for the same reason as the delaz5 fixture -- it still catches a gross
+    // error, and it quantifies the deliberate change on the real fault geometries the
+    // fixture holds, which is the evidence Tier C needs to be interpretable.
+    //
+    // `depth_km` is untouched: it comes from the dip and the down-dip index, not from the
+    // geodesy, so it is still asserted BIT-EXACT. That asymmetry is the point -- if depth
+    // moved, something other than §2.5 changed.
     let mut r = Reader::open("even_dist2.bin");
     let mut cases = 0;
+    let mut worst_horiz = 0.0f64;
+    let mut worst_slant = 0.0f64;
+    let mut worst_takeoff_deg = 0.0f64;
+    let mut worst_azimuth_deg = 0.0f64;
     while !r.done() {
         let nx = r.usize();
         let nw = r.usize();
@@ -253,15 +266,38 @@ fn even_dist2_matches_fortran() {
             for j in 1..=nw {
                 let tag = format!("subfault_geometry case {cases} ({i},{j})");
                 let ray = g.at(i, j);
-                eq32(&format!("{tag} dst"), ray.horiz_km, r.f32());
-                eq32(&format!("{tag} rl"), ray.slant_km, r.f32());
-                eq32(&format!("{tag} th"), ray.takeoff_rad, r.f32());
-                eq32(&format!("{tag} ph"), ray.azimuth_rad, r.f32());
-                eq32(&format!("{tag} zet"), ray.depth_km, r.f32());
+                let (want_horiz, want_slant, want_takeoff, want_azimuth, want_depth) =
+                    (r.f32(), r.f32(), r.f32(), r.f32(), r.f32());
+
+                let rel = |got: f32, want: f32| {
+                    if want.abs() > 1.0 { ((got - want) / want).abs() as f64 } else { 0.0 }
+                };
+                worst_horiz = worst_horiz.max(rel(ray.horiz_km, want_horiz));
+                worst_slant = worst_slant.max(rel(ray.slant_km, want_slant));
+                worst_takeoff_deg = worst_takeoff_deg
+                    .max((ray.takeoff_rad - want_takeoff).abs().to_degrees() as f64);
+                worst_azimuth_deg = worst_azimuth_deg.max({
+                    let d = (ray.azimuth_rad - want_azimuth).abs().to_degrees() as f64;
+                    d.min(360.0 - d)
+                });
+
+                // Depth does not pass through the geodesy at all.
+                eq32(&format!("{tag} zet"), ray.depth_km, want_depth);
             }
         }
         cases += 1;
     }
     r.assert_exhausted();
     assert_eq!(cases, 5);
+
+    println!(
+        "even_dist2 fixture: worst horiz {:.4}%, slant {:.4}%, takeoff {worst_takeoff_deg:.4} deg, \
+         azimuth {worst_azimuth_deg:.4} deg",
+        worst_horiz * 100.0,
+        worst_slant * 100.0
+    );
+    assert!(worst_horiz < 0.01, "horizontal distance moved {:.4}%", worst_horiz * 100.0);
+    assert!(worst_slant < 0.01, "slant distance moved {:.4}%", worst_slant * 100.0);
+    assert!(worst_takeoff_deg < 0.5, "take-off angle moved {worst_takeoff_deg:.4} deg");
+    assert!(worst_azimuth_deg < 0.5, "azimuth moved {worst_azimuth_deg:.4} deg");
 }

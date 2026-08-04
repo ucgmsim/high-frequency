@@ -688,13 +688,84 @@ it saves nothing.
 **Lesson worth keeping: verify a float identity at the precision the code uses.** A
 `f64` check of an `f32` computation is not a check.
 
-### 2.5 `geom::delaz5` → a geodesy crate
+### 2.5 `geom::delaz5` → a geodesy crate — **DONE**
 
 ~100 lines of a 1970s distance/azimuth formulation with three separation regimes,
 one of which (`geocentric radians`) is unreachable because `even_dist2` always
 passes 0. A modern geodesic (`geographiclib-rs`) is both smaller at the call site
 and more accurate. Tier C, since it moves distances by metres and distance feeds
 the path-duration branch selection.
+
+> **Done. The first change in Stage 2 that moves the waveform at all.**
+>
+> `distance_azimuth` is now `geographiclib_rs`'s inverse geodesic on WGS84. Gone with it:
+> the three separation regimes, the `0.9931177` tangent-scaling stand-in for the ellipsoid,
+> the `6371.0` km mean-radius sphere, the sixteen `DOUBLE PRECISION` cosines feeding
+> `real*4` trig that `PORTING_RULES.md` §2 used as its worked example, the dead
+> `coord_mode` argument, and **four of the seven outputs** — `delt`, `deltdg`, `azse` and
+> `azsedg` had no reader outside the tests that checked them.
+>
+> Measured, on this fixture's real fault geometries and on Canterbury separations of
+> 4–409 km:
+>
+> | | worst |
+> | --- | --- |
+> | distance | **0.12%** on the fault fixtures, 0.32% at 1 km separation (3 m) |
+> | azimuth, under 500 km | **0.045°** |
+> | take-off angle | **0.029°** |
+> | Tier B pooled bias | **+0.006%**, endpoint sd 0.121% |
+>
+> `DELAZ5` is systematically **short**, consistently signed — the signature of the
+> mean-radius sphere plus the tangent trick, against a true geodesic. The new values are
+> the correct ones.
+>
+> **Self-parity cannot judge this change**, and that is not a failure of the change. A
+> distance shift moves arrival times, which *translates* the waveform; self-parity compares
+> sample `i` to sample `i`, so it reports 22 of 22 decks differing at any tolerance up to
+> 10%. This is the same instrument limitation recorded above for §2.6's one-sample shift.
+> Tier B and Tier C are the instruments here.
+>
+> **Tier B woke up.** It had returned exactly `+0.000%` with zero endpoint spread through
+> every previous Stage 2 change, because they were all bit-identical in effect. It now
+> reads `+0.006%` with a 0.121% endpoint sd and still certifies 375/375 — which is what
+> this section's own description of Tier B promised would happen the moment numerics moved.
+>
+> **Two goldens changed character rather than being deleted**, and both are more useful for
+> it: `delaz5.bin` and `even_dist2.bin` now bound the *size* of the deliberate change
+> instead of asserting identity. The `delaz5` bound is **stratified by separation**, because
+> the two formulations disagree by 0.045° under 500 km and by **45°** at 20,015 km — where a
+> geodesic's azimuth is genuinely ill-conditioned, the endpoints being nearly antipodal.
+> A single global tolerance would have had to be 45° and would have said nothing.
+> `subfault_geometry`'s `depth_km` is still asserted **bit-exact**, since it comes from the
+> dip and the down-dip index and never touches the geodesy — if it moves, something other
+> than §2.5 did it.
+>
+> One property test was wrong and was replaced, not loosened: it asserted the azimuths at
+> the two ends of a path differ by 180°, which is a *sphere's* property. On an ellipsoid a
+> geodesic's azimuth changes along its length, and over the 13,000 km separations the
+> generator was producing, the two ends disagreed by 129° entirely correctly. It now checks
+> the azimuth against a flat-Earth bearing for *nearby* stations, which is what actually
+> pins our use of the library: the right slot out of a return tuple whose element meanings
+> change with its width, degrees not radians, the `[0, 360)` wrap, and the `f32` narrowing.
+>
+> **A trap worth recording about `geographiclib_rs`.** `InverseGeodesic` is generic over
+> the output tuple, and the width changes what the *earlier* slots mean:
+>
+> ```text
+> let x: f64                     = geod.inverse(..);  // s12
+> let x: (f64, f64, f64)         = geod.inverse(..);  // (azi1, azi2, a12)   <-- no s12
+> let x: (f64, f64, f64, f64)    = geod.inverse(..);  // (s12, azi1, azi2, a12)
+> ```
+>
+> The three-element form has no distance in it at all. Destructuring it as
+> `(s12, azi1, azi2)` compiles, runs, and yields an azimuth where a distance is expected —
+> which is exactly what happened on the first attempt here, producing negative "distances"
+> of a few hundred metres and a nonsense 415 km worst-case error. The type annotation at
+> the call site is load-bearing and is commented as such.
+>
+> Size: `geom.rs` 302 → 267 lines. Instructions +0.013%, i.e. free — the geodesic is a
+> longer calculation than DELAZ5 but runs `2 + nx*nw` times per segment, not per sample,
+> and `Geodesic::wgs84()` is built once in a `OnceLock` rather than per call.
 
 ### 2.6 Defects: both FIXED — `fff2abf` and `262c75f`
 

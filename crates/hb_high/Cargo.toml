@@ -17,6 +17,7 @@ description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic h
 # of its own, so it adds one crate rather than a subtree. It supplies tgamma, which
 # replaced the transcribed DGAMM in special.rs.
 [dependencies]
+geographiclib-rs = "0.2.7"
 libm = "0.2"
 rustfft = "6.4.1"
 

@@ -74,6 +74,32 @@ These are places where Stage 2 concluded the original is wrong and the port shou
 follow it. Each changes behaviour on inputs the original mishandled, and none affects the
 production configuration.
 
+### Geodesy: a WGS84 geodesic in place of DELAZ5's spherical approximation
+
+`DELAZ5` computes source-station distance and azimuth on a **sphere of radius exactly
+6371.0 km**, with a `0.9931177` tangent-scaling correction on the latitudes standing in for
+the ellipsoid. §2.5 replaced it with `geographiclib_rs`'s inverse geodesic on WGS84.
+
+This is an accuracy improvement, not a reformulation: the original is systematically
+**short**, by a consistently-signed amount.
+
+| | worst observed |
+| --- | --- |
+| distance, 4–409 km separations | 0.12% |
+| distance, 1 km separation | 0.32% (3 m) |
+| azimuth, under 500 km | 0.045° |
+
+Distance reaches the waveform through the path-duration table and `1/R` geometric
+spreading, both smooth in distance. Tier B measured a pooled bias of **+0.006%** across 375
+endpoints and certified all of them at ±2%.
+
+**This changes production output**, unlike the improvements below, which only affect inputs
+the original mishandled. It is the one place where the port deliberately gives a *different*
+answer to the oracle on a routine run, on the grounds that the oracle's answer is less
+accurate. A run that must reproduce historical EMOD3D output bit-for-bit should use the
+oracle, not this port — which was already true from §2.1 onward, but this is the first
+change that moves the physics rather than the last bits.
+
 ### The record-length ceiling, and the silent truncation behind it
 
 The Fortran carries two compiled limits on record length:

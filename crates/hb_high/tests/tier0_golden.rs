@@ -130,26 +130,98 @@ fn rdatn_matches_fortran() {
 }
 
 #[test]
-fn delaz5_matches_fortran() {
+fn distance_azimuth_stays_close_to_fortran() {
+    // §2.5 replaced DELAZ5 with a WGS84 geodesic, so this CANNOT be bit-exact any more.
+    // It is kept rather than deleted because the interesting question changed from "is it
+    // identical" to "is the deliberate change the size we said it was" -- and the same
+    // oracle data answers that. It would still catch a gross error: a degrees/radians
+    // mix-up, a transposed forward/back azimuth, or reading the wrong slot out of
+    // geographiclib's width-dependent return tuple.
+    //
+    // Only the three live outputs are compared; §2.5 dropped `delt`, `deltdg`, `azse` and
+    // `azsedg`, which nothing outside this test read.
+    //
+    // THE BOUNDS ARE STRATIFIED BY SEPARATION, because the two formulations disagree by
+    // very different amounts at the two ends and only one end is the port's business:
+    //
+    //   * under 500 km -- every distance this program will ever see, source subfault to
+    //     station -- azimuth agrees to 0.045 degrees.
+    //   * near-antipodal (this fixture reaches 18,729 km, about 168 degrees of arc)
+    //     azimuth disagrees by up to 1.1 degrees, because the azimuth of a geodesic is
+    //     ill-conditioned there: the path direction becomes arbitrary as the endpoints
+    //     approach antipodes. Asserting a tight bound on that would be asserting
+    //     something about neither implementation's accuracy.
+    //
+    // So the production regime is bounded tightly and the global figure is printed, not
+    // asserted. Widening a single global tolerance until it passed would have hidden which
+    // of the two effects was which -- the §2.4c mistake, from the other direction.
     let mut r = Reader::open("delaz5.bin");
     let mut n = 0;
+    let mut worst_km_rel = 0.0f64;
+    let mut worst_km_at = String::new();
+    let mut worst_az_global = 0.0f64;
+    let mut worst_az_global_at = String::new();
+    let mut worst_az_near = 0.0f64;
+    let mut worst_az_near_at = String::new();
     while !r.done() {
         let (thei, alei, thsi, alsi) = (r.f32(), r.f32(), r.f32(), r.f32());
         let iflag = r.i32();
-        let want = [r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32()];
-        let g = distance_azimuth(thei, alei, thsi, alsi, iflag);
-        let got = [g.delt, g.deltdg, g.deltkm, g.azes, g.azesdg, g.azse, g.azsedg];
-        let names = ["delt", "deltdg", "deltkm", "azes", "azesdg", "azse", "azsedg"];
-        for k in 0..7 {
-            eq32(
-                &format!("distance_azimuth case {n} ({thei},{alei})->({thsi},{alsi}) {}", names[k]),
-                got[k], want[k],
-            );
+        let [_delt, _deltdg, want_km, _azes, want_azdg, _azse, _azsedg] =
+            [r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32()];
+        // The geocentric-radians branch was dead and is gone; assert the oracle data never
+        // exercised it rather than trusting the old comment that said so.
+        assert!(iflag <= 0, "case {n} used the dead coord_mode > 0 path");
+
+        let g = distance_azimuth(thei, alei, thsi, alsi);
+
+        // At zero separation the azimuth is arbitrary in both formulations.
+        if want_km > 1.0 {
+            let where_ = || format!("case {n} ({thei},{alei})->({thsi},{alsi}) {want_km} km");
+            let rel = ((g.deltkm - want_km) / want_km).abs() as f64;
+            if rel > worst_km_rel {
+                worst_km_rel = rel;
+                worst_km_at = where_();
+            }
+            let gap = {
+                let d = (g.azesdg - want_azdg).abs() as f64;
+                d.min(360.0 - d)
+            };
+            if gap > worst_az_global {
+                worst_az_global = gap;
+                worst_az_global_at = where_();
+            }
+            if want_km < 500.0 && gap > worst_az_near {
+                worst_az_near = gap;
+                worst_az_near_at = where_();
+            }
         }
         n += 1;
     }
     r.assert_exhausted();
     assert_eq!(n, 2000);
+
+    println!(
+        "delaz5 fixture, 2000 cases:\n  \
+         worst distance      {:.4}% at {worst_km_at}\n  \
+         worst azimuth <500km {worst_az_near:.4} deg at {worst_az_near_at}\n  \
+         worst azimuth global {worst_az_global:.4} deg at {worst_az_global_at}",
+        worst_km_rel * 100.0
+    );
+
+    // DELAZ5 is systematically SHORT: a 6371.0 km mean-radius sphere plus a
+    // tangent-scaling stand-in for the ellipsoid, against a true geodesic. The largest
+    // relative distance error is at the SHORT end -- 0.32% at 1.04 km, i.e. 3 metres --
+    // where DELAZ5 switches to its near-coincident half-chord formulation.
+    assert!(
+        worst_km_rel < 0.005,
+        "distance moved by {:.4}% at {worst_km_at}, more than the 0.5% §2.5 allows for",
+        worst_km_rel * 100.0
+    );
+    assert!(
+        worst_az_near < 0.1,
+        "azimuth moved by {worst_az_near:.4} degrees at {worst_az_near_at}; under 500 km \
+         the two formulations should agree to 0.1 degrees"
+    );
 }
 
 #[test]

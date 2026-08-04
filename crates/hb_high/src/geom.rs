@@ -2,130 +2,95 @@
 //! tier 1.
 
 /// Outputs of [`distance_azimuth`].
+///
+/// Four of the Fortran's seven outputs are gone with §2.5: `delt` and `deltdg` (the
+/// angular separation, in radians and degrees) and `azse`/`azsedg` (the back azimuth) had
+/// no reader outside the tests that checked them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DistanceAzimuth {
-    /// Angular separation, radians.
-    pub delt: f32,
-    /// Angular separation, degrees.
-    pub deltdg: f32,
     /// Great-circle distance, km.
     pub deltkm: f32,
     /// Azimuth event to station, radians, in `[0, 2pi)`.
     pub azes: f32,
-    /// Azimuth event to station, degrees.
+    /// Azimuth event to station, degrees, in `[0, 360)`.
     pub azesdg: f32,
-    /// Back azimuth station to event, radians, in `[0, 2pi)`.
-    pub azse: f32,
-    /// Back azimuth station to event, degrees.
-    pub azsedg: f32,
 }
 
-/// `SUBROUTINE DELAZ5(...)` — `hb_high_ref.f:2673`. Geodetic distance and
-/// azimuths via direction cosines.
+/// The WGS84 ellipsoid, built once.
 ///
-/// `coord_mode <= 0` means the inputs are geographic degrees (converted here, including
-/// the 0.9931177 flattening correction); `coord_mode > 0` means geocentric radians.
-/// The original selects this with an arithmetic `IF(I) 50,50,51`, so zero and
-/// negative both take the degrees path.
-///
-/// **The `coord_mode > 0` path is dead code.** `subfault_geometry` assigns `coord_mode=0` immediately
-/// before its first call (`:2626`) and passes the literal `0` at its second
-/// (`:2658`), and those are the only live call sites. The branch is kept for
-/// line-by-line comparability but is deliberately not covered by the goldens.
-///
-/// # Precision
-///
-/// This routine is the clearest example of why precision is tracked per
-/// expression (`PORTING_RULES.md` §2). Sixteen direction-cosine variables are
-/// declared `DOUBLE PRECISION`, but everything else — including the angles fed
-/// to `SIN`/`COS` and every output — is `real*4`. So `C = SIN(THE)` computes a
-/// **single**-precision sine and widens the result, and `C1 = A*AP+B*BP+C*CP`
-/// computes in double and narrows. Both narrowings are load-bearing.
-///
-/// Three separation regimes avoid catastrophic cancellation near 0 and 180
-/// degrees, selected by arithmetic `IF`s on `C1-0.94` and `C1+0.94`.
-pub fn distance_azimuth(event_lat_deg: f32, event_lon_deg: f32, station_lat_deg: f32, station_lon_deg: f32, coord_mode: i32) -> DistanceAzimuth {
-    let (the, ale, ths, als): (f32, f32, f32, f32);
+/// `Geodesic::wgs84()` precomputes series coefficients, and this is called `2 + nx*nw`
+/// times per segment per station — a few thousand times on a real fault — so building it
+/// per call would put that setup in the inner loop for no reason.
+static WGS84: std::sync::OnceLock<geographiclib_rs::Geodesic> = std::sync::OnceLock::new();
 
-    if coord_mode <= 0 {
-        // Geographic degrees. 1.745329252E-2 is the source's own truncated
-        // pi/180; do not replace it with a computed constant.
-        let mut the_ = 1.745329252E-2 * event_lat_deg;
-        let ale_ = 1.745329252E-2 * event_lon_deg;
-        let mut ths_ = 1.745329252E-2 * station_lat_deg;
-        let als_ = 1.745329252E-2 * station_lon_deg;
-        let aaa = 0.9931177 * the_.tan();
-        the_ = aaa.atan();
-        let aaa = 0.9931177 * ths_.tan();
-        ths_ = aaa.atan();
-        (the, ale, ths, als) = (the_, ale_, ths_, als_);
-    } else {
-        (the, ale, ths, als) = (event_lat_deg, event_lon_deg, station_lat_deg, station_lon_deg);
+/// Geodesic distance and azimuth from an event to a station, on WGS84.
+///
+/// Replaces `SUBROUTINE DELAZ5(...)` (`hb_high_ref.f:2673`), ~80 lines of 1970s
+/// direction-cosine geometry: three separation regimes to dodge catastrophic cancellation
+/// near 0 and 180 degrees, a `0.9931177` tangent-scaling trick standing in for the
+/// ellipsoid, a spherical Earth of radius exactly `6371.0` km, and sixteen
+/// `DOUBLE PRECISION` cosines feeding `real*4` trig — `PORTING_RULES.md` §2 used it as the
+/// worked example of why precision has to be tracked per expression.
+///
+/// `geographiclib_rs` solves the actual inverse geodesic problem, so all of that goes: no
+/// regimes, no flattening approximation, no mixed precision.
+///
+/// # What moved, measured
+///
+/// Over source-station separations from 4 to 409 km around the Canterbury faults this port
+/// is run on:
+///
+/// | | worst |
+/// | --- | --- |
+/// | distance | **0.058%**, about 240 m at 409 km |
+/// | azimuth | **0.0065 degrees** |
+///
+/// `DELAZ5` is systematically **short**, consistently signed, which is what the
+/// mean-radius sphere plus the tangent-scaling trick produce against a true geodesic. The
+/// new values are the correct ones. Distance reaches the waveform through the
+/// path-duration table and the `1/R` geometric spreading, both smooth in distance, so a
+/// 0.05% shift lands far inside Tier C's +-2% equivalence band.
+///
+/// # The `coord_mode` argument is gone
+///
+/// `DELAZ5` took a flag selecting geographic degrees or geocentric radians. The radians
+/// path was dead — `subfault_geometry` assigned `0` immediately before its first call and
+/// passed the literal `0` at its second, and those were the only live callers.
+pub fn distance_azimuth(
+    event_lat_deg: f32,
+    event_lon_deg: f32,
+    station_lat_deg: f32,
+    station_lon_deg: f32,
+) -> DistanceAzimuth {
+    use geographiclib_rs::InverseGeodesic;
+
+    let geodesic = WGS84.get_or_init(geographiclib_rs::Geodesic::wgs84);
+
+    // The four-element form is `(s12, azi1, azi2, a12)`. Note that the THREE-element form
+    // is `(azi1, azi2, a12)` -- the tuple width changes what the earlier slots mean, so
+    // this annotation is load-bearing and a shorter tuple silently yields azimuths where
+    // a distance is expected.
+    let (metres, azimuth_deg, _back_azimuth_deg, _arc_deg): (f64, f64, f64, f64) = geodesic
+        .inverse(
+            event_lat_deg as f64,
+            event_lon_deg as f64,
+            station_lat_deg as f64,
+            station_lon_deg as f64,
+        );
+
+    // geographiclib reports azimuth in (-180, 180]; the callers want [0, 360). Wrapping
+    // 360.0 exactly to 0.0 keeps the range half-open after the f32 narrowing, which a
+    // bare `+ 360.0` does not for azimuths within an f32 ulp of zero from below.
+    let mut azesdg = if azimuth_deg < 0.0 { azimuth_deg + 360.0 } else { azimuth_deg } as f32;
+    if azesdg >= 360.0 {
+        azesdg = 0.0;
+    }
+    let mut azes = azesdg.to_radians();
+    if azes >= std::f32::consts::TAU {
+        azes = 0.0;
     }
 
-    // Single-precision trig, widened into the double-precision cosines.
-    let c = the.sin() as f64;
-    let ak = -(the.cos() as f64);
-    let d = ale.sin() as f64;
-    let e = -(ale.cos() as f64);
-    let a = ak * e;
-    let b = -ak * d;
-    let g = -c * e;
-    let h = c * d;
-    let cp = ths.sin() as f64;
-    let akp = -(ths.cos() as f64);
-    let dp = als.sin() as f64;
-    let ep = -(als.cos() as f64);
-    let ap = akp * ep;
-    let bp = -akp * dp;
-    let gp = -cp * ep;
-    let hp = cp * dp;
-
-    // Double-precision dot product narrowed to real*4.
-    let c1 = (a * ap + b * bp + c * cp) as f32;
-
-    // IF(C1-0.94) 30,31,31 -- below 0.94 goes to 30, otherwise to 31.
-    let delt: f32 = if c1 - 0.94 < 0.0 {
-        // IF(C1+0.94) 28,28,29 -- at or below -0.94 goes to 28.
-        if c1 + 0.94 <= 0.0 {
-            // Label 28: near-antipodal, use the half-chord of the sum.
-            let mut c1b = ((a + ap) * (a + ap) + (b + bp) * (b + bp) + (c + cp) * (c + cp)) as f32;
-            c1b = c1b.sqrt();
-            c1b = c1b / 2.0;
-            2.0 * c1b.acos()
-        } else {
-            // Label 29: the well-conditioned middle range.
-            c1.acos()
-        }
-    } else {
-        // Label 31: nearly coincident, use the half-chord of the difference.
-        let mut c1b = ((a - ap) * (a - ap) + (b - bp) * (b - bp) + (c - cp) * (c - cp)) as f32;
-        c1b = c1b.sqrt();
-        c1b = c1b / 2.0;
-        2.0 * c1b.asin()
-    };
-
-    // Label 33: common tail.
-    let deltkm = 6371.0 * delt;
-    let c3 = ((ap - d) * (ap - d) + (bp - e) * (bp - e) + cp * cp - 2.0) as f32;
-    let c4 = ((ap - g) * (ap - g) + (bp - h) * (bp - h) + (cp - ak) * (cp - ak) - 2.0) as f32;
-    let c5 = ((a - dp) * (a - dp) + (b - ep) * (b - ep) + c * c - 2.0) as f32;
-    let c6 = ((a - gp) * (a - gp) + (b - hp) * (b - hp) + (c - akp) * (c - akp) - 2.0) as f32;
-    let deltdg = 57.29577951 * delt;
-
-    let mut azes = c3.atan2(c4);
-    // IF(AZES) 80,81,81 -- only a strictly negative value is wrapped.
-    if azes < 0.0 {
-        azes = 6.283185308 + azes;
-    }
-    let mut azse = c5.atan2(c6);
-    if azse < 0.0 {
-        azse = 6.283185308 + azse;
-    }
-    let azesdg = 57.29577951 * azes;
-    let azsedg = 57.29577951 * azse;
-
-    DistanceAzimuth { delt, deltdg, deltkm, azes, azesdg, azse, azsedg }
+    DistanceAzimuth { deltkm: (metres / 1000.0) as f32, azes, azesdg }
 }
 
 /// `subroutine subfault_geometry(...)` — `hb_high_ref.f:2593`.
@@ -250,7 +215,7 @@ pub fn subfault_geometry(
         } else {
             (thei + 1.0, alsi)
         };
-        let g = distance_azimuth(thei, alei, thsi, alsi2, 0);
+        let g = distance_azimuth(thei, alei, thsi, alsi2);
         let az = g.azesdg;
         let dis = g.deltkm;
         let x = dis * (pi * az / 180.0).sin();
@@ -285,7 +250,7 @@ pub fn subfault_geometry(
 
             let zm1 = top_depth_km + b1;
 
-            let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg, 0);
+            let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg);
             let dis = g.deltkm;
 
             rays[(j - 1) * along_strike_count + (i - 1)] = SubfaultRay {
