@@ -1,0 +1,20 @@
+[package]
+name = "hb_high"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic high-frequency seismogram generator"
+
+# No dependencies by design. The port must not pull in FFTW or any C library,
+# and no crate may be allowed to substitute its own float arithmetic for the
+# Fortran's. Complex arithmetic is hand-written in fort.rs for the same reason.
+[dependencies]
+
+[[bin]]
+name = "hb_high"
+path = "src/main.rs"
+
+[lib]
+name = "hb_high"
+path = "src/lib.rs"

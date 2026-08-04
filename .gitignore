@@ -1,0 +1,5 @@
+/target
+/reference/build
+/harness/out
+*.o
+*.mod
