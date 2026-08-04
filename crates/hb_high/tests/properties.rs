@@ -426,16 +426,17 @@ proptest! {
         dt in 0.001f32..0.05,
     ) {
         let n = 1usize << exponent;
-        let mut acceleration = Array1::<f32>::new(n);
         let (mut rng, _) = Pcg32::seed(11);
-        for i in 1..=n {
-            acceleration[i] = rng.next_f32() - 0.5 + offset;
-        }
+        let mut acceleration: Vec<f32> =
+            (0..n).map(|_| rng.next_f32() - 0.5 + offset).collect();
         let before = acceleration.clone();
-        remove_quadratic_trend(dt, acceleration.as_mut_slice());
+        remove_quadratic_trend(dt, &mut acceleration);
 
-        let correction: Vec<f64> =
-            (1..=n).map(|i| (acceleration[i] - before[i]) as f64).collect();
+        let correction: Vec<f64> = acceleration
+            .iter()
+            .zip(&before)
+            .map(|(after, before)| (after - before) as f64)
+            .collect();
         let span = correction.iter().fold(0.0f64, |acc, c| acc.max(c.abs()));
         prop_assume!(span > 1e-6);
 
@@ -446,9 +447,24 @@ proptest! {
                 - correction[k];
             worst = worst.max(third.abs());
         }
+        // The correction is recovered by differencing two `f32` samples of magnitude
+        // ~|acceleration|, so it carries about half an ulp of THAT magnitude however small
+        // the correction itself is. The third difference sums four such values with
+        // coefficients 1, 3, 3, 1, so its noise floor is ~8 half-ulps and is set by the
+        // acceleration, not by the span.
+        //
+        // Normalising by `span` alone therefore asserts a precision the `f32` output
+        // cannot carry, and flakes exactly when `c1` and `c2` nearly cancel: the span
+        // shrinks and the noise floor does not. Seen for real at span = 1.8e-3, where the
+        // third difference was 2.1e-7 against a 1.8e-7 threshold -- the predicted floor,
+        // not a defect in the routine.
+        let scale = before.iter().fold(0.0f64, |acc, a| acc.max(a.abs() as f64));
+        let noise_floor = 8.0 * f32::EPSILON as f64 * scale;
         prop_assert!(
-            worst < 1e-4 * span,
-            "third difference {worst} is large against span {span}: correction is not quadratic"
+            worst < 1e-4 * span + noise_floor,
+            "third difference {worst} exceeds {:e} (1e-4 of span {span} plus an f32 \
+             recovery floor of {noise_floor:e}): correction is not quadratic",
+            1e-4 * span + noise_floor
         );
     }
 }
