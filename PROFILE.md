@@ -152,10 +152,22 @@ changes the order of operations. Only relevant to alpine-scale faults.
 
 ## What not to do
 
-**Do not strip the `Array1` 1-based wrapper from hot loops.** This was the
-obvious candidate and the measurement kills it: an indexed sum over 65536
-elements is **60.06 µs against 60.10 µs** for a plain slice sum — the wrapper is
-*marginally faster*, i.e. the difference is pure noise. LLVM already elides the bounds checks in these loops. Removing
+**~~Do not strip the `Array1` 1-based wrapper from hot loops.~~ — WRONG, measured.**
+This section previously argued the wrapper was free, from `array/indexed_sum` at
+60.06 µs against `array/slice_sum` at 60.10 µs over 65536 elements. §2.3 converted
+`rng.rs` and instructions retired fell **5.13%** for the whole program, with the
+`fft.rs` conversion immediately before it contributing zero.
+
+The benchmark was not wrong, it was unrepresentative. 65536 elements in 60 µs is
+0.9 ns per element, about three cycles — **neither variant vectorised**, so the pair
+measured a case where the wrapper cannot matter and the conclusion was generalised from
+it. `fill_normal_deviates`'s two renormalisation passes are a sum of squares and a scale
+over `mmv = 262144` elements, both trivially vectorisable, and the wrapper's `Index`
+impl — bounds-checked and `#[track_caller]`, which forces a caller-location argument —
+stops that. Over three passes per station the difference is large.
+
+The lesson is about the benchmark, not the wrapper: a microbenchmark that fails to
+vectorise cannot answer whether something blocks vectorisation. LLVM already elides the bounds checks in these loops. Removing
 the wrapper would mean rewriting index arithmetic across every kernel, which
 `PORTING_RULES.md` §3 identifies as the single most likely way to introduce a
 silent off-by-one, in exchange for nothing measurable.

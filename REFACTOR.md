@@ -551,6 +551,14 @@ worth taking seriously rather than reflexively reaching for slices.
   later pass wants `Zip`/`azip!` across the spectral loops badly enough to pay for the
   subtree.
 
+> **§2.3 has a performance benefit after all, measured.** This section and `PROFILE.md`
+> both said it was size and readability only. Converting `rng.rs` alone cut instructions
+> retired by **5.13%** for the whole program. The wrapper's `Index` impl is
+> bounds-checked and `#[track_caller]`, which blocks vectorisation of the two
+> renormalisation passes over `mmv = 262144` elements in `fill_normal_deviates`. The
+> `fft.rs` conversion just before it bought exactly zero, so the effect is specific to
+> hot loops over large buffers — which is where the remaining modules' loops are too.
+
 **Do `Array2` first, and only after §2.6's defect 1.** The column-major layout is
 load-bearing today for exactly one reason: `stdd(0,l)` aliases across columns
 (`PORTING_RULES.md` §7). Fixing that defect removes the only observable dependence on
