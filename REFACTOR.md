@@ -75,6 +75,39 @@ consumer narrows to `f32`. So keep running it, and treat the result as a *classi
 twenty small commits finds a regression in four or five parity runs. Over three large
 ones it tells you almost nothing.
 
+### How sensitive the gates actually are — measured, and lower than assumed
+
+After §2.1, §2.2, §2.2b, §2.4 and both §2.6 defect fixes, Tier C at 2500 seeds returned
+**the same verdict counts as before Stage 2 began**: 324 certified, 0 refuted, 51
+undetermined. That is reassuring, but it is weaker evidence than it looks, and the reason
+is worth knowing before reading any future "0 REFUTED".
+
+Comparing the endpoint geometric-mean ratios directly against the pre-Stage-2 run:
+
+| | |
+| --- | --- |
+| endpoints compared | 375 |
+| `gm_ratio` **bit-identical** | **370** |
+| changed at all | 5, by ~1e-6 |
+
+So the intensity measures barely moved. That is not a property of the gates being lax —
+it is a property of what they measure. PGA, PGV, `Ds` and pSA are peaks, integrals and
+response-spectrum ordinates, and a perturbation of ~1e-5 in the waveform samples does not
+survive into any of them. Tier B reporting exact unity through five numerical changes is
+the same fact seen from a different angle.
+
+**The consequence for the workflow.** For rounding-scale changes, the sensitive
+instrument is `run_selfparity.sh` — a direct waveform comparison that resolves individual
+ulps — and the statistical tiers are *acceptance criteria*, not detectors. Do not read a
+green Tier C as evidence that a change was small; read it as evidence that whatever the
+change was, it does not move the quantities engineering cares about. Those are different
+claims and only the second is supported.
+
+Where the tiers do earn their keep is the failure mode self-parity cannot see: a
+**systematic** drift accumulated across many individually-small commits. The number to
+watch there is the pooled bias, which after all of Stage 2 is **-0.003%** against an
+endpoint-to-endpoint sd of 0.575%. That is the statement worth having.
+
 ### Tier D is calibrated, and it found something
 
 The A/A control (`--aa`, one binary split in half, 600v600) returns **0 of 15
