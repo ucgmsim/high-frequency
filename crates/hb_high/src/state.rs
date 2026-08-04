@@ -156,6 +156,25 @@ impl VelocityModelInput {
     }
 }
 
+impl From<InputLayer> for Layer {
+    /// The unperturbed path: `/vmod_in/` to `/vmod/` verbatim, widening the two `real*4`
+    /// fields the working model holds in double.
+    ///
+    /// The Fortran spells this out field by field inside the station loop. It is a
+    /// conversion, and now says so.
+    fn from(l: InputLayer) -> Self {
+        Self {
+            depth_km: l.depth_km as f64,
+            thickness_km: l.thickness_km as f64,
+            vp_km_s: l.vp_km_s,
+            vsh_km_s: l.vsh_km_s,
+            density_g_cm3: l.density_g_cm3,
+            attenuation_p: l.attenuation_p,
+            attenuation_s: l.attenuation_s,
+        }
+    }
+}
+
 impl std::ops::Index<usize> for VelocityModelInput {
     type Output = InputLayer;
     #[inline]

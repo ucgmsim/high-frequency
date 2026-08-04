@@ -252,18 +252,12 @@ pub fn simulate(
     // ------------------------------------------------- the single station ---
     let mut d10 = 1000.0f32;
 
-    if nlskip >= 0 {
-        unreachable!("grandvel is dead under the production deck (nl_skip < 0)");
-    } else {
-        for k in 0..j0 {
-            vmod[k].depth_km = vmod_in[k].depth_km as f64;
-            vmod[k].thickness_km = vmod_in[k].thickness_km as f64;
-            vmod[k].vp_km_s = vmod_in[k].vp_km_s;
-            vmod[k].vsh_km_s = vmod_in[k].vsh_km_s;
-            vmod[k].density_g_cm3 = vmod_in[k].density_g_cm3;
-            vmod[k].attenuation_p = vmod_in[k].attenuation_p;
-            vmod[k].attenuation_s = vmod_in[k].attenuation_s;
-        }
+    // A non-negative `nl_skip` would route the model through `grandvel`, the
+    // velocity-model perturbation, which is dead under the production deck and not
+    // ported. Asserted rather than branched on, so the live path is not an `else`.
+    assert!(nlskip < 0, "grandvel is dead under the production deck (nl_skip < 0)");
+    for k in 0..j0 {
+        vmod[k] = vmod_in[k].into();
     }
 
     if config.draws_normal_deviates() {
