@@ -28,7 +28,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, StressParamAdjust,
 };
-use crate::fort::{round_half_away_from_zero, Array2, Complex32};
+use crate::fort::{round_half_away_from_zero, Complex32};
 use crate::geom::subfault_geometry;
 use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, StochModel};
@@ -221,9 +221,10 @@ pub fn simulate(
     // block because Fortran had no better option; here it is what it actually is, and it
     // now matches `spectrum` and `subfault_acc` beside it.
     //
-    // §2.3 could only do this once §2.6's defect-1 fix landed: `Array2`'s column-major
-    // layout was load-bearing for exactly one thing, the `stdd(0,l)` alias across
-    // columns, and that read is gone.
+    // §2.3 could only do this once §2.6's defect-1 fix landed: the column-major layout of
+    // the `fort::Array2` this used to be was load-bearing for exactly one thing, the
+    // `stdd(0,l)` alias across columns, and that read is gone. `Array2` itself is now gone
+    // too -- this was one of its last two uses.
     let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
     // This one STAYS at `mmv`, and the reason is not laziness. `fill_normal_deviates`
     // is called with `MMV` below, and the number of deviates drawn is part of the RNG
@@ -273,19 +274,22 @@ pub fn simulate(
         // Re-initialised per segment, which is why the stderr distance below
         // reports only the last segment. Reproduced.
         d10 = 10000.0;
-        let mut window_s = Array2::<f32>::new(params::NQ, params::NP);
+        // One entry per real subfault. Was `(NQ, NP)` = 600x100 regardless of the fault,
+        // the last of the compile-time-ceiling allocations §2.6b set out to remove.
+        let mut window_s = vec![0.0f32; seg.subfault_total()];
         let mut shear_velocity_km_s = 0.0f32;
         // Depth-major: j slowest. The subfault pass below goes the other way.
         for (i, j) in seg.depth_major() {
+            let ray = geom.at(i, j);
             // No `shear_velocity_km_s = vsh_km_s(1)` default here, unlike the subfault pass
             // below: if zet exceeds every depth, shear_velocity_km_s keeps its previous
             // value. Undefined on the very first subfault of the first
             // station in the Fortran; zero here.
-            if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth_km[k] >= geom.depth_km[(i, j)] as f64) {
+            if let Some(ksrc) = (1..=j0).find(|&k| vmod.depth_km[k] >= ray.depth_km as f64) {
                 shear_velocity_km_s = vmod.vsh_km_s[ksrc] as f32;
             }
 
-            let rvf = rv.factor(geom.depth_km[(i, j)]);
+            let rvf = rv.factor(ray.depth_km);
             let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
 
@@ -296,7 +300,7 @@ pub fn simulate(
             let mut d0 = 0.0f32;
             let mut slp = 0.0f32;
             for kk in 0..ndur {
-                if geom.slant_km[(i, j)] > rdur[kk] {
+                if ray.slant_km > rdur[kk] {
                     r0 = rdur[kk];
                     d0 = dpth[kk];
                     slp = dpdr[kk];
@@ -306,14 +310,15 @@ pub fn simulate(
             let fce = fc_coeff * rvf * shear_velocity_km_s / (dlm * pi);
             let tw0 = 1.0 / fce;
             let tw0 = moment_scale.sqrt() * tw0;
-            let dpath = d0 + slp * (geom.slant_km[(i, j)] - r0);
+            let dpath = d0 + slp * (ray.slant_km - r0);
             // VERSION1: no 81.92 s cap.
-            window_s[(i, j)] = 2.12 * (tw0 + dpath);
+            let window = 2.12 * (tw0 + dpath);
+            window_s[seg.grid_index(i, j)] = window;
 
-            if window_s[(i, j)] > tmax {
-                tmax = window_s[(i, j)];
+            if window > tmax {
+                tmax = window;
             }
-            d10 = d10.min(geom.slant_km[(i, j)]);
+            d10 = d10.min(ray.slant_km);
         }
 
         let ntmax = (2.0 * tmax / dt) as i32 as usize;
@@ -348,9 +353,12 @@ pub fn simulate(
         // --- subfault pass. NOTE: i outer, j inner -- the OPPOSITE order to
         // the window pass above. irandcnt is consumed in THIS order. -------
         for (i, j) in seg.strike_major() {
-            if seg.slip[(i, j)] < 0.001 {
+            let subfault = seg.at(i, j);
+            if subfault.slip < 0.001 {
                 continue; // goto 4 lands on the inner loop's terminator
             }
+            let ray_geometry = geom.at(i, j);
+            let subfault_window_s = window_s[seg.grid_index(i, j)];
 
             for il in 0..np2 {
                 subfault_acc[0][il] = 0.0;
@@ -361,7 +369,7 @@ pub fn simulate(
             // This pass DOES default shear_velocity_km_s/density_g_cm3 before the lookup.
             let mut shear_velocity_km_s = vmod.vsh_km_s[1] as f32;
             let mut density_g_cm3 = vmod.density_g_cm3[1] as f32;
-            let ksrc = match (1..=j0).find(|&k| vmod.depth_km[k] >= geom.depth_km[(i, j)] as f64) {
+            let ksrc = match (1..=j0).find(|&k| vmod.depth_km[k] >= ray_geometry.depth_km as f64) {
                 Some(k) => {
                     shear_velocity_km_s = vmod.vsh_km_s[k] as f32;
                     density_g_cm3 = vmod.density_g_cm3[k] as f32;
@@ -376,7 +384,7 @@ pub fn simulate(
                 println!(" wrong!");
             }
 
-            let base_rvf = rv.factor(geom.depth_km[(i, j)]);
+            let base_rvf = rv.factor(ray_geometry.depth_km);
             let mut rvf = base_rvf;
             if rvsig1 > 0.0 {
                 irandcnt += 1;
@@ -389,7 +397,7 @@ pub fn simulate(
             let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
             let fc_coeff = czero * (1.0 + fcfac) / alphat;
             let fce = fc_coeff * rvf * shear_velocity_km_s / dlm / pi;
-            let rise = seg.rise_time_s[(i, j)];
+            let rise = subfault.rise_time_s;
 
             let mode = 4; // hardwired SH
             for &ray_type in &config.rayset {
@@ -399,29 +407,29 @@ pub fn simulate(
                 // green_function unconditionally and overwrites the results below,
                 // and type 0 borrows type 1's tracing to do it.
                 let g = green_function(
-                    &mut ray, &vmod, j0, geom.depth_km[(i, j)], geom.horiz_km[(i, j)],
+                    &mut ray, &vmod, j0, ray_geometry.depth_km, ray_geometry.horiz_km,
                     ray_type.trace_type(), mode,
                 );
                 let mut stime = g.stime;
                 let mut rpath = g.rpath;
                 let mut qbar = g.qbar;
-                let mut sub_tstart = stime - tw_eps * window_s[(i, j)];
+                let mut sub_tstart = stime - tw_eps * subfault_window_s;
 
                 if kind == RayKind::StraightRay {
-                    rpath = geom.slant_km[(i, j)];
+                    rpath = ray_geometry.slant_km;
                     qbar = rpath / (shear_velocity_km_s * 150.0);
                     stime = rpath / 3.7;
                     sub_tstart = 0.7 * stime;
                 }
 
-                let tw = window_s[(i, j)];
                 for kf in 1..=3 {
                     let mut fmx1 = fmx;
                     if fmx1 > 15.0 && kf == 3 {
                         fmx1 = 15.0;
                     }
                     stochastic_spectrum(
-                        &mut rng, np2, rpath, tw, tw_eps, tw_eta, shear_velocity_km_s, density_g_cm3, dt,
+                        &mut rng, np2, rpath, subfault_window_s, tw_eps, tw_eta,
+                        shear_velocity_km_s, density_g_cm3, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
                         &mut spectrum[kf - 1], &freq, qbar, qfexp,
                         moment_scale,
@@ -450,11 +458,11 @@ pub fn simulate(
                 let th = match kind {
                     // The straight-ray approximation ignores the traced ray
                     // parameter and uses the geometric take-off angle.
-                    RayKind::StraightRay => geom.takeoff_rad[(i, j)],
+                    RayKind::StraightRay => ray_geometry.takeoff_rad,
                     RayKind::Upgoing => pi - incidence,
                     RayKind::Downgoing => incidence,
                 };
-                let pa = geom.azimuth_rad[(i, j)];
+                let pa = ray_geometry.azimuth_rad;
 
                 let component_rad = -90.0 * deg_to_rad;
                 horizontal_radiation_spectrum(
@@ -489,7 +497,7 @@ pub fn simulate(
                         ratim += (rng.next_f32() - 0.5) * 0.1 * ratim;
                     }
                 } else {
-                    ratim = seg.rupture_time_s[(i, j)];
+                    ratim = subfault.rupture_time_s;
                 }
 
                 // int() truncates toward zero, so a negative
@@ -520,7 +528,7 @@ pub fn simulate(
                     // `acc[k2 ..= k2 + np2 - 1]`.
                     let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
 
-                    let sd = seg.slip[(i, j)];
+                    let sd = subfault.slip;
                     let mut li = k2;
                     while li <= kend {
                         // `k2` can be negative. Writes below index 1 land before DS in
@@ -529,8 +537,8 @@ pub fn simulate(
                         if li >= 1 {
                             let idx = (li - k2) as usize;
                             // `li` is the Fortran's 1-based sample number, so the
-                            // 0-based slot is one lower. Array2's second subscript was
-                            // 1-based and hid this.
+                            // 0-based slot is one lower. The `fort::Array2` this used to
+                            // be had a 1-based second subscript, which hid this.
                             let sample = li as usize - 1;
                             for component in 0..3 {
                                 acc[component][sample] += sd * subfault_acc[component][idx];
@@ -691,28 +699,32 @@ fn normalise_source(
     // supplies the total moment when the deck asks for it to be derived.
     let mut xsum = 0.0f32;
 
-    for iv in 0..nevnt {
-        let dwdj = stoch.segments[iv].subfault_width_km * (stoch.segments[iv].dip_deg * deg_to_rad).sin();
-        let down_dip_count = stoch.segments[iv].down_dip_count;
-        let along_strike_count = stoch.segments[iv].along_strike_count;
-        for j in 1..=down_dip_count {
-            let zdep = stoch.segments[iv].top_depth_km + (j as f32 - 0.5) * dwdj;
+    for segment in &mut stoch.segments {
+        let dwdj = segment.subfault_width_km * (segment.dip_deg * deg_to_rad).sin();
+        let top_depth_km = segment.top_depth_km;
+        // vsh_km_s and density_g_cm3 are real*8 and the Fortran's dx/dw real*4, so the
+        // WHOLE product below is computed in double (dx/dw promoted) and narrows only on
+        // assignment to xmu, which is implicit real*4. Narrowing earlier shifts every
+        // subfault moment by an ulp or two.
+        let (length_km, width_km) =
+            (segment.subfault_length_km as f64, segment.subfault_width_km as f64);
+
+        // Depth-major, which is storage order, so `xsum` accumulates in the Fortran's
+        // order without any index arithmetic. Rigidity is per depth row, not per
+        // subfault, which is why the row is the unit here.
+        for (row_index, row) in segment.depth_rows_mut().enumerate() {
+            let zdep = top_depth_km + (row_index as f32 + 0.5) * dwdj;
             // Layer lookup. Falls through with k = j0+1 if zdep is below the
             // model, which the Fortran then indexes -- so the fall-through is
             // load-bearing, not an error path.
             let k = (1..=layer_count).find(|&kk| zdep <= vmod_in.depth_km[kk]).unwrap_or(layer_count + 1);
-            // vsh_km_s and density_g_cm3 are real*8 and the Fortran's dx/dw real*4, so the WHOLE
-            // product is computed in double (dx/dw promoted) and narrows only on
-            // assignment to xmu, which is implicit real*4. Narrowing earlier
-            // shifts every subfault moment by an ulp or two.
             let xmu = (vmod_in.vsh_km_s[k] * vmod_in.vsh_km_s[k] * vmod_in.density_g_cm3[k]
-                * stoch.segments[iv].subfault_length_km as f64
-                * stoch.segments[iv].subfault_width_km as f64) as f32;
+                * length_km
+                * width_km) as f32;
 
-            for i in 1..=along_strike_count {
-                let v = xmu * stoch.segments[iv].slip[(i, j)];
-                stoch.segments[iv].slip[(i, j)] = v;
-                xsum += v;
+            for subfault in row {
+                subfault.slip = xmu * subfault.slip;
+                xsum += subfault.slip;
             }
         }
     }
@@ -724,18 +736,19 @@ fn normalise_source(
     // --- pass 3: normalise relative moments to average weight unity -----------
     let mut wsum = 0.0f32;
     let mut subfault_count = 0usize;
-    for s in &stoch.segments {
-        for (i, j) in s.depth_major() {
-            if s.slip[(i, j)] > 0.001 {
-                wsum += s.slip[(i, j)];
+    for segment in &stoch.segments {
+        // Depth-major again, so the slice order is the summation order.
+        for subfault in segment.depth_rows().flatten() {
+            if subfault.slip > 0.001 {
+                wsum += subfault.slip;
                 subfault_count += 1;
             }
         }
     }
     let scale = subfault_count as f32 / wsum;
-    for s in &mut stoch.segments {
-        for (i, j) in s.depth_major() {
-            s.slip[(i, j)] *= scale;
+    for segment in &mut stoch.segments {
+        for subfault in segment.depth_rows_mut().flatten() {
+            subfault.slip *= scale;
         }
     }
 

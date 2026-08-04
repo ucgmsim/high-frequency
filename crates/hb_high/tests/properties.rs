@@ -178,8 +178,8 @@ proptest! {
         );
         for i in 1..=along {
             for j in 1..=down {
-                let (slant, horiz, depth) =
-                    (g.slant_km[(i, j)], g.horiz_km[(i, j)], g.depth_km[(i, j)]);
+                let ray = g.at(i, j);
+                let (slant, horiz, depth) = (ray.slant_km, ray.horiz_km, ray.depth_km);
                 prop_assert!(slant.is_finite() && horiz.is_finite() && depth.is_finite());
                 let hyp = (horiz * horiz + depth * depth).sqrt();
                 prop_assert!(
@@ -203,10 +203,10 @@ proptest! {
         for i in 1..=along {
             for j in 2..=down {
                 prop_assert!(
-                    g.depth_km[(i, j)] > g.depth_km[(i, j - 1)],
+                    g.at(i, j).depth_km > g.at(i, j - 1).depth_km,
                     "({i},{j}) depth {} not below {}",
-                    g.depth_km[(i, j)],
-                    g.depth_km[(i, j - 1)]
+                    g.at(i, j).depth_km,
+                    g.at(i, j - 1).depth_km
                 );
             }
         }
@@ -767,7 +767,7 @@ proptest! {
             prop_assert_eq!(segment.along_strike_count, along);
             prop_assert_eq!(segment.down_dip_count, down);
             for (i, j) in segment.depth_major() {
-                prop_assert_eq!(segment.slip[(i, j)], 1.0);
+                prop_assert_eq!(segment.at(i, j).slip, 1.0);
             }
         }
     }

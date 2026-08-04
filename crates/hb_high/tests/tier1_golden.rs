@@ -246,11 +246,12 @@ fn even_dist2_matches_fortran() {
         for i in 1..=nx {
             for j in 1..=nw {
                 let tag = format!("subfault_geometry case {cases} ({i},{j})");
-                eq32(&format!("{tag} dst"), g.horiz_km[(i, j)], r.f32());
-                eq32(&format!("{tag} rl"), g.slant_km[(i, j)], r.f32());
-                eq32(&format!("{tag} th"), g.takeoff_rad[(i, j)], r.f32());
-                eq32(&format!("{tag} ph"), g.azimuth_rad[(i, j)], r.f32());
-                eq32(&format!("{tag} zet"), g.depth_km[(i, j)], r.f32());
+                let ray = g.at(i, j);
+                eq32(&format!("{tag} dst"), ray.horiz_km, r.f32());
+                eq32(&format!("{tag} rl"), ray.slant_km, r.f32());
+                eq32(&format!("{tag} th"), ray.takeoff_rad, r.f32());
+                eq32(&format!("{tag} ph"), ray.azimuth_rad, r.f32());
+                eq32(&format!("{tag} zet"), ray.depth_km, r.f32());
             }
         }
         cases += 1;

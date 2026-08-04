@@ -151,24 +151,67 @@ pub fn distance_azimuth(event_lat_deg: f32, event_lon_deg: f32, station_lat_deg:
 /// `pi` is the source's own 9-digit `3.14159265`, not `std::f32::consts::PI`.
 /// Everything here is `f32`; there is no double-precision arithmetic.
 #[allow(clippy::too_many_arguments)]
-/// Per-subfault source-to-station geometry, every array indexed `(i, j)`.
+/// One subfault's source-to-station geometry.
 ///
 /// The Fortran keeps these as five separate `(nq, np)` arrays named `rlsu`, `phsu`,
-/// `thsu`, `dst` and `zet`; they are always allocated, filled and indexed together,
-/// so they are one value.
-pub struct SubfaultGeometry {
+/// `thsu`, `dst` and `zet`. Every read of one is at the same `(i, j)` as the other
+/// four, so this is one value per subfault rather than five grids — §2.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SubfaultRay {
     /// `rlsu` — slant distance from subfault to station, km. Includes depth, so
     /// this is what the path-duration table and `d10` are computed from.
-    pub slant_km: crate::fort::Array2<f32>,
+    pub slant_km: f32,
     /// `phsu` — station azimuth seen from the subfault, radians.
-    pub azimuth_rad: crate::fort::Array2<f32>,
+    pub azimuth_rad: f32,
     /// `thsu` — geometric take-off angle, radians. Used in place of the traced ray
     /// parameter under the straight-ray approximation.
-    pub takeoff_rad: crate::fort::Array2<f32>,
+    pub takeoff_rad: f32,
     /// `dst` — horizontal distance from subfault to station, km.
-    pub horiz_km: crate::fort::Array2<f32>,
+    pub horiz_km: f32,
     /// `zet` — subfault depth below the surface, km.
-    pub depth_km: crate::fort::Array2<f32>,
+    pub depth_km: f32,
+}
+
+/// Every subfault of one segment, as seen from one station.
+///
+/// # Why the accessor is 1-based when §2.3 converted everything else to 0-based
+///
+/// `(i, j)` here is a *subfault number* — subfault `i` along strike, `j` down dip — not
+/// a storage offset, and the physical formulas that consume it are written in terms of
+/// that number: the along-strike coordinate is `(i - 0.5) * length`, so the first
+/// subfault sits half a cell from the edge. §2.3's win was for storage indices, where
+/// 1-based-ness is pure friction and blocks vectorisation. Renumbering a domain
+/// quantity from 1 to 0 would put a `+ 1` into every one of those formulas and make
+/// them *less* readable, for nothing measurable — these loops are over a few hundred
+/// branchy elements.
+///
+/// So the 1-based-ness stays, but it now lives in exactly one place — [`Self::at`] —
+/// instead of being spread across five bounds-checked `Index` impls. That is the part
+/// that was worth changing.
+pub struct SubfaultGeometry {
+    along_strike_count: usize,
+    down_dip_count: usize,
+    /// Strike index fastest, matching the deck's one-record-per-depth-row layout.
+    rays: Vec<SubfaultRay>,
+}
+
+impl SubfaultGeometry {
+    /// Subfault `along_strike` (`1..=along_strike_count`) at depth row `down_dip`
+    /// (`1..=down_dip_count`).
+    ///
+    /// Returns by value: `SubfaultRay` is five `f32` and `Copy`, so a caller that wants
+    /// four of the five fields gets them from one lookup instead of four.
+    #[inline]
+    pub fn at(&self, along_strike: usize, down_dip: usize) -> SubfaultRay {
+        assert!(
+            (1..=self.along_strike_count).contains(&along_strike)
+                && (1..=self.down_dip_count).contains(&down_dip),
+            "subfault ({along_strike},{down_dip}) is outside the {}x{} grid",
+            self.along_strike_count,
+            self.down_dip_count
+        );
+        self.rays[(down_dip - 1) * self.along_strike_count + (along_strike - 1)]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,17 +229,12 @@ pub fn subfault_geometry(
     along_strike_count: usize,
     down_dip_count: usize,
 ) -> SubfaultGeometry {
-    // Sized to the actual grid, not to the compile-time maximum. The Fortran
-    // declares these `(nq, np)` = 600x100, i.e. 234 KB each and 1.14 MB for the
-    // five, essentially all of it untouched -- and it allocates them per segment.
-    // Every access below and in every caller is `(i, j)` within `1..=along_strike_count`/`1..=down_dip_count`,
-    // so the layout is not observable and compacting them changes no arithmetic.
+    // Sized to the actual grid, not to the compile-time maximum. The Fortran declares
+    // these `(nq, np)` = 600x100, i.e. 234 KB each and 1.14 MB for the five, essentially
+    // all of it untouched -- and it allocates them per segment. Layout is not observable
+    // (nothing indexes outside the real grid), so compacting them changes no arithmetic.
     // This is the same argument `input::Segment` already makes for its three grids.
-    let mut rl = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
-    let mut ph = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
-    let mut th = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
-    let mut dst = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
-    let mut zet = crate::fort::Array2::<f32>::new(along_strike_count, down_dip_count);
+    let mut rays = vec![SubfaultRay::default(); along_strike_count * down_dip_count];
 
     let pi = 3.14159265f32;
     let alei = 0.0f32;
@@ -250,19 +288,15 @@ pub fn subfault_geometry(
             let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg, 0);
             let dis = g.deltkm;
 
-            dst[(i, j)] = dis;
-            rl[(i, j)] = (dis * dis + zm1 * zm1).sqrt();
-            th[(i, j)] = pi - dis.atan2(zm1);
-            ph[(i, j)] = g.azes;
-            zet[(i, j)] = zm1;
+            rays[(j - 1) * along_strike_count + (i - 1)] = SubfaultRay {
+                horiz_km: dis,
+                slant_km: (dis * dis + zm1 * zm1).sqrt(),
+                takeoff_rad: pi - dis.atan2(zm1),
+                azimuth_rad: g.azes,
+                depth_km: zm1,
+            };
         }
     }
 
-    SubfaultGeometry {
-        slant_km: rl,
-        azimuth_rad: ph,
-        takeoff_rad: th,
-        horiz_km: dst,
-        depth_km: zet,
-    }
+    SubfaultGeometry { along_strike_count, down_dip_count, rays }
 }

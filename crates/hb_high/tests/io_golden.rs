@@ -7,7 +7,7 @@
 //!
 //! Regenerate with `harness/kernels/gen_io_golden.sh`.
 
-use hb_high::input::{insert_air_layer, read_stations, read_stoch, read_velocity_model};
+use hb_high::input::{insert_air_layer, read_stations, read_stoch, read_velocity_model, Subfault};
 use hb_high::state::VelocityModelInput;
 use std::path::PathBuf;
 
@@ -100,11 +100,15 @@ fn check(golden: &str, stoch_name: &str) {
         eq32(&format!("seg {k} dhyp"), s.hypocentre_down_dip_km, r.f32());
         eq32(&format!("seg {k} astop"), s.along_strike_offset_km, r.f32());
         // Driver dump order: ((arr(iv,i,j), i=1,nx), j=1,nw)
-        let dumped = [("sddp", &s.slip), ("rist", &s.rise_time_s), ("rupt", &s.rupture_time_s)];
-        for (name, arr) in dumped {
+        let fields: [(&str, fn(&Subfault) -> f32); 3] = [
+            ("sddp", |sub| sub.slip),
+            ("rist", |sub| sub.rise_time_s),
+            ("rupt", |sub| sub.rupture_time_s),
+        ];
+        for (name, field) in fields {
             for j in 1..=s.down_dip_count {
                 for i in 1..=s.along_strike_count {
-                    eq32(&format!("seg {k} {name}({i},{j})"), arr[(i, j)], r.f32());
+                    eq32(&format!("seg {k} {name}({i},{j})"), field(&s.at(i, j)), r.f32());
                 }
             }
         }

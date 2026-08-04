@@ -1,13 +1,18 @@
-//! Fortran compatibility layer: 1-based arrays, complex arithmetic, and shims
-//! for the intrinsics whose semantics differ from the obvious Rust equivalent.
+//! Fortran compatibility layer: the 1-based array, complex arithmetic, and shims for
+//! the intrinsics whose semantics differ from the obvious Rust equivalent.
 //!
-//! Everything here exists to make transliteration mechanical. See
-//! `PORTING_RULES.md` §3 and §4.
+//! Everything here exists to make transliteration mechanical. See `PORTING_RULES.md`
+//! §3 and §4.
+//!
+//! **Shrinking as Stage 2 proceeds.** `Complex` is now a re-export rather than an
+//! implementation (§2.2), the column-major `Array2` is gone entirely (§2.3), and the
+//! remaining `Array1` survives only in `state.rs`'s velocity model, whose conversion
+//! needs sign-off because it touches every kernel that reads a layer.
 
 use std::ops::{Index, IndexMut};
 
 // ---------------------------------------------------------------------------
-// 1-based arrays
+// The 1-based array
 // ---------------------------------------------------------------------------
 
 /// A 1-based one-dimensional array, indexed exactly as the Fortran indexes it.
@@ -62,53 +67,6 @@ impl<T> IndexMut<usize> for Array1<T> {
     fn index_mut(&mut self, i: usize) -> &mut T {
         assert!(i >= 1, "Fortran index {i} is below 1");
         &mut self.data[i - 1]
-    }
-}
-
-/// A 1-based two-dimensional array stored **column-major**, as Fortran does.
-///
-/// The layout is not an implementation detail: the original reads `stdd(0,l)`
-/// (`PORTING_RULES.md` §7), and which element that aliases depends on
-/// column-major ordering with the declared leading dimension.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Array2<T> {
-    data: Vec<T>,
-    rows: usize,
-}
-
-impl<T: Copy + Default> Array2<T> {
-    /// `dimension x(rows, cols)` — valid indices are `1..=rows`, `1..=cols`.
-    pub fn new(rows: usize, cols: usize) -> Self {
-        Self { data: vec![T::default(); rows * cols], rows }
-    }
-
-    /// Column-major backing store. For I/O and tests only.
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    pub fn fill(&mut self, value: T) {
-        self.data.fill(value);
-    }
-}
-
-impl<T> Index<(usize, usize)> for Array2<T> {
-    type Output = T;
-    #[track_caller]
-    fn index(&self, (i, j): (usize, usize)) -> &T {
-        assert!(i >= 1 && j >= 1, "Fortran index ({i},{j}) is below 1");
-        assert!(i <= self.rows, "row {i} exceeds leading dimension {}", self.rows);
-        &self.data[(j - 1) * self.rows + (i - 1)]
-    }
-}
-
-impl<T> IndexMut<(usize, usize)> for Array2<T> {
-    #[track_caller]
-    fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut T {
-        assert!(i >= 1 && j >= 1, "Fortran index ({i},{j}) is below 1");
-        assert!(i <= self.rows, "row {i} exceeds leading dimension {}", self.rows);
-        let rows = self.rows;
-        &mut self.data[(j - 1) * rows + (i - 1)]
     }
 }
 
@@ -177,18 +135,6 @@ mod tests {
     fn array1_rejects_index_zero() {
         let a = Array1::<f32>::new(3);
         let _ = a[0];
-    }
-
-    #[test]
-    fn array2_is_column_major() {
-        // dimension x(2,3): x(1,1) x(2,1) x(1,2) ... in memory
-        let mut a = Array2::<f32>::new(2, 3);
-        a[(1, 1)] = 11.0;
-        a[(2, 1)] = 21.0;
-        a[(1, 2)] = 12.0;
-        assert_eq!(a.as_slice()[0], 11.0);
-        assert_eq!(a.as_slice()[1], 21.0);
-        assert_eq!(a.as_slice()[2], 12.0);
     }
 
     #[test]

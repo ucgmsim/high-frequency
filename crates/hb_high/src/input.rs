@@ -2,7 +2,6 @@
 //! model, and the station list.
 
 use crate::deck::{DeckError, ListReader};
-use crate::fort::Array2;
 use crate::state::{params, VelocityModelInput};
 
 /// One fault segment from the `.stoch` file.
@@ -49,22 +48,85 @@ pub struct Segment {
     /// `0.5 * along_strike_count * subfault_length_km`. Not read from the file;
     /// derived here because every consumer wants it.
     pub along_strike_offset_km: f32,
-    /// `sddp` — subfault slip, indexed `(i, j)`.
+    /// The subfault grid, strike index fastest — one record per down-dip row, which is
+    /// the order the file stores it in and the order every accumulation over it runs.
     ///
-    /// **This field changes meaning partway through a run.** It holds slip as read
-    /// from the file until [`crate::sim::normalise_source`], which converts it in
-    /// place to relative moment and then rescales it to unit mean. Everything
-    /// downstream of that call is reading moment weights, not slip. The Fortran does
-    /// the same thing to the same array; naming it `slip_cm` would be a lie for most
-    /// of the program's life, which is why the units tag is absent here.
-    pub slip: Array2<f32>,
-    /// `rist` — subfault rise time, s.
-    pub rise_time_s: Array2<f32>,
-    /// `rupt` — subfault rupture time relative to origin, s.
-    pub rupture_time_s: Array2<f32>,
+    /// Private so the layout cannot leak: reach it through [`Segment::at`],
+    /// [`Segment::depth_rows`] or [`Segment::depth_rows_mut`].
+    subfaults: Vec<Subfault>,
+}
+
+/// What the `.stoch` file says about one subfault.
+///
+/// The Fortran keeps `sddp`, `rist` and `rupt` as three separate `(lv, nq, np)` blocks,
+/// but every read of one is at the same `(i, j)` as the other two, so this is one value
+/// per subfault — §2.3.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Subfault {
+    /// `sddp` — slip.
+    ///
+    /// **This field changes meaning partway through a run.** It holds slip as read from
+    /// the file until [`crate::sim::normalise_source`], which converts it in place to
+    /// relative moment and then rescales it to unit mean. Everything downstream of that
+    /// call is reading moment weights, not slip. The Fortran does the same thing to the
+    /// same array; naming it `slip_cm` would be a lie for most of the program's life,
+    /// which is why the units tag is absent here.
+    pub slip: f32,
+    /// `rist` — rise time, s.
+    pub rise_time_s: f32,
+    /// `rupt` — rupture time relative to origin, s.
+    pub rupture_time_s: f32,
 }
 
 impl Segment {
+    /// Subfault count, `nx * nw`.
+    pub fn subfault_total(&self) -> usize {
+        self.subfaults.len()
+    }
+
+    /// Flat offset of subfault `(i, j)` — 1-based, as [`Segment::at`] documents.
+    ///
+    /// Public because `sim` lays its own per-subfault grids (the time windows) over the
+    /// same shape and must agree on the ordering. Nothing else should need it.
+    #[inline]
+    pub fn grid_index(&self, along_strike: usize, down_dip: usize) -> usize {
+        assert!(
+            (1..=self.along_strike_count).contains(&along_strike)
+                && (1..=self.down_dip_count).contains(&down_dip),
+            "subfault ({along_strike},{down_dip}) is outside the {}x{} grid",
+            self.along_strike_count,
+            self.down_dip_count
+        );
+        (down_dip - 1) * self.along_strike_count + (along_strike - 1)
+    }
+
+    /// Subfault `along_strike` (`1..=nx`) at depth row `down_dip` (`1..=nw`).
+    ///
+    /// **1-based, deliberately.** These are subfault *numbers*, not storage offsets:
+    /// the along-strike coordinate of subfault `i` is `(i - 0.5) * length`, so the
+    /// numbering is part of the physics rather than an artifact of Fortran. See
+    /// [`crate::geom::SubfaultGeometry`], which makes the same choice for the same
+    /// reason and explains it at length.
+    #[inline]
+    pub fn at(&self, along_strike: usize, down_dip: usize) -> Subfault {
+        self.subfaults[self.grid_index(along_strike, down_dip)]
+    }
+
+    /// The grid as one contiguous run per depth row, shallowest first.
+    ///
+    /// This is what the two source-normalisation accumulations want: they sum in
+    /// depth-major order, which *is* storage order, so they can walk the slice and never
+    /// compute an index. Floating-point summation is order-dependent, so that
+    /// correspondence is load-bearing, not a convenience.
+    pub fn depth_rows(&self) -> impl Iterator<Item = &[Subfault]> {
+        self.subfaults.chunks(self.along_strike_count)
+    }
+
+    /// [`Segment::depth_rows`], mutably.
+    pub fn depth_rows_mut(&mut self) -> impl Iterator<Item = &mut [Subfault]> {
+        self.subfaults.chunks_mut(self.along_strike_count)
+    }
+
     /// Subfault indices `(i, j)` with the **depth** index outermost: `j` varies
     /// slowest, `i` fastest.
     ///
@@ -153,15 +215,21 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
             max_hypocentre_depth_km = zhyp;
         }
 
-        let mut slip = Array2::<f32>::new(along_strike_count, down_dip_count);
-        let mut rise_time_s = Array2::<f32>::new(along_strike_count, down_dip_count);
-        let mut rupture_time_s = Array2::<f32>::new(along_strike_count, down_dip_count);
-        for arr in [&mut slip, &mut rise_time_s, &mut rupture_time_s] {
-            for j in 1..=down_dip_count {
-                // One record per down-dip row, along_strike_count values along strike.
-                let row = r.read_values(along_strike_count)?;
-                for i in 1..=along_strike_count {
-                    arr[(i, j)] = crate::deck::parse_f32(row[i - 1].as_deref().unwrap_or(""))?;
+        // Three blocks, each one record per depth row -- so the file's own order is this
+        // grid's storage order, and the reader fills it front to back three times over,
+        // once per field.
+        let mut subfaults = vec![Subfault::default(); along_strike_count * down_dip_count];
+        let fields: [fn(&mut Subfault) -> &mut f32; 3] = [
+            |s| &mut s.slip,
+            |s| &mut s.rise_time_s,
+            |s| &mut s.rupture_time_s,
+        ];
+        for field in fields {
+            for row in subfaults.chunks_mut(along_strike_count) {
+                // One record per down-dip row, one value per along-strike column.
+                let values = r.read_values(along_strike_count)?;
+                for (subfault, value) in row.iter_mut().zip(&values) {
+                    *field(subfault) = crate::deck::parse_f32(value.as_deref().unwrap_or(""))?;
                 }
             }
         }
@@ -171,7 +239,7 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
             along_strike_count, down_dip_count, subfault_length_km, subfault_width_km,
             strike_deg, dip_deg, rake_deg, top_depth_km,
             hypocentre_along_strike_km, hypocentre_down_dip_km, along_strike_offset_km,
-            slip, rise_time_s, rupture_time_s,
+            subfaults,
         });
     }
 
@@ -355,7 +423,7 @@ mod tests {
             strike_deg: 0.0, dip_deg: 90.0, rake_deg: 0.0, top_depth_km: 0.0,
             hypocentre_along_strike_km: 0.0, hypocentre_down_dip_km: 0.0,
             along_strike_offset_km: 0.0,
-            slip: Array2::new(3, 2), rise_time_s: Array2::new(3, 2), rupture_time_s: Array2::new(3, 2),
+            subfaults: vec![Subfault::default(); 6],
         };
         assert_eq!(
             s.depth_major().collect::<Vec<_>>(),
@@ -385,11 +453,11 @@ mod tests {
         assert_eq!(s.strike_deg, 187.0);
         assert_eq!(m.subfault_count, 4);
         // Slip rows are down-dip, values along strike.
-        assert_eq!(s.slip[(1, 1)], 7.38758e0);
-        assert_eq!(s.slip[(2, 1)], 5.38111e0);
-        assert_eq!(s.slip[(1, 2)], 8.36237e0);
-        assert_eq!(s.rise_time_s[(1, 1)], 1.32973e-1);
-        assert_eq!(s.rupture_time_s[(2, 2)], 5.81083e-1);
+        assert_eq!(s.at(1, 1).slip, 7.38758e0);
+        assert_eq!(s.at(2, 1).slip, 5.38111e0);
+        assert_eq!(s.at(1, 2).slip, 8.36237e0);
+        assert_eq!(s.at(1, 1).rise_time_s, 1.32973e-1);
+        assert_eq!(s.at(2, 2).rupture_time_s, 5.81083e-1);
         assert_eq!(s.along_strike_offset_km, 0.5 * 2.0 * 1.64);
     }
 
