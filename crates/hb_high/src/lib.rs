@@ -15,6 +15,7 @@
 pub mod fft;
 pub mod fort;
 pub mod geom;
+pub mod highcor;
 pub mod radiation;
 pub mod ray;
 pub mod rng;

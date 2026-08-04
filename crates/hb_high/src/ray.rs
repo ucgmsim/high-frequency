@@ -288,3 +288,62 @@ pub fn geom_terms(
     }
     (rsum, qb)
 }
+
+/// `function cagcon(p,ir,r)` — `hb_high_ref.f:3327`.
+///
+/// Cagniard complex travel time as a function of complex ray parameter:
+/// `tau(p) = p*r + sum_i [eta_p(i)*alp(i)*th(i) + eta_s(i)*als(i)*th(i)]`.
+///
+/// The loop bound is `/travel/` slot 3, which `trav` writes as `ndeep` and this
+/// routine declares as `nd`. It is **not** `/rays/nd`, which this routine also
+/// has in scope. See `PORTING_RULES.md` §6.
+///
+/// `ir` is unused — kept to match the Fortran signature.
+///
+/// Note the guard is `alp(i) > 0`, whereas [`dtdp`] uses `alp(i) /= 0`. `alp`
+/// can be negative after `trav`'s source- and receiver-layer adjustments, so
+/// the two routines genuinely disagree about negative multipliers: `cagcon`
+/// skips them, `dtdp` does not. Preserved as-is.
+pub fn cagcon(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Complex64 {
+    let mut a = Complex64::ZERO;
+    for i in 1..=st.travel.ndeep as usize {
+        let mut ea = Complex64::ZERO;
+        let mut eb = Complex64::ZERO;
+        if st.travel.alp[i] > 0.0 {
+            ea = cr(p, vmod.vp[i]);
+        }
+        if st.travel.als[i] > 0.0 {
+            eb = cr(p, vmod.vsh[i]);
+        }
+        a = a + ea * (st.travel.alp[i] as f64) * vmod.thic[i]
+              + eb * (st.travel.als[i] as f64) * vmod.thic[i];
+    }
+    p * r + a
+}
+
+/// `function dtdp(p,ir,r)` — `hb_high_ref.f:3413`.
+///
+/// `dtau/dp = r - p * sum_i [th(i)*alp(i)/eta_p(i) + th(i)*als(i)/eta_s(i)]`.
+///
+/// The divisions are `real*8 / complex*16`, which Fortran evaluates by promoting
+/// the numerator to complex and doing a full complex division — Smith's
+/// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fort::Complex`]'s `Div`.
+///
+/// `ir` is unused. The guard here is `/= 0` rather than `> 0`; see [`cagcon`].
+pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Complex64 {
+    let mut a = Complex64::ZERO;
+    for i in 1..=st.travel.ndeep as usize {
+        let mut b = Complex64::ZERO;
+        let mut c = Complex64::ZERO;
+        if st.travel.alp[i] != 0.0 {
+            let ea = cr(p, vmod.vp[i]);
+            b = Complex64::from_real(vmod.thic[i] * st.travel.alp[i] as f64) / ea;
+        }
+        if st.travel.als[i] != 0.0 {
+            let eb = cr(p, vmod.vsh[i]);
+            c = Complex64::from_real(vmod.thic[i] * st.travel.als[i] as f64) / eb;
+        }
+        a = a + b + c;
+    }
+    Complex64::from_real(r) - p * a
+}

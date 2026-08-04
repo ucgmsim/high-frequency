@@ -25,7 +25,22 @@ to change the last bits of every FFT output.
 | `stoc_f` | `3.1415926` (`PAI`) | source spectrum |
 | `normal_random_number` | `6.2831853` | Box-Muller angle |
 | `RADV_lin`, `RADFRQ_lin` | `3.1415926/180` (`PU`) | degrees to radians |
+| `even_dist2` | `3.14159265` | geometry |
+| **`highcor_f`** | **`3.14159625`** | **taper — a typo, see below** |
 | `zpass` (dead) | `3.141592654` | filter prewarping |
+
+`highcor_f:2266` is not a truncation of pi — it is `3.14159625`, with the last
+digits of `3.14159265` **transposed**. Every other occurrence in the file is a
+correct truncation, so this is a genuine slip, and it makes the raised-cosine
+taper fall about 1.1e-6 short of a half cosine, so the final sample is not
+exactly zero.
+
+Copy it verbatim anyway. Confirmed with the gate: "fixing" it to `3.14159265`
+changes `stdd` in the taper region. If it is ever worth correcting, that is a
+Phase 3 re-baseline with a written justification.
+
+Do not write `3.1415926 / 180` as a single pre-divided decimal either — the
+division is part of the arithmetic and rounds once.
 
 **Never** substitute `std::f32::consts::PI`, `TAU`, or a "more accurate" value.
 Never fold `3.1415926/180` into a single decimal literal — the division is part

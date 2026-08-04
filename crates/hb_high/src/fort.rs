@@ -151,6 +151,21 @@ impl<T> Complex<T> {
     }
 }
 
+impl Complex<f64> {
+    /// Promote a real to complex, as Fortran does implicitly when a `real*8`
+    /// meets a `complex*16` in an expression. Needed because `x / z` in Fortran
+    /// is `cmplx(x,0) / z`, a full complex division — not a scaling.
+    pub const fn from_real(re: f64) -> Self {
+        Self { re, im: 0.0 }
+    }
+}
+
+impl Complex<f32> {
+    pub const fn from_real(re: f32) -> Self {
+        Self { re, im: 0.0 }
+    }
+}
+
 macro_rules! impl_complex {
     ($t:ty) => {
         impl Complex<$t> {
@@ -218,6 +233,34 @@ macro_rules! impl_complex {
             type Output = Self;
             fn div(self, s: $t) -> Self {
                 Self { re: self.re / s, im: self.im / s }
+            }
+        }
+
+        impl Div for Complex<$t> {
+            type Output = Self;
+            /// Smith's algorithm with range reduction.
+            ///
+            /// This is **not** the naive `(ac+bd)/(c²+d²)` form. gfortran
+            /// defaults to `-fcx-fortran-rules`, which does range reduction but
+            /// skips the NaN rescue, and inlines exactly the branch below.
+            /// Verified against gfortran 16.1.1: the naive form differs in the
+            /// last bit on essentially every input.
+            fn div(self, o: Self) -> Self {
+                if o.re.abs() >= o.im.abs() {
+                    let ratio = o.im / o.re;
+                    let denom = o.re + o.im * ratio;
+                    Self {
+                        re: (self.re + self.im * ratio) / denom,
+                        im: (self.im - self.re * ratio) / denom,
+                    }
+                } else {
+                    let ratio = o.re / o.im;
+                    let denom = o.im + o.re * ratio;
+                    Self {
+                        re: (self.re * ratio + self.im) / denom,
+                        im: (self.im * ratio - self.re) / denom,
+                    }
+                }
             }
         }
     };
@@ -321,6 +364,28 @@ mod tests {
         assert_eq!(sign(3.0, -1.0), -3.0);
         assert_eq!(sign(-3.0, 1.0), 3.0);
         assert_eq!(sign(-3.0, 0.0), 3.0); // +0 counts as positive
+    }
+
+    #[test]
+    fn complex_division_uses_smiths_algorithm() {
+        // Reference bit patterns captured from gfortran 16.1.1 at
+        // -O0 -ffp-contract=off -fno-fast-math. The naive (ac+bd)/(c^2+d^2)
+        // form differs in the last bit on all three of these.
+        let cases: [(Complex64, Complex64, u64, u64); 3] = [
+            // real / complex, the form dtdp uses: th(i)*alp(i) / ea
+            (Complex64::from_real(3.25), Complex64::new(0.75, -2.5),
+             0x3FD6E62A46756E62, 0x3FF315233AB73152),
+            (Complex64::new(1.5, 0.25), Complex64::new(0.75, -2.5),
+             0x3FB2C9FB4D812C9E, 0x3FE27ED3604B27ED),
+            // |re| < |im| takes the other branch of the range reduction
+            (Complex64::from_real(3.25), Complex64::new(1.0e-3, 7.0),
+             0x3F11631918997FFA, 0xBFDDB6DB638A5434),
+        ];
+        for (a, b, wre, wim) in cases {
+            let q = a / b;
+            assert_eq!(q.re.to_bits(), wre, "{a:?}/{b:?} re");
+            assert_eq!(q.im.to_bits(), wim, "{a:?}/{b:?} im");
+        }
     }
 
     #[test]
