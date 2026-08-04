@@ -75,6 +75,23 @@ consumer narrows to `f32`. So keep running it, and treat the result as a *classi
 twenty small commits finds a regression in four or five parity runs. Over three large
 ones it tells you almost nothing.
 
+**The drift baseline has to advance past deliberate structural changes.** `run_selfparity`
+compares sample `i` to sample `i`, so a change that *translates* the waveform reads as a
+difference of order the waveform itself, not of order the change. §2.6's defect-1 fix
+shifted every trace one sample earlier, and from that commit onward a 1e-4 drift check
+against `pre-loop` fails on all 22 decks — correctly, and uninformatively. Measured either
+side of it:
+
+| drift check | result |
+| --- | --- |
+| vs `pre-loop` (before the shift) | FAIL at 1e-4 |
+| vs `fff2abf` (before the shift) | FAIL at 1e-4 |
+| vs `262c75f` (the shift itself) | **PASS at 1e-4** |
+
+So compare against the most recent `green-NNN` tag rather than a fixed origin. Anything
+else conflates "we have accumulated error" with "we deliberately moved the waveform", and
+only the first is a problem.
+
 ### How sensitive the gates actually are — measured, and lower than assumed
 
 After §2.1, §2.2, §2.2b, §2.4 and both §2.6 defect fixes, Tier C at 2500 seeds returned
