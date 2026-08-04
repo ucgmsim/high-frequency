@@ -316,10 +316,16 @@ pub fn interfrequency_correlation(spectra: &[Vec<f64>]) -> Vec<Vec<f64>> {
 }
 
 /// Largest absolute difference between two correlation matrices.
+///
+/// Only the overlapping leading block is compared. The caller is responsible for
+/// passing matrices over the *same* band set — see `holm_adjusted` for why a
+/// silent misalignment here would be especially expensive: it inflates one
+/// endpoint's statistic, and a max-statistic gate has no way to tell that apart
+/// from a real difference.
 pub fn max_abs_delta(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
     let mut m = 0.0f64;
-    for i in 0..a.len() {
-        for j in 0..a[i].len() {
+    for i in 0..a.len().min(b.len()) {
+        for j in 0..a[i].len().min(b[i].len()) {
             let d = (a[i][j] - b[i][j]).abs();
             if d.is_finite() && d > m {
                 m = d;
@@ -327,6 +333,51 @@ pub fn max_abs_delta(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         }
     }
     m
+}
+
+/// Holm-Bonferroni adjusted p-values, returned in the caller's original order.
+///
+/// # Why this is not optional
+///
+/// Tiers B and C are *equivalence* tests combined as an intersection-union: to
+/// pass, every endpoint must be certified. That construction controls type-I
+/// error for free, and the price is power — adding endpoints makes passing
+/// harder, never makes a false alarm more likely.
+///
+/// Tier D inverts the logic. It is a null-hypothesis test where "pass" means
+/// *failing to reject*, so combining `k` of them with "all must pass" multiplies
+/// the false-alarm rate instead of controlling it. At `alpha = 0.05` over the 15
+/// tests the campaign actually runs, the family-wise rate is
+/// `1 - 0.95^15 = 53.7%` — such a gate fails more often than it passes on a
+/// perfectly correct port, which makes it worse than no gate at all, because it
+/// trains the reader to ignore it.
+///
+/// Holm is chosen over plain Bonferroni (uniformly more powerful, same
+/// guarantee) and over Benjamini-Hochberg (which controls the false *discovery*
+/// rate, appropriate for screening but not for a release gate — here a single
+/// false alarm is the thing being avoided).
+///
+/// Step-down construction: with `p` sorted ascending, the adjusted value is
+/// `max(over j <= i) of (m - j + 1) * p(j)`, clamped to 1 and made monotone.
+/// Reject exactly those whose adjusted value is `<= alpha`.
+pub fn holm_adjusted(p: &[f64]) -> Vec<f64> {
+    let m = p.len();
+    if m == 0 {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&i, &j| p[i].partial_cmp(&p[j]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut adjusted = vec![0.0f64; m];
+    let mut running = 0.0f64;
+    for (rank, &idx) in order.iter().enumerate() {
+        let scaled = (m - rank) as f64 * p[idx];
+        // Enforced monotonicity: an adjusted p-value must never decrease as the
+        // raw p-value increases, or the rejection set would not be nested.
+        running = running.max(scaled);
+        adjusted[idx] = running.min(1.0);
+    }
+    adjusted
 }
 
 /// A deterministic 64-bit generator for permutation and bootstrap resampling.
@@ -450,6 +501,44 @@ mod tests {
         let e = equivalence_unpaired(&a, &a, DEFAULT_BAND);
         assert!(e.equivalent, "a sample must be equivalent to itself: {e:?}");
         assert!((e.gm_ratio - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn holm_controls_the_family_wise_rate_the_naive_gate_does_not() {
+        // The exact 15 p-values Tier D produced against production Fortran. Four
+        // are below 0.05 raw; none survives Holm. This is a regression test on the
+        // decision, not on the arithmetic -- if a future change makes any of these
+        // "significant", that is a finding to look at, not a rounding difference.
+        let p = [
+            0.0050, 0.7811, 0.1244, 0.5721, 0.9751, 0.6169, 0.0199, 0.2090,
+            0.4577, 0.5572, 0.0100, 0.7363, 0.6070, 0.0348, 0.7015,
+        ];
+        assert_eq!(p.iter().filter(|x| **x < 0.05).count(), 4, "raw flags");
+        let adj = holm_adjusted(&p);
+        assert_eq!(adj.iter().filter(|x| **x <= 0.05).count(), 0, "Holm flags");
+        // Smallest raw p = 0.005 over 15 tests -> 15 * 0.005 = 0.075.
+        assert!((adj[0] - 0.075).abs() < 1e-12, "adjusted smallest = {}", adj[0]);
+    }
+
+    #[test]
+    fn holm_is_monotone_and_rejects_a_genuinely_tiny_p() {
+        // One clearly real effect among noise still survives correction.
+        let p = [1e-6, 0.40, 0.55, 0.80, 0.95];
+        let adj = holm_adjusted(&p);
+        assert!(adj[0] <= 0.05, "1e-6 over 5 tests should survive, got {}", adj[0]);
+        // Monotone in the raw ordering: sorting by raw p must sort by adjusted p.
+        let mut idx: Vec<usize> = (0..p.len()).collect();
+        idx.sort_by(|&i, &j| p[i].partial_cmp(&p[j]).unwrap());
+        for w in idx.windows(2) {
+            assert!(
+                adj[w[0]] <= adj[w[1]],
+                "adjusted p not monotone: {} then {}",
+                adj[w[0]],
+                adj[w[1]]
+            );
+        }
+        // Every adjusted value is a probability.
+        assert!(adj.iter().all(|x| *x >= 0.0 && *x <= 1.0));
     }
 
     #[test]

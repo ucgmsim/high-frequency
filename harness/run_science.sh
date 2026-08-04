@@ -52,6 +52,17 @@ echo "############ Tier D -- inter-frequency correlation ############"
 # Tier D needs enough realisations for a stable correlation matrix: SE(rho) is
 # about (1-rho^2)/sqrt(n-3), so n in the hundreds. It does not need Tier C's n,
 # because the permutation test calibrates itself against the sample it is given.
+#
+# The verdict is Holm-corrected across the whole family. Gating on raw p would
+# give 15 tests a family-wise false-alarm rate of 1 - 0.95^15 = 53.7%, i.e. it
+# would fail more often than not on a correct port. See stats::holm_adjusted.
+#
+# To check the test itself rather than the port, run the A/A control:
+#
+#     ./target/release/validate --tier d --cell a --seeds 1200 --aa
+#
+# That splits ONE binary's realisations in half, so every flag is a known false
+# alarm and the flag rate measures calibration. It currently returns 0 of 15.
 ./target/release/validate --tier d --cell a --seeds "$SEEDS_D" || fail=1
 
 if [ "${CELL_B:-0}" = "1" ]; then

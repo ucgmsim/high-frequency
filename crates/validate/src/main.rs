@@ -37,6 +37,19 @@ enum Tier {
     D,
 }
 
+/// One inter-frequency-correlation test, held until the whole family is known.
+///
+/// Tier D cannot decide pass/fail one test at a time: the decision depends on how
+/// many tests are in the family, so every test is collected first and adjudicated
+/// once at the end. See `stats::holm_adjusted`.
+struct IfcTest {
+    label: String,
+    component: &'static str,
+    bands: usize,
+    observed: f64,
+    p: f64,
+}
+
 struct Cell {
     name: &'static str,
     fault: Fault,
@@ -98,6 +111,16 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         arg("--band").and_then(|s| s.parse().ok()).unwrap_or(stats::DEFAULT_BAND);
     let n_seeds: usize = arg("--seeds").and_then(|s| s.parse().ok()).unwrap_or(cell.seeds);
 
+    // A/A calibration: run ONE binary and split its realisations in half. Every
+    // flag is then a known false alarm, so the flag rate measures whether the
+    // permutation test is calibrated for a max-over-435-pairs statistic. Without
+    // this, a Tier D failure cannot be attributed between "the codes differ" and
+    // "the test over-rejects".
+    let aa = std::env::args().any(|a| a == "--aa");
+    if aa && tier != Tier::D {
+        return Err("--aa is only meaningful for tier d".into());
+    }
+
     let root = repo_root();
     let rust = root.join("target/release/hb_high");
     // Tier B compares against the ORACLE, which shares the port's PCG32 stream, so
@@ -143,23 +166,58 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
          half_width_ln,sd_ratio,ks,verdict"
             .to_string(),
     ];
-    let mut corr_rows: Vec<String> =
-        vec!["stratum,component,bands,max_abs_delta_rho,permutation_p".to_string()];
+    let mut ifc: Vec<IfcTest> = Vec::new();
 
     for st in &strata {
         let a = collect(&rust, st, &seed_list, &fas_edges, &root, "rust")?;
-        let b = collect(&reference, st, &seed_list, &fas_edges, &root, "ref")?;
+        // A/A splits `a`, so the reference binary is not run at all -- which also
+        // halves the wall clock, and the reference is the slow one (it pays FFTW
+        // planning per process).
+        let b = if aa {
+            None
+        } else {
+            Some(collect(&reference, st, &seed_list, &fas_edges, &root, "ref")?)
+        };
         // Fail loudly on a stratum with no signal rather than reporting NaN
         // endpoints as non-equivalent.
         a.check_has_signal().map_err(|e| format!("rust: {e}"))?;
-        b.check_has_signal().map_err(|e| format!("reference: {e}"))?;
+        if let Some(b) = &b {
+            b.check_has_signal().map_err(|e| format!("reference: {e}"))?;
+        }
         let km = a.realisations.first().map_or(f64::NAN, |r| r.reported_km);
         let label = format!("{}@{:.0}km", st.fault.name, km);
 
         if tier == Tier::D {
             for (ci, cname) in COMPONENTS.iter().enumerate() {
-                let (bands_a, ma) = a.fas_matrix(ci);
-                let (_, mb) = b.fas_matrix(ci);
+                let (bands_a, m_all_a) = a.fas_matrix(ci);
+
+                // In A/A mode both halves come from the SAME binary, so any flag is
+                // by construction a false alarm and the flag rate measures the
+                // test's calibration rather than the port.
+                let (ma, mb) = if aa {
+                    let half = m_all_a.len() / 2;
+                    (m_all_a[..half].to_vec(), m_all_a[half..].to_vec())
+                } else {
+                    let (bands_b, m_all_b) =
+                        b.as_ref().expect("non-aa mode collects the reference").fas_matrix(ci);
+                    // Compare the same band set or not at all. Band occupancy is set
+                    // by np2, which is deterministic given the deck and therefore
+                    // identical between binaries -- so this should never fire, and if
+                    // it does the comparison would be silently misaligned rather than
+                    // wrong in an obvious way.
+                    if bands_a != bands_b {
+                        return Err(format!(
+                            "{label} {cname}: the two binaries kept different FAS \
+                             bands ({} vs {}), so the correlation matrices are not \
+                             comparable column-for-column",
+                            bands_a.len(),
+                            bands_b.len()
+                        )
+                        .into());
+                    }
+                    (m_all_a, m_all_b)
+                };
+
                 // Deterministic permutation seed derived from the stratum: the
                 // result is reproducible, but not identical across strata.
                 let seed = 0x00C0FFEE_u64 ^ ((ci as u64) << 32) ^ (st.nominal_km as u64);
@@ -169,16 +227,23 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 // one place the campaign uses a p-value, and it is calibrating a
                 // max statistic over hundreds of correlated pairs, which no closed
                 // form covers.
-                let ok = p > 0.05;
-                all_pass &= ok;
+                //
+                // The pass/fail decision is deferred: gating on raw p here would give
+                // the family a 53.7% false-alarm rate. See stats::holm_adjusted.
                 println!(
-                    "  {label:16} {cname:4} IFC  bands={:2}  max|dRho|={observed:.4}  \
-                     p={p:.3}  {}",
+                    "  {label:16} {cname:4} IFC  bands={:2}  n={:3}v{:3}  \
+                     max|dRho|={observed:.4}  p={p:.3}",
                     bands_a.len(),
-                    if ok { "ok" } else { "DIFFER" }
+                    ma.len(),
+                    mb.len(),
                 );
-                corr_rows
-                    .push(format!("{label},{cname},{},{observed:.6},{p:.4}", bands_a.len()));
+                ifc.push(IfcTest {
+                    label: label.clone(),
+                    component: cname,
+                    bands: bands_a.len(),
+                    observed,
+                    p,
+                });
             }
             continue;
         }
@@ -192,7 +257,10 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 .collect();
             for name in &names {
                 let xa = a.endpoint(ci, name);
-                let xb = b.endpoint(ci, name);
+                let xb = b
+                    .as_ref()
+                    .expect("tiers B and C always collect the reference")
+                    .endpoint(ci, name);
                 let e = match tier {
                     Tier::B => stats::equivalence_paired(&xa, &xb, band),
                     _ => stats::equivalence_unpaired(&xa, &xb, band),
@@ -312,10 +380,90 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         }
     }
 
+    // ------------------------------------------- tier D: adjudicate the family ---
+    let mut corr_rows: Vec<String> = vec![
+        "stratum,component,bands,max_abs_delta_rho,permutation_p,holm_adjusted_p,verdict"
+            .to_string(),
+    ];
+    if tier == Tier::D && !ifc.is_empty() {
+        let raw: Vec<f64> = ifc.iter().map(|t| t.p).collect();
+        let adj = stats::holm_adjusted(&raw);
+        let flagged: Vec<usize> = (0..ifc.len()).filter(|&i| adj[i] <= 0.05).collect();
+        let raw_flagged = raw.iter().filter(|p| **p < 0.05).count();
+
+        println!();
+        for (i, t) in ifc.iter().enumerate() {
+            let differs = adj[i] <= 0.05;
+            if differs {
+                all_pass = false;
+            }
+            println!(
+                "  {:16} {:4} max|dRho|={:.4}  p={:.3}  holm={:.3}  {}",
+                t.label,
+                t.component,
+                t.observed,
+                t.p,
+                adj[i],
+                if differs { "DIFFER" } else { "ok" }
+            );
+            corr_rows.push(format!(
+                "{},{},{},{:.6},{:.4},{:.4},{}",
+                t.label,
+                t.component,
+                t.bands,
+                t.observed,
+                t.p,
+                adj[i],
+                if differs { "DIFFER" } else { "ok" }
+            ));
+        }
+
+        println!(
+            "\nfamily of {} tests: {raw_flagged} flagged at raw p<0.05, \
+             {} after Holm (FWER 0.05)",
+            ifc.len(),
+            flagged.len()
+        );
+        // The naive gate's false-alarm rate, stated so the corrected number has
+        // something to be compared against.
+        println!(
+            "  gating on raw p would carry a family-wise false-alarm rate of {:.1}%",
+            100.0 * (1.0 - 0.95f64.powi(ifc.len() as i32))
+        );
+
+        // Enrichment. Holm answers "is any single test significant"; this answers
+        // the different question "does the family as a whole look uniform", which is
+        // what would reveal a weak effect spread across many endpoints.
+        let k = raw_flagged;
+        let m = ifc.len();
+        let tail: f64 = (0..k)
+            .map(|j| {
+                let c = (0..j).fold(1.0f64, |acc, t| acc * (m - t) as f64 / (t + 1) as f64);
+                c * 0.05f64.powi(j as i32) * 0.95f64.powi((m - j) as i32)
+            })
+            .sum();
+        println!(
+            "  enrichment: P(>= {k} of {m} below 0.05 | calibrated null) = {:.4}",
+            1.0 - tail
+        );
+
+        if aa {
+            println!(
+                "\nA/A CALIBRATION -- both halves came from the same binary, so every\n\
+                 flag above is a known false alarm. A well-calibrated test should show\n\
+                 about {:.1} of {m} at raw p<0.05 and 0 after Holm; it showed \
+                 {raw_flagged} and {}.",
+                0.05 * m as f64,
+                flagged.len()
+            );
+        }
+    }
+
     let out = root.join(format!(
-        "harness/science_tier{}_cell{}.csv",
+        "harness/science_tier{}_cell{}{}.csv",
         format!("{tier:?}").to_lowercase(),
-        cell.name
+        cell.name,
+        if aa { "_aa" } else { "" }
     ));
     std::fs::write(
         &out,

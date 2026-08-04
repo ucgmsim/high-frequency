@@ -80,8 +80,12 @@ cache penalty on top of everything else.
 
 ## What to do, in order
 
-Each item is tagged with the validation tier it needs (see the plan):
+Each item is tagged with the validation tier it needs (see `REFACTOR.md`):
 **A** = must stay bit-identical, **B/C** = needs the statistical gates.
+
+> Superseded in part by `REFACTOR.md`. Bit-identity is no longer the goal, so
+> items 1, 2 and 5 below are subsumed by replacing the FFT outright (§2.1 there),
+> which is both smaller and faster than the tier-A versions described here.
 
 ### 1. Twiddle table in `fast` — tier A, expect ~1.3×
 
