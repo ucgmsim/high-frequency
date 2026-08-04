@@ -493,17 +493,13 @@ worth taking seriously rather than reflexively reaching for slices.
 - **`Array1` → plain `Vec`/slices.** `ndarray` adds nothing to one dimension that a
   slice does not already have, and it would put a bounds-checked wrapper straight back.
   This is also where the churn is: 45 references in `state.rs` alone.
-- **`Array2` → `ndarray::Array2` is genuinely attractive.** There are only about eleven
-  sites (`SubfaultGeometry`'s five, `Segment`'s three, `acc` at `(3, MMV)`), and they
-  want exactly what `ndarray` provides: column views, `Zip`, and slicing. `acc` is
-  three components by samples and the output loop is a transpose-and-interleave, which
-  is one `columns()` iteration instead of a nested index loop.
-
-The counter-argument, stated fairly: `ndarray` pulls in `matrixmultiply`, `rawpointer`,
-`num-complex` and `num-traits` for eleven call sites of 2-D indexing, where `Vec<f32>`
-plus a five-line `index(i, j)` helper would do. It earns its place only if the second
-`1.3b` pass wants its iterators more broadly — which it might, since `Zip` and `azip!`
-are the natural form for the per-bin spectral loops.
+- **`Array2` → also plain storage. Decided.** `ndarray` was the obvious candidate and
+  is a reasonable one: there are only ~eleven sites, and column views and `Zip` fit
+  them. But it pulls in `matrixmultiply`, `rawpointer`, `num-complex` and `num-traits`
+  for what amounts to eleven call sites of 2-D indexing, where `Vec<f32>` plus a
+  five-line `index(i, j)` helper does the job. **Slices, for now** — revisit only if a
+  later pass wants `Zip`/`azip!` across the spectral loops badly enough to pay for the
+  subtree.
 
 **Do `Array2` first, and only after §2.6's defect 1.** The column-major layout is
 load-bearing today for exactly one reason: `stdd(0,l)` aliases across columns
@@ -768,8 +764,8 @@ Stage 2, each with Tier B then C:
 11. The two defect fixes (2.6), separately, each with its Tier C delta recorded:
     the `siteamp` convention split, then the `stdd(0,l)` sample shift. The second of
     these **unblocks** step 12 — see §2.3.
-12. `Array1`/`Array2` (2.3): `Array2` → `ndarray`, then `Array1` → slices, module by
-    module. Last, and only after step 11 removes the layout constraint.
+12. `Array1`/`Array2` (2.3) → plain slices, module by module. Last, and only after
+    step 11 removes the layout constraint.
 13. A second, smaller 1.3b pass, now that slices make `zip`/`chunks_mut` available.
 
 Re-run Tier D at the end of Stage 2 as a release gate, comparing Rust-before vs
