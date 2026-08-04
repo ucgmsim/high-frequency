@@ -347,3 +347,171 @@ pub fn dtdp(st: &RayState, vmod: &Vmod, p: Complex64, _ir: usize, r: f64) -> Com
     }
     Complex64::from_real(r) - p * a
 }
+
+/// `subroutine pnot(ir,p0,t0,r)` — `hb_high_ref.f:3441`.
+///
+/// Finds the geometric ray parameter `p0` and its travel time `t0`, returned as
+/// `(p0, t0)`.
+///
+/// The strategy is to start just inside the nearest branch cut (`1/v_max` over
+/// the layers the ray actually traverses) and, if `dtau/dp` is negative there,
+/// bisect down towards zero until `|dtau/dp| <= 0.01` or 40 iterations.
+///
+/// # Silent real-part extraction, three times
+///
+/// `a`, `pn`, `p0` and `t0` are all `real*8` under `implicit real*8 (a-h,o-z)`
+/// while `dtdp` and `cagcon` return `complex*16`. Fortran assigns the real part
+/// without comment. These are not typos for `dreal(...)` — they are the
+/// intended behaviour, and the `.re` accesses below are the same operation made
+/// visible.
+///
+/// # The `222` loop is a rounding workaround, not a physical one
+///
+/// `eps` is set to `1.0d-20` and then immediately `1.0d-10`. The loop then grows
+/// it by factors of ten until `(ptest - eps)*v` is genuinely below 1, and a
+/// final factor of ten is applied on top — the source comment says
+/// "add another factor of 10 just to be sure-> problems on Linux". Reproduced
+/// exactly, including the redundant first assignment.
+///
+/// The `> 0` guard on `alp`/`als` matches [`cagcon`], not [`dtdp`]. That
+/// mismatch has a consequence: `v` is the largest velocity among layers with a
+/// *positive* multiplier, while `dtdp` sums over every layer with a *nonzero*
+/// one. So the layer defining `v` is always in `dtdp`'s sum, and as `p`
+/// approaches `1/v` that layer's `eta` approaches zero and its term diverges.
+///
+/// # The immediate-return path is unreachable
+///
+/// Consequently `a` is always large and negative at the starting point and the
+/// bisection always runs — `if(a.lt.0.) go to 11` is effectively unconditional.
+/// Measured over 72 cases with `r` from 0.5 to 400 km, the largest `a` seen was
+/// -2106. Every case also exits on the `|a| <= 0.01` tolerance; the
+/// 40-iteration cap never fires. Both facts are pinned in `tier3_golden.rs`.
+pub fn pnot(st: &RayState, vmod: &Vmod, ir: usize, r: f64) -> (f64, f64) {
+    // Closest branch cut, i.e. the highest velocity the ray samples.
+    let mut v = 0.0f64;
+    for i in 1..=st.travel.ndeep as usize {
+        if st.travel.alp[i] > 0.0 {
+            v = v.max(vmod.vp[i]);
+        }
+        if st.travel.als[i] > 0.0 {
+            v = v.max(vmod.vsh[i]);
+        }
+    }
+
+    #[allow(unused_assignments)]
+    let mut eps = 1.0e-20f64;
+    eps = 1.0e-10;
+    let ptest = 1.0 / v;
+
+    // Label 222: grow eps until backing off from the cut actually lands below
+    // it in floating point.
+    loop {
+        let rp = (ptest - eps) * v;
+        if rp >= 1.0 {
+            eps = 10.0 * eps;
+        } else {
+            break;
+        }
+    }
+
+    let mut p = Complex64::from_real(ptest - 10.0 * eps);
+
+    // Real part of a complex*16, assigned to a real*8.
+    let mut a = dtdp(st, vmod, p, ir, r).re;
+
+    if a < 0.0 {
+        // Label 11: bisect between pn (where dtau/dp < 0) and pp.
+        let mut k = 0;
+        let mut pn = p.re;
+        let mut pp = 0.0f64;
+        loop {
+            k += 1;
+            p = Complex64::from_real((pn + pp) / 2.0);
+            a = dtdp(st, vmod, p, ir, r).re;
+            if a.abs() <= 0.01 || k >= 40 {
+                break;
+            }
+            if a > 0.0 {
+                pp = p.re;
+            } else {
+                pn = p.re;
+            }
+        }
+    }
+
+    // Label 12.
+    let p0 = p.re;
+    let t = cagcon(st, vmod, p, ir, r);
+    (p0, t.re)
+}
+
+/// `subroutine ttime(ir,p0,t0,p1,t1,r)` — `hb_high_ref.f:3610`.
+///
+/// Clamps the ray parameter to the smallest `1/v` over every segment and both
+/// sides of each reflecting interface, then evaluates the travel time there.
+/// Returns `(p1, t1)`.
+///
+/// # Both outputs are discarded by the only caller
+///
+/// `gf_amp_tt` passes `p1`/`t1` at `:3313` and never reads them. The call is
+/// side-effect-free — `ttime` writes no common block — so it could be elided
+/// entirely. It is kept so the two sources stay line-comparable, and because
+/// removing it would be a behaviour-neutral change that still deserves to be
+/// recorded rather than assumed. See `PORTING_RULES.md` §7.
+///
+/// The `t0` argument is likewise never read by the Fortran.
+///
+/// # Mostly inert under the production ray
+///
+/// The interface clamp only runs where `it(i) == 1`, i.e. a reflection, which
+/// `trav` sets only when consecutive segments share a layer. The production ray
+/// is strictly descending (`nh` running `ksrc` down to 2), so `it` is 0
+/// throughout and only the first clamp applies. The branch matters for the
+/// Moho-multiple ray shapes.
+///
+/// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
+/// velocities are considered, for every segment.
+pub fn ttime(
+    st: &RayState,
+    vmod: &Vmod,
+    ir: usize,
+    p0: f64,
+    _t0: f64,
+    r: f64,
+) -> (f64, f64) {
+    let n = st.rays.nd[ir] as usize;
+    let mut p1 = p0;
+
+    for i in 1..=n {
+        let nup = st.coff.nup1[i];
+        let nhi = st.rays.nh[i] as usize;
+
+        let mut vb = vmod.vsh[nhi];
+        let mut va = vb;
+        if st.rays.nm[1] != 4 {
+            va = vmod.vp[nhi];
+        }
+        p1 = p1.min(1.0 / va).min(1.0 / vb);
+
+        if i == n {
+            continue;
+        }
+        // Transmission needs no second clamp; only reflections do.
+        if st.coff.it[i] == 0 {
+            continue;
+        }
+
+        // Label 10 for upgoing, otherwise the layer below.
+        let k = if nup == 1 { nhi - 1 } else { nhi + 1 };
+        vb = vmod.vsh[k];
+        va = vb;
+        if st.rays.nm[1] != 4 {
+            va = vmod.vp[k];
+        }
+        p1 = p1.min(1.0 / va).min(1.0 / vb);
+    }
+
+    let p = Complex64::from_real(p1);
+    let t = cagcon(st, vmod, p, ir, r);
+    (p1, t.re)
+}
