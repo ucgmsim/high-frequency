@@ -504,12 +504,29 @@ Stage 1, each with `run_parity.sh` green in both profiles:
 3. Rustify control flow (1.3b) — **done**, `700399f` (grid iterators, layer lookups
    as `find`), `d3af03a` (`RayKind` enum), `c5b1dcd` (`SubfaultGeometry`).
 4. Naming pass (1.4) — **done**, `c012812`.
-5. `HfConfig` + `simulate()` + deck shim (1.1) — **remaining**, and it is the whole
-   of what is left in Stage 1. Largest commit; split into "add typed config
-   alongside the deck" then "move the binary onto it".
+5. `HfConfig` + `simulate()` + deck shim (1.1) — **done**, `bdf3ce7` (typed config)
+   and `3ed9469` (`hb_high::sim::simulate`; `main.rs` 1003 → 341).
 
-Still to extract from `run()` when 1.1 lands: the per-station model setup, and the
-station loop body itself, which is now the bulk of the remaining 486 lines.
+**Stage 1 is complete.** Where the code went:
+
+| | before | after |
+| --- | --- | --- |
+| `main.rs` | 865 | 341 |
+| `sim.rs` | — | 796 |
+| `config.rs` | — | 356 |
+| `crates/hb_high/src` total | 4,336 | ~4,900 |
+
+The crate got **bigger**, by about 13%. That is the honest outcome of Stage 1 and was
+the intended trade: structs, enums and doc comments cost more lines than the
+inlining saved, and what improved is that `run()` is now a driver you can read in
+one sitting, the physics is a library function, and the deck's hazards are described
+in one place instead of being latent. The reduction is Stage 2's job, and §2.1 alone
+deletes more than Stage 1 added.
+
+One deliberate regression in capability: **`nsite > 1` is refused.** The Fortran's
+station loop shares a generator, so stations are not independent and a
+one-station-per-call API cannot reproduce a multi-station deck. Production has always
+run one process per station, and no parity deck uses anything else.
 
 (`special.rs` was originally item 2 here and has moved to Stage 2 — see §1.5.)
 
