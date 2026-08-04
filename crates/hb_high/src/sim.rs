@@ -28,7 +28,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, StressParamAdjust,
 };
-use crate::fort::{round_half_away_from_zero, Array1, Array2, Complex32};
+use crate::fort::{round_half_away_from_zero, Array2, Complex32};
 use crate::geom::subfault_geometry;
 use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, StochModel};
@@ -102,9 +102,9 @@ pub fn simulate(
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70,
         1.00, 2.00, 3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let mut siteamp_log_freq = Array1::<f32>::new(params::NLAYMAX);
-    for i in 1..=nsfac {
-        siteamp_log_freq[i] = fn_hz[i - 1].ln();
+    let mut siteamp_log_freq = vec![0.0f32; params::NLAYMAX];
+    for (slot, hz) in siteamp_log_freq.iter_mut().zip(fn_hz.iter()).take(nsfac) {
+        *slot = hz.ln();
     }
 
     // Resolved-default accessors are called once, here; the body below then reads
@@ -209,10 +209,10 @@ pub fn simulate(
     // `nr` = 1000 values, not `mmv` = 262144. `vertical_radiation_spectrum` reads
     // exactly `nr` of these, and `fill_uniform_deviates` only ever drew that many, so
     // the other 99.6% of each array was reserved, zeroed and never touched.
-    let mut radv_rand_a = Array1::<f32>::new(nr);
-    let mut radv_rand_b = Array1::<f32>::new(nr);
-    fill_uniform_deviates(&mut rng, nr, radv_rand_a.as_mut_slice());
-    fill_uniform_deviates(&mut rng, nr, radv_rand_b.as_mut_slice());
+    let mut radv_rand_a = vec![0.0f32; nr];
+    let mut radv_rand_b = vec![0.0f32; nr];
+    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_a);
+    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_b);
 
     let mut vmod = VelocityModel::new();
     // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
@@ -223,8 +223,8 @@ pub fn simulate(
     // stream -- every subsequent draw depends on where the generator ended up. Shrinking
     // the allocation without shrinking the draw would be a buffer overrun; shrinking the
     // draw would change every waveform. See REFACTOR.md §2.6b.
-    let mut normal_deviates = Array1::<f32>::new(MMV);
-    let mut siteamp_factors = Array1::<f32>::new(params::NLAYMAX);
+    let mut normal_deviates = vec![0.0f32; MMV];
+    let mut siteamp_factors = vec![0.0f32; params::NLAYMAX];
 
     // ------------------------------------------------- the single station ---
     let mut d10 = 1000.0f32;
@@ -245,7 +245,7 @@ pub fn simulate(
 
     if config.draws_normal_deviates() {
         // mmv deviates, not np2: this is the full 262144 under VERSION1.
-        fill_normal_deviates(&mut rng, MMV, normal_deviates.as_mut_slice());
+        fill_normal_deviates(&mut rng, MMV, &mut normal_deviates);
     }
 
     for iv in 0..nevnt {
@@ -287,7 +287,7 @@ pub fn simulate(
             let mut r0 = 0.0f32;
             let mut d0 = 0.0f32;
             let mut slp = 0.0f32;
-            for kk in 1..=ndur {
+            for kk in 0..ndur {
                 if geom.slant_km[(i, j)] > rdur[kk] {
                     r0 = rdur[kk];
                     d0 = dpth[kk];
@@ -327,17 +327,15 @@ pub fn simulate(
             *f = df * bin as f32;
         }
 
-        let mut spectrum: [Array1<Complex32>; 3] = [
-            Array1::filled(np2, Complex32::ZERO),
-            Array1::filled(np2, Complex32::ZERO),
-            Array1::filled(np2, Complex32::ZERO),
-        ];
-        let mut subfault_acc: [Array1<f32>; 3] = [
-            Array1::new(np2), Array1::new(np2), Array1::new(np2),
-        ];
+        let mut spectrum: [Vec<Complex32>; 3] =
+            std::array::from_fn(|_| vec![Complex32::ZERO; np2]);
+        let mut subfault_acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; np2]);
         let mut ray = RayState::default();
 
-        let mut irandcnt = 1usize;
+        // 0-based. The Fortran starts this at 1 and PRE-increments, so its first read
+        // is index 2, i.e. storage element 1 -- element 0 is never read. Starting at 0
+        // and pre-incrementing lands on that same element.
+        let mut irandcnt = 0usize;
 
         // --- subfault pass. NOTE: i outer, j inner -- the OPPOSITE order to
         // the window pass above. irandcnt is consumed in THIS order. -------
@@ -346,7 +344,7 @@ pub fn simulate(
                 continue; // goto 4 lands on the inner loop's terminator
             }
 
-            for il in 1..=np2 {
+            for il in 0..np2 {
                 subfault_acc[0][il] = 0.0;
                 subfault_acc[1][il] = 0.0;
                 subfault_acc[2][il] = 0.0;
@@ -417,20 +415,20 @@ pub fn simulate(
                     stochastic_spectrum(
                         &mut rng, np2, rpath, tw, tw_eps, tw_eta, shear_velocity_km_s, density_g_cm3, dt,
                         subevent_moment, dlm, fce, fmx1, akapp,
-                        spectrum[kf - 1].as_mut_slice(), &freq, qbar, qfexp,
+                        &mut spectrum[kf - 1], &freq, qbar, qfexp,
                         moment_scale,
                     );
                 }
 
                 if config.site_amp {
                     site_amplification_factors(
-                        &vmod, ksrc, nsfac, siteamp_log_freq.as_slice(),
-                        siteamp_factors.as_mut_slice(),
+                        &vmod, ksrc, nsfac, &siteamp_log_freq,
+                        &mut siteamp_factors,
                     );
                     for k in 0..3 {
                         apply_site_amplification(
-                            spectrum[k].as_mut_slice(), &freq, nsfac,
-                            siteamp_log_freq.as_slice(), siteamp_factors.as_slice(),
+                            &mut spectrum[k], &freq, nsfac,
+                            &siteamp_log_freq, &siteamp_factors,
                         );
                     }
                 }
@@ -455,21 +453,21 @@ pub fn simulate(
                         &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
                         nfold, component_rad, nr, &mut radiation,
                     );
-                apply_radiation_and_invert(nfold, mfold, spectrum[0].as_mut_slice(), subfault_acc[0].as_mut_slice(), &radiation);
+                apply_radiation_and_invert(nfold, mfold, &mut spectrum[0], &mut subfault_acc[0], &radiation);
 
                 let component_rad = 0.0f32;
                 horizontal_radiation_spectrum(
                         &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
                         nfold, component_rad, nr, &mut radiation,
                     );
-                apply_radiation_and_invert(nfold, mfold, spectrum[1].as_mut_slice(), subfault_acc[1].as_mut_slice(), &radiation);
+                apply_radiation_and_invert(nfold, mfold, &mut spectrum[1], &mut subfault_acc[1], &radiation);
 
                 vertical_radiation_spectrum(
                         strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold,
-                        radv_rand_a.as_slice(), radv_rand_b.as_slice(), nr,
+                        &radv_rand_a, &radv_rand_b, nr,
                         &mut radiation,
                     );
-                apply_radiation_and_invert(nfold, mfold, spectrum[2].as_mut_slice(), subfault_acc[2].as_mut_slice(), &radiation);
+                apply_radiation_and_invert(nfold, mfold, &mut spectrum[2], &mut subfault_acc[2], &radiation);
 
                 // Rupture time at this subfault.
                 let mut ratim;
@@ -519,7 +517,7 @@ pub fn simulate(
                         // the Fortran and are never read back, since the output reads
                         // DS(1..ndata), so they are discarded rather than reproduced.
                         if li >= 1 {
-                            let idx = (li - k2) as usize + 1;
+                            let idx = (li - k2) as usize;
                             let lu = li as usize;
                             acc[(1, lu)] += sd * subfault_acc[0][idx];
                             acc[(2, lu)] += sd * subfault_acc[1][idx];
@@ -559,11 +557,11 @@ pub fn simulate(
 struct PathDuration {
     ndur: usize,
     /// Segment start distances, km.
-    rdur: Array1<f32>,
+    rdur: Vec<f32>,
     /// Duration at each segment start, s.
-    dpth: Array1<f32>,
+    dpth: Vec<f32>,
     /// Slope of each segment, s/km.
-    dpdr: Array1<f32>,
+    dpdr: Vec<f32>,
 }
 
 /// Build the path-duration table.
@@ -572,23 +570,24 @@ struct PathDuration {
 /// undefined-`ndur` path is unrepresentable, and rejecting a bad integer happens
 /// once, in `PathDurationModel::from_deck`.
 fn path_duration_table(model: PathDurationModel) -> PathDuration {
-    let mut rdur = Array1::<f32>::new(50);
-    let mut dpth = Array1::<f32>::new(50);
-    let mut dpdr = Array1::<f32>::new(50);
+    // 0-based since §2.3: segment k occupies index k, not k + 1.
+    let mut rdur = vec![0.0f32; 50];
+    let mut dpth = vec![0.0f32; 50];
+    let mut dpdr = vec![0.0f32; 50];
 
     // (distances, durations) for the multi-segment models; slope-only for the rest.
     let ndur = match model {
-        PathDurationModel::Gp2010 => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.063; 1 }
-        PathDurationModel::Wus => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.07; 1 }
-        PathDurationModel::Ena => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.1; 1 }
+        PathDurationModel::Gp2010 => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.063; 1 }
+        PathDurationModel::Wus => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.07; 1 }
+        PathDurationModel::Ena => { rdur[0] = 0.0; dpth[0] = 0.0; dpdr[0] = 0.1; 1 }
         PathDurationModel::Bt2014Wus => {
             // BT2014 WUS. The breakpoints at 7, 45, 125 and 175 km are what the
             // Phase 2 distance ladder is chosen to straddle.
             let r = [0.0, 7.0, 45.0, 125.0, 175.0, 270.0];
             let d = [0.0, 2.4, 8.4, 10.9, 17.4, 34.2];
             for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
-                rdur[i + 1] = ri;
-                dpth[i + 1] = di;
+                rdur[i] = ri;
+                dpth[i] = di;
             }
             r.len()
         }
@@ -597,18 +596,20 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
             let r = [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0];
             let d = [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1];
             for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
-                rdur[i + 1] = ri;
-                dpth[i + 1] = di;
+                rdur[i] = ri;
+                dpth[i] = di;
             }
             r.len()
         }
     };
 
     if ndur != 1 {
-        for i in 1..=ndur - 1 {
+        for i in 0..ndur - 1 {
             dpdr[i] = (dpth[i + 1] - dpth[i]) / (rdur[i + 1] - rdur[i]);
         }
-        dpdr[ndur] = dpdr[ndur - 1];
+        // The last segment repeats the previous slope, so distances past the table
+        // extrapolate rather than flatten.
+        dpdr[ndur - 1] = dpdr[ndur - 2];
     }
     PathDuration { ndur, rdur, dpth, dpdr }
 }
