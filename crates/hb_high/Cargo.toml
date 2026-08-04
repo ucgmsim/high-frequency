@@ -6,14 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic high-frequency seismogram generator"
 
-# No RUNTIME dependencies by design. The port must not pull in FFTW or any C
-# library, and no crate may be allowed to substitute its own float arithmetic for
-# the Fortran's. Complex arithmetic is hand-written in fort.rs for the same
-# reason.
+# Runtime dependencies were forbidden while bit-identity was the goal: any crate is
+# free to implement a transcendental differently from gfortran, and nothing would
+# produce a compile error when it did -- just a few wrong bits. That constraint
+# expired with Stage 2 (see REFACTOR.md), and this is the first dependency admitted
+# under the new rule: a library implementation is preferred wherever the numerical
+# difference is understood and gated by tiers B and C.
 #
-# dev-dependencies are a different matter: they do not enter the dependency graph
-# of anything that links this crate, so criterion cannot affect the numerics.
+# libm is chosen over statrs and puruspe because it is pure Rust with no dependencies
+# of its own, so it adds one crate rather than a subtree. It supplies tgamma, which
+# replaced the transcribed DGAMM in special.rs.
 [dependencies]
+libm = "0.2"
+
+# dev-dependencies do not enter the dependency graph of anything that links this
+# crate, so criterion and proptest cannot affect the numerics.
 
 [dev-dependencies]
 # Pinned to versions already in ~/.cargo/registry -- the network is blocked, so

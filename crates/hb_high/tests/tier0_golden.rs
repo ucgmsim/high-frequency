@@ -14,6 +14,14 @@
 //! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
+//!
+//! **`gamma` no longer has a golden here.** `REFACTOR.md` §2.2b replaced the
+//! transcribed `DGAMM` with `libm::tgamma`, so a bit-for-bit comparison against the
+//! old series is a comparison against code that no longer exists. Its contract is now
+//! carried by property tests in `tests/properties.rs` — the functional equation
+//! `Gamma(x+1) = x*Gamma(x)`, the factorials, and `Gamma(1/2) = sqrt(pi)` — which held
+//! across the swap without modification. `harness/golden/tier0/dgamm.bin` is left in
+//! place as a record of what the Fortran produced; nothing reads it.
 //! Every comparison is exact. See `PORTING_RULES.md` §10.
 
 use hb_high::fft::{fast, remove_quadratic_trend};
@@ -22,7 +30,6 @@ use hb_high::geom::distance_azimuth;
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
-use hb_high::special::gamma;
 use std::path::PathBuf;
 
 /// Sequential reader over an `access='stream'` Fortran file.
@@ -136,20 +143,6 @@ fn delaz5_matches_fortran() {
     }
     r.assert_exhausted();
     assert_eq!(n, 2000);
-}
-
-#[test]
-fn dgamm_matches_fortran() {
-    let mut r = Reader::open("dgamm.bin");
-    let mut n = 0;
-    while !r.done() {
-        let x = r.f64();
-        let want = r.f64();
-        eq64(&format!("gamma({x})"), gamma(x), want);
-        n += 1;
-    }
-    r.assert_exhausted();
-    assert_eq!(n, 1003, "expected 1000 random cases plus 3 error paths");
 }
 
 #[test]
