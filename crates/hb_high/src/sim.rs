@@ -481,20 +481,34 @@ pub fn simulate(
                         k2 = 0;
                     }
                     let k2 = k2 + kst;
-                    let kend = (k2 + np2 as i32).min(ndata as i32);
+                    // §2.6 defect 1 is fixed here: sample 1 of the subfault's trace
+                    // now lands on `k2`, not on `k2 + 1`.
+                    //
+                    // The Fortran read `stdd(li - k2, l)`, so its first iteration read
+                    // index 0 -- one element before the column, which nothing ever
+                    // writes -- and every subfault's contribution arrived one sample
+                    // late. See REFACTOR.md §2.6 for the analysis and PORTING_RULES §7
+                    // for the aliasing that made that read return zero rather than
+                    // crash.
+                    //
+                    // The upper bound moves with it: reading `idx + 1` over the old
+                    // range would reach `subfault_acc[np2 + 1]`, past the end. The
+                    // contribution is `subfault_acc[1..=np2]` placed at
+                    // `acc[k2 ..= k2 + np2 - 1]`.
+                    let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
 
                     let sd = seg.sddp[(i, j)];
                     let mut li = k2;
                     while li <= kend {
-                        // Writes below index 1 go before DS in the
-                        // Fortran and are never read back, since the
-                        // output reads DS(1..ndata). Discarded.
+                        // `k2` can be negative. Writes below index 1 land before DS in
+                        // the Fortran and are never read back, since the output reads
+                        // DS(1..ndata), so they are discarded rather than reproduced.
                         if li >= 1 {
-                            let idx = (li - k2) as usize;
+                            let idx = (li - k2) as usize + 1;
                             let lu = li as usize;
-                            acc[(1, lu)] += sd * subfault_acc_at(&subfault_acc, 1, idx);
-                            acc[(2, lu)] += sd * subfault_acc_at(&subfault_acc, 2, idx);
-                            acc[(3, lu)] += sd * subfault_acc_at(&subfault_acc, 3, idx);
+                            acc[(1, lu)] += sd * subfault_acc[0][idx];
+                            acc[(2, lu)] += sd * subfault_acc[1][idx];
+                            acc[(3, lu)] += sd * subfault_acc[2][idx];
                         }
                         li += 1;
                     }
@@ -584,33 +598,6 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
     PathDuration { ndur, rdur, dpth, dpdr }
 }
 
-/// Read one subfault's accumulated trace, component `l`, at Fortran index `idx`,
-/// reproducing the original's out-of-bounds read at `idx == 0`.
-///
-/// Names below are the **Fortran's** (`stdd`), not this port's, because the whole
-/// point of the function is to model what the original does to its own storage.
-///
-/// The accumulation loop runs `li = k2, kend` and reads `stdd(li-k2, l)`, so the
-/// first iteration reads **index 0** — one before the column. `apply_radiation_and_invert` fills
-/// only `1..=np2`.
-///
-/// In the Fortran `stdd` is `stdd(mmv,3)` column-major, so `stdd(0,2)` aliases
-/// `stdd(mmv,1)` and `stdd(0,3)` aliases `stdd(mmv,2)`; both are untouched (the
-/// zeroing loop covers only `1..np2`) and live in `.bss`, hence zero.
-/// `stdd(0,1)` is genuinely before the array. Modelled as zero for all three.
-///
-/// The observable effect is that each subfault's contribution is delayed one
-/// sample: `DS(l,k2)` gets nothing and `DS(l,k2+1)` gets `stdd(1)`.
-/// See `PORTING_RULES.md` §7 — and `REFACTOR.md` §2.6, which asks whether this
-/// bug should be kept for production compatibility or fixed.
-#[inline]
-fn subfault_acc_at(subfault_acc: &[Array1<f32>; 3], component: usize, idx: usize) -> f32 {
-    if idx == 0 {
-        0.0
-    } else {
-        subfault_acc[component - 1][idx]
-    }
-}
 
 /// Scalars derived from the slip model before any station is simulated.
 struct SourceScale {
