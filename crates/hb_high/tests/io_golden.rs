@@ -78,13 +78,13 @@ fn check(golden: &str, stoch_name: &str) {
     assert_eq!(nlskip, want_nlskip, "nlskip");
     // Layers are 0-based since §2.3; the golden's dump order is unchanged, so `i` here is
     // the storage index and `i + 1` is the Fortran layer number the label reports.
-    for i in 0..j0 { eq32(&format!("depth_km[{}]", i + 1), v.depth_km[i], r.f32()); }
-    for i in 0..j0 { eq32(&format!("thickness_km[{}]", i + 1), v.thickness_km[i], r.f32()); }
-    for i in 0..j0 { eq64(&format!("vp_km_s[{}]", i + 1), v.vp_km_s[i], r.f64()); }
-    for i in 0..j0 { eq64(&format!("vsh_km_s[{}]", i + 1), v.vsh_km_s[i], r.f64()); }
-    for i in 0..j0 { eq64(&format!("density_g_cm3[{}]", i + 1), v.density_g_cm3[i], r.f64()); }
-    for i in 0..j0 { eq32(&format!("attenuation_p[{}]", i + 1), v.attenuation_p[i], r.f32()); }
-    for i in 0..j0 { eq32(&format!("attenuation_s[{}]", i + 1), v.attenuation_s[i], r.f32()); }
+    for i in 0..j0 { eq32(&format!("depth_km[{}]", i + 1), v[i].depth_km, r.f32()); }
+    for i in 0..j0 { eq32(&format!("thickness_km[{}]", i + 1), v[i].thickness_km, r.f32()); }
+    for i in 0..j0 { eq64(&format!("vp_km_s[{}]", i + 1), v[i].vp_km_s, r.f64()); }
+    for i in 0..j0 { eq64(&format!("vsh_km_s[{}]", i + 1), v[i].vsh_km_s, r.f64()); }
+    for i in 0..j0 { eq64(&format!("density_g_cm3[{}]", i + 1), v[i].density_g_cm3, r.f64()); }
+    for i in 0..j0 { eq32(&format!("attenuation_p[{}]", i + 1), v[i].attenuation_p, r.f32()); }
+    for i in 0..j0 { eq32(&format!("attenuation_s[{}]", i + 1), v[i].attenuation_s, r.f32()); }
 
     // Station list.
     let st_text =

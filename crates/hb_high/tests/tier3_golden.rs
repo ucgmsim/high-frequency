@@ -59,10 +59,10 @@ fn pnot_matches_fortran() {
         let mut v = 0.0f64;
         for i in 0..ndeep {
             if st.travel.alp[i] > 0.0 {
-                v = v.max(vmod.vp_km_s[i]);
+                v = v.max(vmod[i].vp_km_s);
             }
             if st.travel.als[i] > 0.0 {
-                v = v.max(vmod.vsh_km_s[i]);
+                v = v.max(vmod[i].vsh_km_s);
             }
         }
         let mut eps = 1.0e-10f64;

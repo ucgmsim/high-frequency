@@ -36,7 +36,7 @@ pub fn site_amplification_factors(
     log_frequency: &[f32],
     factors: &mut [f32],
 ) {
-    let vdsrc = (vmod.vsh_km_s[source_layer] * vmod.density_g_cm3[source_layer]) as f32;
+    let vdsrc = (vmod[source_layer].vsh_km_s * vmod[source_layer].density_g_cm3) as f32;
 
     // Both the frequency table and the velocity model are 0-based since §2.3. The two
     // tables are walked in lockstep, one factor per frequency.
@@ -48,24 +48,24 @@ pub fn site_amplification_factors(
         let mut zdep = 0.0f32;
         let mut pz = 0.0f32;
         let mut tt = 0.0f32;
-        let mut ttp = (vmod.thickness_km[1] / vmod.vsh_km_s[1]) as f32;
+        let mut ttp = (vmod[1].thickness_km / vmod[1].vsh_km_s) as f32;
 
         // Label 6145: walk down until a quarter-period of travel time has accumulated, or
         // the source layer is reached. Genuinely sequential -- each step's `ttp` depends
         // on the previous one's -- so this stays a loop.
         while !(ttp >= stt || i == source_layer) {
-            zdep = (zdep as f64 + vmod.thickness_km[i]) as f32;
-            pz = (pz as f64 + vmod.density_g_cm3[i] * vmod.thickness_km[i] / vmod.vsh_km_s[i]) as f32;
+            zdep = (zdep as f64 + vmod[i].thickness_km) as f32;
+            pz = (pz as f64 + vmod[i].density_g_cm3 * vmod[i].thickness_km / vmod[i].vsh_km_s) as f32;
             tt = ttp;
             i += 1;
-            ttp = (vmod.thickness_km[i] / vmod.vsh_km_s[i] + tt as f64) as f32;
+            ttp = (vmod[i].thickness_km / vmod[i].vsh_km_s + tt as f64) as f32;
         }
 
         // Label 6146: interpolate the partial layer, then form the impedance
         // ratio. `(stt - tt)` is computed in single precision before being
         // promoted, matching the Fortran's mixed-type expressions.
-        let bz = ((zdep as f64 + (stt - tt) as f64 * vmod.vsh_km_s[i]) / stt as f64) as f32;
-        let pz = ((pz as f64 + vmod.density_g_cm3[i] * (stt - tt) as f64) / stt as f64) as f32;
+        let bz = ((zdep as f64 + (stt - tt) as f64 * vmod[i].vsh_km_s) / stt as f64) as f32;
+        let pz = ((pz as f64 + vmod[i].density_g_cm3 * (stt - tt) as f64) / stt as f64) as f32;
 
         *factor = 0.5 * (vdsrc / (bz * pz)).ln();
     }

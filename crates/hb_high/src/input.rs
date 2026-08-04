@@ -280,30 +280,30 @@ pub fn read_velocity_model(
     for i in 0..j0 {
         let v = r.read_values(6)?;
         let g = |k: usize| v[k].as_deref().unwrap_or("");
-        vmod_in.thickness_km[i] = crate::deck::parse_f32(g(0))?;
-        vmod_in.vp_km_s[i] = crate::deck::parse_f64(g(1))?;
-        vmod_in.vsh_km_s[i] = crate::deck::parse_f64(g(2))?;
-        vmod_in.density_g_cm3[i] = crate::deck::parse_f64(g(3))?;
-        vmod_in.attenuation_p[i] = crate::deck::parse_f32(g(4))?;
-        vmod_in.attenuation_s[i] = crate::deck::parse_f32(g(5))?;
+        vmod_in[i].thickness_km = crate::deck::parse_f32(g(0))?;
+        vmod_in[i].vp_km_s = crate::deck::parse_f64(g(1))?;
+        vmod_in[i].vsh_km_s = crate::deck::parse_f64(g(2))?;
+        vmod_in[i].density_g_cm3 = crate::deck::parse_f64(g(3))?;
+        vmod_in[i].attenuation_p = crate::deck::parse_f32(g(4))?;
+        vmod_in[i].attenuation_s = crate::deck::parse_f32(g(5))?;
 
-        vmod_in.depth_km[i] = vmod_in.thickness_km[i];
+        vmod_in[i].depth_km = vmod_in[i].thickness_km;
         if i > 0 {
-            vmod_in.depth_km[i] += vmod_in.depth_km[i - 1];
+            vmod_in[i].depth_km += vmod_in[i - 1].depth_km;
         }
 
-        if vmod_in.vsh_km_s[i] >= vsmoho {
+        if vmod_in[i].vsh_km_s >= vsmoho {
             // A LAYER COUNT, so it is one more than the 0-based index that reached it.
             jmoho = i + 1;
-            vmod_in.thickness_km[i] = 0.0;
+            vmod_in[i].thickness_km = 0.0;
             assert!(i > 0, "vsmoho reached in layer 1; the Fortran would read depth_km(0)");
-            vmod_in.depth_km[i] = vmod_in.depth_km[i - 1];
+            vmod_in[i].depth_km = vmod_in[i - 1].depth_km;
             break;
         }
     }
 
     j0 = jmoho;
-    vmod_in.thickness_km[j0 - 1] = 0.0;
+    vmod_in[j0 - 1].thickness_km = 0.0;
     Ok(j0)
 }
 
@@ -320,34 +320,34 @@ pub fn read_velocity_model(
 /// index 1. `attenuation_p(1)` and `attenuation_s(1)` therefore keep the original first layer's Q
 /// values rather than getting air-like ones. Faithful to the Fortran.
 pub fn insert_air_layer(vmod_in: &mut VelocityModelInput, layer_count: usize, skip_layers: i32) -> (usize, i32) {
-    if !(vmod_in.depth_km[0] > 0.001 && vmod_in.vp_km_s[0] > 0.01) {
+    if !(vmod_in[0].depth_km > 0.001 && vmod_in[0].vp_km_s > 0.01) {
         return (layer_count, skip_layers);
     }
     let layer_count = layer_count + 1;
     let skip_layers = skip_layers + 1;
 
-    // Shift down from the back so nothing is overwritten before it is copied. 0-based, the
-    // Fortran's `DO i = layer_count, 2, -1` is `layer_count - 1` down to `1`.
+    // Shift down from the back so nothing is overwritten before it is copied. 0-based,
+    // the Fortran's `DO i = layer_count, 2, -1` is `layer_count - 1` down to `1`.
+    //
+    // One whole layer per step, where this used to be seven field assignments. That is
+    // the difference that matters below: the shift moves ALL seven fields, and only five
+    // are then overwritten at index 0, so `attenuation_p`/`attenuation_s` there keep the
+    // original first layer's values. With parallel arrays that was an absence a reader
+    // had to notice; here it is a visibly partial update of a whole struct.
     for i in (1..layer_count).rev() {
-        vmod_in.depth_km[i] = vmod_in.depth_km[i - 1];
-        vmod_in.thickness_km[i] = vmod_in.thickness_km[i - 1];
-        vmod_in.vp_km_s[i] = vmod_in.vp_km_s[i - 1];
-        vmod_in.vsh_km_s[i] = vmod_in.vsh_km_s[i - 1];
-        vmod_in.density_g_cm3[i] = vmod_in.density_g_cm3[i - 1];
-        vmod_in.attenuation_p[i] = vmod_in.attenuation_p[i - 1];
-        vmod_in.attenuation_s[i] = vmod_in.attenuation_s[i - 1];
+        vmod_in[i] = vmod_in[i - 1];
     }
 
     // depth_km and thickness_km are real*4, so these literals are already f32.
-    vmod_in.depth_km[0] = 0.0001;
-    vmod_in.thickness_km[0] = 0.0001;
+    vmod_in[0].depth_km = 0.0001;
+    vmod_in[0].thickness_km = 0.0001;
     // vp_km_s, vsh_km_s and density_g_cm3 are real*8, but the Fortran literals are UNSUFFIXED
     // and therefore only carry f32 precision -- PORTING_RULES.md §1b. Writing
     // 0.001f64 here gives 0.001 exactly; the Fortran stores
     // 0.0010000000474974513. Caught by the reader golden.
-    vmod_in.vp_km_s[0] = 0.001f32 as f64;
-    vmod_in.vsh_km_s[0] = 0.0005f32 as f64;
-    vmod_in.density_g_cm3[0] = 0.001f32 as f64;
+    vmod_in[0].vp_km_s = 0.001f32 as f64;
+    vmod_in[0].vsh_km_s = 0.0005f32 as f64;
+    vmod_in[0].density_g_cm3 = 0.001f32 as f64;
     // attenuation_p(1) and attenuation_s(1) are deliberately not set; see the note above.
 
     (layer_count, skip_layers)
@@ -480,8 +480,8 @@ mod tests {
         // first of these would also have passed against index 3, on an element the
         // reader never wrote -- an NLAYMAX-sized buffer will happily read zero one past
         // the model, which is why the second assertion compares two real values.
-        assert_eq!(v.thickness_km[j0 - 1], 0.0, "the Moho layer is zeroed");
-        assert_eq!(v.depth_km[j0 - 1], v.depth_km[j0 - 2]);
+        assert_eq!(v[j0 - 1].thickness_km, 0.0, "the Moho layer is zeroed");
+        assert_eq!(v[j0 - 1].depth_km, v[j0 - 2].depth_km);
     }
 
     #[test]
@@ -492,8 +492,8 @@ mod tests {
         assert_eq!(j0, 2);
         // 0-based since §2.3: the base of a 2-layer model is index 1, and the first
         // layer's cumulative depth is index 0.
-        assert_eq!(v.thickness_km[1], 0.0);
-        assert_eq!(v.depth_km[0], 1.0);
+        assert_eq!(v[1].thickness_km, 0.0);
+        assert_eq!(v[0].depth_km, 1.0);
     }
 
     #[test]
@@ -501,20 +501,20 @@ mod tests {
         let text = "2\n0.05 1.8 0.5 1.81 116.0 58.0\n2.0 4.0 2.5 2.5 200 100\n";
         let mut v = VelocityModelInput::new();
         let j0 = read_velocity_model(text, &mut v, 999.9).unwrap();
-        let qp1_before = v.attenuation_p[0];
+        let qp1_before = v[0].attenuation_p;
         let (j0b, nlskip) = insert_air_layer(&mut v, j0, -99);
         assert_eq!(j0b, j0 + 1, "production models do get the air layer");
         assert_eq!(nlskip, -98, "still negative, so grandvel stays dead");
-        assert_eq!(v.thickness_km[0], 0.0001);
+        assert_eq!(v[0].thickness_km, 0.0001);
         // Not 0.001f64: the Fortran literal is unsuffixed in a real*8 context,
         // so it carries only f32 precision. See PORTING_RULES.md §1b.
-        assert_eq!(v.vp_km_s[0], 0.001f32 as f64);
-        assert_eq!(v.vsh_km_s[0], 0.0005f32 as f64);
-        assert_eq!(v.density_g_cm3[0], 0.001f32 as f64);
-        assert_eq!(v.thickness_km[1], 0.05, "the original first layer shifted down");
+        assert_eq!(v[0].vp_km_s, 0.001f32 as f64);
+        assert_eq!(v[0].vsh_km_s, 0.0005f32 as f64);
+        assert_eq!(v[0].density_g_cm3, 0.001f32 as f64);
+        assert_eq!(v[1].thickness_km, 0.05, "the original first layer shifted down");
         // The shift copies seven fields but only five are overwritten, so Q
         // stays put.
-        assert_eq!(v.attenuation_p[0], qp1_before, "attenuation_p(1) is deliberately not air-like");
+        assert_eq!(v[0].attenuation_p, qp1_before, "attenuation_p(1) is deliberately not air-like");
     }
 
     #[test]

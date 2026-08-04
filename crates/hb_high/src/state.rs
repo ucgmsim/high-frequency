@@ -43,20 +43,33 @@ use params::NLAYMAX;
 /// one element PAST the model when a source is below every layer, which the Fortran did
 /// too, and the surrounding code depends on getting the zero there rather than a panic.
 /// See `PORTING_RULES.md` §7.
+/// One layer of the working velocity model.
+///
+/// The mixed precision is not negotiable and not tidyable: the first five are `real*8`
+/// and the two `attenuation` fields `real*4` in the Fortran, five of the fourteen
+/// declarations getting their `real*8`-ness solely from `implicit real*8 (a-h,o-z)`.
+/// Widening `attenuation_s` to `f64` would change `geometric_spreading`'s deliberately
+/// single-precision accumulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Layer {
+    /// `dep` / `dpt` — cumulative depth to the base of this layer.
+    pub depth_km: f64,
+    /// `th` — layer thickness.
+    pub thickness_km: f64,
+    /// P velocity. Named `c` in the dead `gencof`.
+    pub vp_km_s: f64,
+    /// S velocity. Named `vs` or `s` elsewhere.
+    pub vsh_km_s: f64,
+    /// Density. Named `dn`, `d` or `rh` elsewhere.
+    pub density_g_cm3: f64,
+    pub attenuation_p: f32,
+    pub attenuation_s: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct VelocityModel {
-    /// `dep` / `dpt` — cumulative depth to the base of each layer.
-    pub depth_km: Vec<f64>,
-    /// `th` — layer thickness.
-    pub thickness_km: Vec<f64>,
-    /// P velocity. Named `c` in the dead `gencof`.
-    pub vp_km_s: Vec<f64>,
-    /// S velocity. Named `vs` or `s` elsewhere.
-    pub vsh_km_s: Vec<f64>,
-    /// Density. Named `dn`, `d` or `rh` elsewhere.
-    pub density_g_cm3: Vec<f64>,
-    pub attenuation_p: Vec<f32>,
-    pub attenuation_s: Vec<f32>,
+    /// Indexed through [`Index`], so a caller writes `vmod[k].vsh_km_s`.
+    layers: Vec<Layer>,
 }
 
 impl Default for VelocityModel {
@@ -67,15 +80,33 @@ impl Default for VelocityModel {
 
 impl VelocityModel {
     pub fn new() -> Self {
-        Self {
-            depth_km: vec![0.0; NLAYMAX],
-            thickness_km: vec![0.0; NLAYMAX],
-            vp_km_s: vec![0.0; NLAYMAX],
-            vsh_km_s: vec![0.0; NLAYMAX],
-            density_g_cm3: vec![0.0; NLAYMAX],
-            attenuation_p: vec![0.0; NLAYMAX],
-            attenuation_s: vec![0.0; NLAYMAX],
-        }
+        Self { layers: vec![Layer::default(); NLAYMAX] }
+    }
+
+    /// The layers as a slice, for the reductions that want a range rather than one index.
+    ///
+    /// Deliberately not `Deref<Target = [Layer]>`: that would also expose `len()`, which
+    /// is `NLAYMAX` and not the layer count. Every caller here already carries the real
+    /// count, and confusing the two is exactly the `j0` hazard `PORTING_RULES.md` §7
+    /// describes.
+    #[inline]
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+}
+
+impl std::ops::Index<usize> for VelocityModel {
+    type Output = Layer;
+    #[inline]
+    fn index(&self, layer: usize) -> &Layer {
+        &self.layers[layer]
+    }
+}
+
+impl std::ops::IndexMut<usize> for VelocityModel {
+    #[inline]
+    fn index_mut(&mut self, layer: usize) -> &mut Layer {
+        &mut self.layers[layer]
     }
 }
 
@@ -86,15 +117,27 @@ impl VelocityModel {
 /// those three are undeclared in *both* scopes that declare the block, so they
 /// fall to implicit `real*4`. Adding `implicit none` to either Fortran scope
 /// would shift the whole block. See `PORTING_RULES.md` §2.
+/// One layer as read from file.
+///
+/// **`depth_km` and `thickness_km` are `f32` here and `f64` in [`Layer`].** That is not
+/// an inconsistency to tidy: they are undeclared in *both* Fortran scopes that declare
+/// this block, so they fall to implicit `real*4`, while the corresponding `/vmod/`
+/// fields are `real*8`. Adding `implicit none` to either scope would shift the whole
+/// block. See `PORTING_RULES.md` §2.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputLayer {
+    pub depth_km: f32,
+    pub thickness_km: f32,
+    pub vp_km_s: f64,
+    pub vsh_km_s: f64,
+    pub density_g_cm3: f64,
+    pub attenuation_p: f32,
+    pub attenuation_s: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct VelocityModelInput {
-    pub depth_km: Vec<f32>,
-    pub thickness_km: Vec<f32>,
-    pub vp_km_s: Vec<f64>,
-    pub vsh_km_s: Vec<f64>,
-    pub density_g_cm3: Vec<f64>,
-    pub attenuation_p: Vec<f32>,
-    pub attenuation_s: Vec<f32>,
+    layers: Vec<InputLayer>,
     // `grand`/`gr` -- 3000 floats of RNG scratch for `grandvel` -- lived here until
     // §2.8. `grandvel` is dead under the production deck (`nl_skip < 0`) and is not
     // ported, so nothing ever read the field, but `simulate` deep-cloned it once per
@@ -109,15 +152,22 @@ impl Default for VelocityModelInput {
 
 impl VelocityModelInput {
     pub fn new() -> Self {
-        Self {
-            depth_km: vec![0.0; NLAYMAX],
-            thickness_km: vec![0.0; NLAYMAX],
-            vp_km_s: vec![0.0; NLAYMAX],
-            vsh_km_s: vec![0.0; NLAYMAX],
-            density_g_cm3: vec![0.0; NLAYMAX],
-            attenuation_p: vec![0.0; NLAYMAX],
-            attenuation_s: vec![0.0; NLAYMAX],
-        }
+        Self { layers: vec![InputLayer::default(); NLAYMAX] }
+    }
+}
+
+impl std::ops::Index<usize> for VelocityModelInput {
+    type Output = InputLayer;
+    #[inline]
+    fn index(&self, layer: usize) -> &InputLayer {
+        &self.layers[layer]
+    }
+}
+
+impl std::ops::IndexMut<usize> for VelocityModelInput {
+    #[inline]
+    fn index_mut(&mut self, layer: usize) -> &mut InputLayer {
+        &mut self.layers[layer]
     }
 }
 

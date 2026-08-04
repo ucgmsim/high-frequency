@@ -54,16 +54,16 @@ fn vmod(j0: usize) -> VelocityModel {
     let mut dep = 0.0f64;
     for k in 0..j0 {
         let frac = k as f64 / (j0 - 1) as f64;
-        v.thickness_km[k] = 0.05 + 3.0 * frac;
-        v.vsh_km_s[k] = 0.5 + 4.1 * frac;
-        v.vp_km_s[k] = v.vsh_km_s[k] * 1.75;
-        v.density_g_cm3[k] = 1.81 + 1.5 * frac;
-        v.attenuation_s[k] = (50.0 + 150.0 * frac) as f32;
-        v.attenuation_p[k] = 2.0 * v.attenuation_s[k];
-        dep += v.thickness_km[k];
-        v.depth_km[k] = dep;
+        v[k].thickness_km = 0.05 + 3.0 * frac;
+        v[k].vsh_km_s = 0.5 + 4.1 * frac;
+        v[k].vp_km_s = v[k].vsh_km_s * 1.75;
+        v[k].density_g_cm3 = 1.81 + 1.5 * frac;
+        v[k].attenuation_s = (50.0 + 150.0 * frac) as f32;
+        v[k].attenuation_p = 2.0 * v[k].attenuation_s;
+        dep += v[k].thickness_km;
+        v[k].depth_km = dep;
     }
-    v.thickness_km[j0 - 1] = 0.0;
+    v[j0 - 1].thickness_km = 0.0;
     v
 }
 
@@ -90,10 +90,10 @@ fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     let mut st = ray_state(ksrc);
     let mut depsum = 0.0f64;
     for k in 0..=ksrc {
-        depsum += v.thickness_km[k];
+        depsum += v[k].thickness_km;
     }
-    let hs = depsum - 0.5 * v.thickness_km[ksrc];
-    build_ray_path(&mut st, v, hs, v.thickness_km[0]);
+    let hs = depsum - 0.5 * v[ksrc].thickness_km;
+    build_ray_path(&mut st, v, hs, v[0].thickness_km);
     st
 }
 
@@ -292,7 +292,7 @@ fn bench_ray(c: &mut Criterion) {
     group.bench_function("build_ray_path", |b| {
         b.iter_batched_ref(
             || ray_state(18),
-            |st| build_ray_path(st, &v, black_box(30.0), black_box(v.thickness_km[1])),
+            |st| build_ray_path(st, &v, black_box(30.0), black_box(v[1].thickness_km)),
             criterion::BatchSize::SmallInput,
         )
     });

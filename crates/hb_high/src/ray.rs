@@ -155,10 +155,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // receiver, which is exactly the kind of silent one-layer error §2.3 is prone to.
     // `Sum for f64` folds left to right, matching `thtot = th(i) + thtot`. (Operand order
     // within each add differs and cannot matter -- IEEE addition is commutative.)
-    let thtot: f64 = vmod.thickness_km[..lir].iter().sum();
+    let thtot: f64 = vmod.layers()[..lir].iter().map(|l| l.thickness_km).sum();
     let hrl = receiver_depth_km - thtot;
-    let a1 = hrl / vmod.thickness_km[lir];
-    let a2 = (vmod.thickness_km[lir] - hrl) / vmod.thickness_km[lir];
+    let a1 = hrl / vmod[lir].thickness_km;
+    let a2 = (vmod[lir].thickness_km - hrl) / vmod[lir].thickness_km;
     let nupa = state.coff.nup1[n - 1];
     // Labels 23/24: mode 5 takes the P multiplier, modes 3 and 4 the S one,
     // and anything else falls through to P.
@@ -179,10 +179,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     }
 
     // Source position within its layer, same as the receiver block above.
-    let thtot: f64 = vmod.thickness_km[..lis].iter().sum();
+    let thtot: f64 = vmod.layers()[..lis].iter().map(|l| l.thickness_km).sum();
     let hsl = source_depth_km - thtot;
-    let a1 = hsl / vmod.thickness_km[lis];
-    let a2 = (vmod.thickness_km[lis] - hsl) / vmod.thickness_km[lis];
+    let a1 = hsl / vmod[lis].thickness_km;
+    let a2 = (vmod[lis].thickness_km - hsl) / vmod[lis].thickness_km;
     // Note the a1/a2 roles are swapped relative to the receiver block above:
     // nup == 1 subtracts a2 here but a1 there. That is what the Fortran does.
     if state.rays.nm[0] == 3 || state.rays.nm[0] == 4 {
@@ -239,13 +239,13 @@ pub fn geometric_spreading(
     // Layers above the source layer, skipping the air layer at index 0. 0-based this is
     // `1..nh1`, not `1..=nh1 - 1`: same range, but the first spelling cannot underflow
     // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
-    let dep: f64 = vmod.thickness_km[1..nh1].iter().sum();
+    let dep: f64 = vmod.layers()[1..nh1].iter().map(|l| l.thickness_km).sum();
 
     let m = ray_type % 2;
     let th1 = if m == 1 {
         source_depth_km - dep
     } else if m == 0 {
-        dep + vmod.thickness_km[nh1] - source_depth_km
+        dep + vmod[nh1].thickness_km - source_depth_km
     } else {
         // The Fortran has two IFs and no else, so a negative odd ray_type would
         // leave th1 undefined. Every call site passes ray_type >= 1.
@@ -254,32 +254,32 @@ pub fn geometric_spreading(
 
     let clamp = 0.999999f32 as f64;
 
-    let mut sini = ray_parameter * vmod.vsh_km_s[nh1];
+    let mut sini = ray_parameter * vmod[nh1].vsh_km_s;
     if sini >= 1.0 {
         sini = clamp;
     }
     let denom = 1.0 / (1.0 - sini * sini).sqrt();
 
     let ri = th1 * denom;
-    let ti = ri / vmod.vsh_km_s[nh1];
+    let ti = ri / vmod[nh1].vsh_km_s;
 
     let mut rsum = ri;
-    let mut qb = (ti / vmod.attenuation_s[nh1] as f64) as f32;
+    let mut qb = (ti / vmod[nh1].attenuation_s as f64) as f32;
 
     for j in 1..state.rays.nd as usize {
         let nhj = state.rays.nh[j] as usize;
-        let mut sini = ray_parameter * vmod.vsh_km_s[nhj];
+        let mut sini = ray_parameter * vmod[nhj].vsh_km_s;
         if sini >= 1.0 {
             sini = clamp;
         }
         let denom = 1.0 / (1.0 - sini * sini).sqrt();
 
-        let ri = vmod.thickness_km[nhj] * denom;
-        let ti = ri / vmod.vsh_km_s[nhj];
+        let ri = vmod[nhj].thickness_km * denom;
+        let ti = ri / vmod[nhj].vsh_km_s;
 
         rsum += ri;
         // Narrowed on every iteration: single-precision accumulation.
-        qb = (qb as f64 + ti / vmod.attenuation_s[nhj] as f64) as f32;
+        qb = (qb as f64 + ti / vmod[nhj].attenuation_s as f64) as f32;
     }
 
     if rsum == 0.0 {
@@ -307,13 +307,13 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
         let mut ea = Complex64::ZERO;
         let mut eb = Complex64::ZERO;
         if state.travel.alp[i] > 0.0 {
-            ea = vertical_slowness(ray_parameter, vmod.vp_km_s[i]);
+            ea = vertical_slowness(ray_parameter, vmod[i].vp_km_s);
         }
         if state.travel.als[i] > 0.0 {
-            eb = vertical_slowness(ray_parameter, vmod.vsh_km_s[i]);
+            eb = vertical_slowness(ray_parameter, vmod[i].vsh_km_s);
         }
-        a = a + ea * (state.travel.alp[i] as f64) * vmod.thickness_km[i]
-              + eb * (state.travel.als[i] as f64) * vmod.thickness_km[i];
+        a = a + ea * (state.travel.alp[i] as f64) * vmod[i].thickness_km
+              + eb * (state.travel.als[i] as f64) * vmod[i].thickness_km;
     }
     ray_parameter * range_km + a
 }
@@ -333,12 +333,12 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
         let mut b = Complex64::ZERO;
         let mut c = Complex64::ZERO;
         if state.travel.alp[i] != 0.0 {
-            let ea = vertical_slowness(ray_parameter, vmod.vp_km_s[i]);
-            b = Complex64::from(vmod.thickness_km[i] * state.travel.alp[i] as f64) / ea;
+            let ea = vertical_slowness(ray_parameter, vmod[i].vp_km_s);
+            b = Complex64::from(vmod[i].thickness_km * state.travel.alp[i] as f64) / ea;
         }
         if state.travel.als[i] != 0.0 {
-            let eb = vertical_slowness(ray_parameter, vmod.vsh_km_s[i]);
-            c = Complex64::from(vmod.thickness_km[i] * state.travel.als[i] as f64) / eb;
+            let eb = vertical_slowness(ray_parameter, vmod[i].vsh_km_s);
+            c = Complex64::from(vmod[i].thickness_km * state.travel.als[i] as f64) / eb;
         }
         a = a + b + c;
     }
@@ -388,10 +388,10 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
     let mut v = 0.0f64;
     for i in 0..=state.travel.ndeep as usize {
         if state.travel.alp[i] > 0.0 {
-            v = v.max(vmod.vp_km_s[i]);
+            v = v.max(vmod[i].vp_km_s);
         }
         if state.travel.als[i] > 0.0 {
-            v = v.max(vmod.vsh_km_s[i]);
+            v = v.max(vmod[i].vsh_km_s);
         }
     }
 
@@ -482,10 +482,10 @@ pub fn travel_time(
         let nup = state.coff.nup1[i];
         let nhi = state.rays.nh[i] as usize;
 
-        let mut vb = vmod.vsh_km_s[nhi];
+        let mut vb = vmod[nhi].vsh_km_s;
         let mut va = vb;
         if state.rays.nm[0] != 4 {
-            va = vmod.vp_km_s[nhi];
+            va = vmod[nhi].vp_km_s;
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
 
@@ -502,10 +502,10 @@ pub fn travel_time(
         // same +-1 in either index base. Upgoing from layer 0 would underflow, as the
         // Fortran read `vs(0)` there; unreachable, and loud if it ever is not.
         let k = if nup == 1 { nhi - 1 } else { nhi + 1 };
-        vb = vmod.vsh_km_s[k];
+        vb = vmod[k].vsh_km_s;
         va = vb;
         if state.rays.nm[0] != 4 {
-            va = vmod.vp_km_s[k];
+            va = vmod[k].vp_km_s;
         }
         p1 = p1.min(1.0 / va).min(1.0 / vb);
     }
@@ -588,7 +588,7 @@ pub fn green_function(
     let bottom_layer = layer_count - 1;
 
     state.rays.ndeg = 1;
-    let hr = vmod.thickness_km[0];
+    let hr = vmod[0].thickness_km;
     let mut hs = src_depth as f64;
     let rr = range as f64;
 
@@ -601,7 +601,7 @@ pub fn green_function(
     // see the doc comment -- which is why the arrays stay NLAYMAX-sized.
     let mut ksrc = do_end(0, layer_count - 1);
     for k in 0..layer_count {
-        dep += vmod.thickness_km[k];
+        dep += vmod[k].thickness_km;
         if hs >= dep && (hs - dep) < hs_tol {
             hs = dep + hs_tol;
         }
@@ -636,7 +636,7 @@ pub fn green_function(
             let mut jv = do_end(krec, bottom_layer - 1);
             for jj in krec..=(bottom_layer - 1) {
                 push(state, &mut l, jj);
-                if vmod.thickness_km[jj + 1] == 0.0 {
+                if vmod[jj + 1].thickness_km == 0.0 {
                     jv = jj;
                     break;
                 }
@@ -653,7 +653,7 @@ pub fn green_function(
         let mut jv = do_end(ksrc, bottom_layer - 1);
         for jj in ksrc..=(bottom_layer - 1) {
             push(state, &mut l, jj);
-            if vmod.thickness_km[jj + 1] == 0.0 {
+            if vmod[jj + 1].thickness_km == 0.0 {
                 jv = jj;
                 break;
             }
@@ -670,7 +670,7 @@ pub fn green_function(
             let mut jv = do_end(krec, bottom_layer - 1);
             for jj in krec..=(bottom_layer - 1) {
                 push(state, &mut l, jj);
-                if vmod.thickness_km[jj + 1] == 0.0 {
+                if vmod[jj + 1].thickness_km == 0.0 {
                     jv = jj;
                     break;
                 }

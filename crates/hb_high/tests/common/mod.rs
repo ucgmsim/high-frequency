@@ -134,13 +134,13 @@ impl Golden {
     pub fn ray_seam_state(&mut self, layers: usize) -> (RayState, VelocityModel) {
         let mut vmod = VelocityModel::new();
         for k in 0..layers {
-            vmod.thickness_km[k] = self.f64();
+            vmod[k].thickness_km = self.f64();
         }
         for k in 0..layers {
-            vmod.vp_km_s[k] = self.f64();
+            vmod[k].vp_km_s = self.f64();
         }
         for k in 0..layers {
-            vmod.vsh_km_s[k] = self.f64();
+            vmod[k].vsh_km_s = self.f64();
         }
         let mut st = RayState::default();
         for k in 0..layers {

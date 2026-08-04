@@ -29,9 +29,9 @@ use common::*;
 fn read_vmod(r: &mut Golden, j0: usize) -> VelocityModel {
     let mut v = VelocityModel::new();
     // 0-based since §2.3; the golden's dump order is the Fortran's layer 1..j0.
-    for k in 0..j0 { v.thickness_km[k] = r.f64(); }
-    for k in 0..j0 { v.vsh_km_s[k] = r.f64(); }
-    for k in 0..j0 { v.density_g_cm3[k] = r.f64(); }
+    for k in 0..j0 { v[k].thickness_km = r.f64(); }
+    for k in 0..j0 { v[k].vsh_km_s = r.f64(); }
+    for k in 0..j0 { v[k].density_g_cm3 = r.f64(); }
     v
 }
 
@@ -138,13 +138,13 @@ fn geom_terms_matches_fortran() {
 
         let mut vmod = VelocityModel::new();
         for k in 0..j0 {
-            vmod.thickness_km[k] = r.f64();
+            vmod[k].thickness_km = r.f64();
         }
         for k in 0..j0 {
-            vmod.vsh_km_s[k] = r.f64();
+            vmod[k].vsh_km_s = r.f64();
         }
         for k in 0..j0 {
-            vmod.attenuation_s[k] = r.f32();
+            vmod[k].attenuation_s = r.f32();
         }
 
         let mut st = RayState::default();
