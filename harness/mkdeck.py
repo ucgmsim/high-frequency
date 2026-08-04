@@ -44,10 +44,20 @@ SPA_TECT_TYPE = 0
 RVFRAC, RVFRAC_SHAL, RVFRAC_DEEP = 0.8, 0.7, 0.7
 
 
-def build_deck(stoch, velmod, station_file, output_file, seed, duration, dt):
-    siteamp = int(not NO_SITEAMP)
+def build_deck(stoch, velmod, station_file, output_file, seed, duration, dt,
+               *, ipdur=PATH_DUR, siteamp_override=None, rayset=None,
+               rupv=None, kappa=None, vs_moho=None, ift=None, fhi=None):
+    siteamp = int(not NO_SITEAMP) if siteamp_override is None else siteamp_override
+    rayset = RAYSET if rayset is None else rayset
+    kappa = KAPPA if kappa is None else kappa
+    vs_moho = VS_MOHO if vs_moho is None else vs_moho
+    ift = IFT if ift is None else ift
+    fhi = FHI if fhi is None else fhi
     mom = MOM or -1
-    rupv = RUPV or -1
+    # rupv > 0 takes the geometric rupture-time branch, which is the only way to
+    # reach the irand jitter test at source line 1366. Production passes -1, so
+    # that branch is dead there.
+    rupv = (RUPV or -1) if rupv is None else rupv
     # Python truthiness, replicated exactly: tect_type 0 is falsy, so `or -1`
     # turns it into -1. hf_sim.py does the same.
     fa = SPA_FAULT_AREA or -1
@@ -58,21 +68,21 @@ def build_deck(stoch, velmod, station_file, output_file, seed, duration, dt):
         SDROP,
         station_file,
         output_file,
-        f"{len(RAYSET)} {' '.join(str(r) for r in RAYSET)}",
+        f"{len(rayset)} {' '.join(str(r) for r in rayset)}",
         siteamp,
-        f"{NBU} {IFT} {FLO} {FHI}",
+        f"{NBU} {ift} {FLO} {fhi}",
         seed,
         1,  # nsite: hf_sim.py invokes the binary once per station
-        f"{duration} {dt} {FMAX} {KAPPA} {QFEXP}",
+        f"{duration} {dt} {FMAX} {kappa} {QFEXP}",
         f"{RVFRAC} {RVFRAC_SHAL} {RVFRAC_DEEP} {CZERO} {CALPHA}",
         f"{mom} {rupv}",
         stoch,
         velmod,
-        VS_MOHO,
+        vs_moho,
         f"{NL_SKIP} {VP_SIG} {VSH_SIG} {RHO_SIG} {QS_SIG} {int(IC_FLAG)}",
         VELOCITY_NAME,
         f"{FA_SIG1} {FA_SIG2} {RV_SIG1}",
-        PATH_DUR,
+        ipdur,
         0,
         f"{fa} {tm} {tt}",
         0,  # seek_bytes
@@ -101,6 +111,15 @@ def main():
     ap.add_argument("--dlon", type=float, default=0.1)
     ap.add_argument("--dlat", type=float, default=0.0)
     ap.add_argument("--station-name", default="TEST0001")
+    ap.add_argument("--ipdur", type=int, default=PATH_DUR)
+    ap.add_argument("--siteamp", type=int, default=None)
+    ap.add_argument("--rayset", type=str, default=None,
+                    help="comma-separated ray types, e.g. 1,2")
+    ap.add_argument("--rupv", type=float, default=None)
+    ap.add_argument("--kappa", type=float, default=None)
+    ap.add_argument("--vs-moho", type=float, default=None)
+    ap.add_argument("--ift", type=int, default=None)
+    ap.add_argument("--fhi", type=float, default=None)
     ap.add_argument("--write-station", action="store_true",
                     help="also write the station file, offset from the fault reference point")
     a = ap.parse_args()
@@ -111,8 +130,12 @@ def main():
             f"{lon + a.dlon} {lat + a.dlat} {a.station_name}\n"
         )
 
+    rayset = [int(x) for x in a.rayset.split(",")] if a.rayset else None
     print(build_deck(a.stoch, a.velmod, a.station_file, a.output_file,
-                     a.seed, a.duration, a.dt), end="")
+                     a.seed, a.duration, a.dt,
+                     ipdur=a.ipdur, siteamp_override=a.siteamp, rayset=rayset,
+                     rupv=a.rupv, kappa=a.kappa, vs_moho=a.vs_moho,
+                     ift=a.ift, fhi=a.fhi), end="")
 
 
 if __name__ == "__main__":

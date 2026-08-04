@@ -140,6 +140,57 @@ impl ListReader {
         Ok(out)
     }
 
+    /// `read(unit,*) n, (arr(i), i=1,n)` — one read whose item count depends on
+    /// its own first item.
+    ///
+    /// This is a single Fortran read statement, not two: the implied-do bound is
+    /// evaluated after `n` is read, and the whole list may span records. Reading
+    /// `n` separately and then the array would apply the fresh-record rule in
+    /// between and lose any values that followed `n` on the same line.
+    ///
+    /// Returns `(n, items)` where `items` has `n` entries.
+    pub fn read_count_and_list(&mut self) -> Result<(i32, Vec<Option<String>>), DeckError> {
+        let mut all: Vec<Option<String>> = Vec::new();
+        let mut want: Option<usize> = None; // total items, known once n is read
+        let mut rec = self.next_rec;
+
+        loop {
+            if want.is_some_and(|w| all.len() >= w) {
+                break;
+            }
+            if rec >= self.records.len() {
+                return Err(DeckError::UnexpectedEof {
+                    wanted: want.unwrap_or(1),
+                    got: all.len(),
+                });
+            }
+            let line = self.records[rec].clone();
+            let mut terminated = false;
+            for tok in tokenize(&line) {
+                match tok {
+                    Token::Slash => { terminated = true; break; }
+                    Token::Null => all.push(None),
+                    Token::Value(v) => all.push(Some(v)),
+                    Token::Repeat(c, v) => {
+                        for _ in 0..c { all.push(Some(v.clone())); }
+                    }
+                }
+                if want.is_none() && !all.is_empty() {
+                    let n = parse_i32(all[0].as_deref().unwrap_or(""))?;
+                    want = Some(1 + n.max(0) as usize);
+                }
+                if want.is_some_and(|w| all.len() >= w) { break; }
+            }
+            rec += 1;
+            if terminated { break; }
+        }
+
+        self.next_rec = rec;
+        let n = parse_i32(all.first().and_then(|x| x.as_deref()).unwrap_or(""))?;
+        let items = all.into_iter().skip(1).take(n.max(0) as usize).collect();
+        Ok((n, items))
+    }
+
     /// One list-directed `f32`.
     pub fn f32(&mut self) -> Result<f32, DeckError> {
         let v = self.read_values(1)?;
@@ -358,6 +409,32 @@ mod tests {
         let mut r = ListReader::new("/tmp/out.bin   \n/tmp/has space/x\n");
         assert_eq!(r.read_filename().unwrap(), "/tmp/out.bin");
         assert_eq!(r.read_filename().unwrap(), "/tmp/has");
+    }
+
+    #[test]
+    fn count_and_list_is_one_read() {
+        // `read(5,*) nrtyp,(irtype(i),i=1,nrtyp)` with the whole list on one
+        // record. Reading nrtyp separately would discard the rest of the line.
+        let mut r = ListReader::new("2 1 3\nnext\n");
+        let (n, items) = r.read_count_and_list().unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(
+            items.iter().map(|x| x.as_deref().unwrap()).collect::<Vec<_>>(),
+            ["1", "3"]
+        );
+        assert_eq!(r.read_char().unwrap(), "next");
+    }
+
+    #[test]
+    fn count_and_list_spans_records() {
+        let mut r = ListReader::new("3\n7 8\n9\nafter\n");
+        let (n, items) = r.read_count_and_list().unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(
+            items.iter().map(|x| x.as_deref().unwrap()).collect::<Vec<_>>(),
+            ["7", "8", "9"]
+        );
+        assert_eq!(r.read_char().unwrap(), "after");
     }
 
     #[test]
