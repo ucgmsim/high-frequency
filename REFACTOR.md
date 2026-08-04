@@ -291,6 +291,70 @@ Current transliteration artifacts: `stdd`, `dfr`, `rdna`, `cs`, `ds`, `amx2`,
 
 Free under Tier A, and it makes every later stage cheaper to review.
 
+### 1.4b Names: no Fortran abbreviations anywhere in the code
+
+The port inherited its identifiers from the Fortran, so the public API is still
+spelled `fast`, `flzero`, `cr`, `dgamm`, `stoc_f`, `rdatn`, `betvs`, `akapp`.
+**That convention is the reason the original was unreadable**, so carrying it into
+the Rust is a defect rather than fidelity. Resembling the Fortran is explicitly not
+a reason to keep a name.
+
+Three rules:
+
+1. No cryptic contractions — `flzero` becomes `remove_quadratic_trend`.
+2. Minimum three characters, except coefficients and real coordinates (`x`, `y`, `z`).
+3. Tag units where it helps, especially on `pub` arguments. `dt` is exempt; its
+   interpretation is unambiguous.
+
+The Fortran name and its `hb_high_ref.f:NNN` line stay in the **doc comment**. That
+is documentation, not code, and it is what lets a reader trace a routine back to the
+oracle — which the parity harness depends on.
+
+Renames change no arithmetic, so tier A gates the whole pass for free.
+
+| now | becomes |
+| --- | --- |
+| `fft::flzero(n, dt, a)` | `remove_quadratic_trend(count, dt, acceleration)` |
+| `fort::nint` / `int_trunc` | `round_half_away_from_zero` / `truncate_toward_zero` |
+| `geom::Delaz5` / `delaz5` | `DistanceAzimuth` / `distance_azimuth(event_lat_deg, …)` |
+| `geom::even_dist2` | `subfault_geometry(fault_lon_deg, fault_lat_deg, …)` |
+| `highcor::highcor_f` | `apply_radiation_and_invert(fold_count, mirror_count, …)` |
+| `radiation::rdatn` | `radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad)` |
+| `radiation::radfrq_lin` | `horizontal_radiation_spectrum` |
+| `radiation::radv_lin` | `vertical_radiation_spectrum` |
+| `ray::cr(p, v)` | `vertical_slowness(ray_parameter, velocity_km_s)` |
+| `ray::trav` | `build_ray_path` |
+| `ray::geom_terms` | `geometric_spreading` |
+| `ray::cagcon` / `dtdp` | `cagniard_time` / `cagniard_time_derivative` |
+| `ray::pnot` | `stationary_ray_parameter` |
+| `ray::ttime` | `travel_time` |
+| `ray::GfAmp` / `gf_amp_tt` | `GreenFunction` / `green_function` |
+| `rng::ranu2` | `uniform_deviates` |
+| `rng::normal_random_number` | `normal_deviates` |
+| `Pcg32::rand_numb` | `next_f32` |
+| `site::get_sitefacs` | `site_amplification_factors` |
+| `site::siteamp` | `apply_site_amplification` |
+| `special::dgamm` / `DGAMM_ERROR` | `gamma` / `GAMMA_ERROR` |
+| `stoc::stoc_f` | `stochastic_spectrum` |
+| `state::Vmod` / `VmodIn` / `Coff` | `VelocityModel` / `VelocityModelInput` / `Coefficients` |
+
+**`fft.rs` is deliberately excluded**, along with `np2` wherever it appears. §2.1
+replaces the whole radix-2 implementation with `realfft`, at which point `fast`,
+`flzero`'s caller, `ind`, `nfold` and `mfold` either disappear or are renamed by
+whatever the library calls them. Renaming them now would be work done twice.
+`flzero` itself is in the table because it is a detrend, not a transform, and
+survives the swap.
+
+Velocity-model fields gain units: `thic` → `thickness_km`, `depth` → `depth_km`,
+`vp` → `vp_km_s`, `vsh` → `vsh_km_s`, `rho` → `density_g_cm3`. The two quality
+factors become `attenuation_p` / `attenuation_s` rather than `qp` / `qs`, which are
+both under three characters and read as typos next to each other.
+
+`stoc_f`'s nineteen arguments are the worst offenders and get the most from units:
+`r` → `distance_km`, `tw` → `window_s`, `betvs` → `shear_velocity_km_s`, `row` →
+`density_g_cm3`, `smt` → `subevent_moment`, `fc` → `corner_frequency_hz`, `akapp` →
+`kappa_s`, `qfe` → `q_exponent`, `bigc` → `moment_scale`.
+
 ### 1.5 `special.rs` — NOT Stage 1 after all; moved to §2.2b
 
 An earlier draft of this plan claimed `special.rs` could be deleted
