@@ -14,68 +14,13 @@
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
 use hb_high::ray::{stationary_ray_parameter, travel_time};
-use hb_high::state::{RayState, VelocityModel};
-use std::path::PathBuf;
 
-struct Reader {
-    buf: Vec<u8>,
-    pos: usize,
-    name: String,
-}
-
-impl Reader {
-    fn open(name: &str) -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/golden/tier3")
-            .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("reading {}: {e}. Run harness/kernels/gen_tier3_golden.sh", path.display())
-        });
-        Self { buf, pos: 0, name: name.to_string() }
-    }
-    fn take<const N: usize>(&mut self) -> [u8; N] {
-        assert!(self.pos + N <= self.buf.len(),
-                "{}: ran off the end at byte {} of {}", self.name, self.pos, self.buf.len());
-        let out = self.buf[self.pos..self.pos + N].try_into().unwrap();
-        self.pos += N;
-        out
-    }
-    fn f64(&mut self) -> f64 { f64::from_le_bytes(self.take::<8>()) }
-    fn f32(&mut self) -> f32 { f32::from_le_bytes(self.take::<4>()) }
-    fn i32(&mut self) -> i32 { i32::from_le_bytes(self.take::<4>()) }
-    fn usize(&mut self) -> usize { self.i32() as usize }
-    fn done(&self) -> bool { self.pos >= self.buf.len() }
-    fn assert_exhausted(&self) {
-        assert_eq!(self.pos, self.buf.len(),
-                   "{}: consumed {} of {} bytes; record layout disagrees with the driver",
-                   self.name, self.pos, self.buf.len());
-    }
-
-    /// `dump_state`: th, vp_km_s, vs (`f64`) then alp, als (`f32`), for `ndeep` layers.
-    fn state(&mut self, ndeep: usize) -> (RayState, VelocityModel) {
-        let mut vmod = VelocityModel::new();
-        for k in 0..ndeep { vmod.thickness_km[k] = self.f64(); }
-        for k in 0..ndeep { vmod.vp_km_s[k] = self.f64(); }
-        for k in 0..ndeep { vmod.vsh_km_s[k] = self.f64(); }
-        let mut st = RayState::default();
-        for k in 0..ndeep { st.travel.alp[k] = self.f32(); }
-        for k in 0..ndeep { st.travel.als[k] = self.f32(); }
-        // A layer count in the golden, a 0-based index in the struct -- see tier2.
-        st.travel.ndeep = ndeep as i32 - 1;
-        (st, vmod)
-    }
-}
-
-#[track_caller]
-fn eq64(what: &str, got: f64, want: f64) {
-    assert_eq!(got.to_bits(), want.to_bits(),
-               "{what}: rust {got:?} (0x{:016x}) vs fortran {want:?} (0x{:016x})",
-               got.to_bits(), want.to_bits());
-}
+mod common;
+use common::*;
 
 #[test]
 fn pnot_matches_fortran() {
-    let mut r = Reader::open("pnot.bin");
+    let mut r = Golden::open("tier3", "pnot.bin");
     let mut n = 0;
     // stationary_ray_parameter appears to have two paths: return immediately at the branch cut when
     // dtau/dp >= 0 there, or bisect down towards zero. Measured across this
@@ -99,7 +44,7 @@ fn pnot_matches_fortran() {
     while !r.done() {
         let ndeep = r.usize();
         let rr = r.f64();
-        let (st, vmod) = r.state(ndeep);
+        let (st, vmod) = r.ray_seam_state(ndeep);
         let want_p0 = r.f64();
         let want_t0 = r.f64();
 
@@ -148,14 +93,14 @@ fn pnot_matches_fortran() {
 
 #[test]
 fn ttime_matches_fortran() {
-    let mut r = Reader::open("ttime.bin");
+    let mut r = Golden::open("tier3", "ttime.bin");
     let mut n = 0;
     while !r.done() {
         let ndeep = r.usize();
         let nseg = r.usize();
         let p0 = r.f64();
         let rr = r.f64();
-        let (mut st, vmod) = r.state(ndeep);
+        let (mut st, vmod) = r.ray_seam_state(ndeep);
 
         for k in 0..nseg { st.rays.nh[k] = r.i32() - 1; }
         for k in 0..nseg { st.rays.nm[k] = r.i32(); }

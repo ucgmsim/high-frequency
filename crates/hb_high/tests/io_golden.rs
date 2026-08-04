@@ -11,65 +11,15 @@ use hb_high::input::{insert_air_layer, read_stations, read_stoch, read_velocity_
 use hb_high::state::VelocityModelInput;
 use std::path::PathBuf;
 
+mod common;
+use common::*;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-struct Reader {
-    buf: Vec<u8>,
-    pos: usize,
-}
-
-impl Reader {
-    fn open(name: &str) -> Self {
-        let path = root().join("harness/golden/io").join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("reading {}: {e}. Run harness/kernels/gen_io_golden.sh", path.display())
-        });
-        Self { buf, pos: 0 }
-    }
-    fn f32(&mut self) -> f32 {
-        let v = f32::from_le_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        v
-    }
-    fn f64(&mut self) -> f64 {
-        let v = f64::from_le_bytes(self.buf[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        v
-    }
-    fn i32(&mut self) -> i32 {
-        let v = i32::from_le_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        v
-    }
-    fn chars(&mut self, n: usize) -> String {
-        let s = String::from_utf8_lossy(&self.buf[self.pos..self.pos + n]).to_string();
-        self.pos += n;
-        s
-    }
-    fn assert_exhausted(&self) {
-        assert_eq!(self.pos, self.buf.len(),
-                   "consumed {} of {} bytes; record layout disagrees with the driver",
-                   self.pos, self.buf.len());
-    }
-}
-
-#[track_caller]
-fn eq32(what: &str, got: f32, want: f32) {
-    assert_eq!(got.to_bits(), want.to_bits(),
-               "{what}: rust {got:?} (0x{:08x}) vs fortran {want:?} (0x{:08x})",
-               got.to_bits(), want.to_bits());
-}
-
-#[track_caller]
-fn eq64(what: &str, got: f64, want: f64) {
-    assert_eq!(got.to_bits(), want.to_bits(),
-               "{what}: rust {got:?} vs fortran {want:?}");
-}
-
 fn check(golden: &str, stoch_name: &str) {
-    let mut r = Reader::open(golden);
+    let mut r = Golden::open("io", golden);
     let pu = hb_high::config::DEG_TO_RAD;
 
     let stoch_text = std::fs::read_to_string(

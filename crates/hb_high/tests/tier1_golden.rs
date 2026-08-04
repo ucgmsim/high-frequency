@@ -16,104 +16,34 @@ use hb_high::geom::subfault_geometry;
 use hb_high::ray::{geometric_spreading, build_ray_path};
 use hb_high::site::site_amplification_factors;
 use hb_high::state::{RayState, VelocityModel};
-use std::path::PathBuf;
 
-struct Reader {
-    buf: Vec<u8>,
-    pos: usize,
-    name: String,
+mod common;
+use common::*;
+
+/// `dump_vmod`: `thickness_km`, `vsh_km_s`, `density_g_cm3` as `f64` for `j0` layers.
+///
+/// Local to tier 1 rather than shared: each driver dumps a different field set in a
+/// different order, and that order is a property of the Fortran `write` statement, not
+/// something a caller should be selecting. See `common`'s note on why there is no
+/// `vmod(count, fields)`.
+fn read_vmod(r: &mut Golden, j0: usize) -> VelocityModel {
+    let mut v = VelocityModel::new();
+    // 0-based since §2.3; the golden's dump order is the Fortran's layer 1..j0.
+    for k in 0..j0 { v.thickness_km[k] = r.f64(); }
+    for k in 0..j0 { v.vsh_km_s[k] = r.f64(); }
+    for k in 0..j0 { v.density_g_cm3[k] = r.f64(); }
+    v
 }
 
-impl Reader {
-    fn open(name: &str) -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/golden/tier1")
-            .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("reading {}: {e}. Run harness/kernels/gen_tier1_golden.sh", path.display())
-        });
-        Self { buf, pos: 0, name: name.to_string() }
-    }
-
-    fn take<const N: usize>(&mut self) -> [u8; N] {
-        assert!(
-            self.pos + N <= self.buf.len(),
-            "{}: ran off the end at byte {} of {}",
-            self.name, self.pos, self.buf.len()
-        );
-        let out = self.buf[self.pos..self.pos + N].try_into().unwrap();
-        self.pos += N;
-        out
-    }
-
-    fn f32(&mut self) -> f32 {
-        f32::from_le_bytes(self.take::<4>())
-    }
-    fn f64(&mut self) -> f64 {
-        f64::from_le_bytes(self.take::<8>())
-    }
-    fn i32(&mut self) -> i32 {
-        i32::from_le_bytes(self.take::<4>())
-    }
-    fn usize(&mut self) -> usize {
-        self.i32() as usize
-    }
-    fn done(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-    fn assert_exhausted(&self) {
-        assert_eq!(
-            self.pos, self.buf.len(),
-            "{}: consumed {} of {} bytes; record layout disagrees with the driver",
-            self.name, self.pos, self.buf.len()
-        );
-    }
-
-    /// Read `th`, `vsh_km_s`, `density_g_cm3` for `j0` layers into a fresh `VelocityModel`,
-    /// matching the driver's `dump_vmod`.
-    fn vmod(&mut self, j0: usize) -> VelocityModel {
-        let mut v = VelocityModel::new();
-        // 0-based since §2.3, matching what the production readers now produce. The
-        // golden's dump order is the Fortran's layer 1..j0 and is unchanged.
-        for k in 0..j0 {
-            v.thickness_km[k] = self.f64();
-        }
-        for k in 0..j0 {
-            v.vsh_km_s[k] = self.f64();
-        }
-        for k in 0..j0 {
-            v.density_g_cm3[k] = self.f64();
-        }
-        v
-    }
-}
-
-#[track_caller]
-fn eq32(what: &str, got: f32, want: f32) {
-    assert_eq!(
-        got.to_bits(), want.to_bits(),
-        "{what}: rust {got:?} (0x{:08x}) vs fortran {want:?} (0x{:08x})",
-        got.to_bits(), want.to_bits()
-    );
-}
-
-#[track_caller]
-fn eq64(what: &str, got: f64, want: f64) {
-    assert_eq!(
-        got.to_bits(), want.to_bits(),
-        "{what}: rust {got:?} (0x{:016x}) vs fortran {want:?} (0x{:016x})",
-        got.to_bits(), want.to_bits()
-    );
-}
 
 #[test]
 fn get_sitefacs_matches_fortran() {
-    let mut r = Reader::open("get_sitefacs.bin");
+    let mut r = Golden::open("tier1", "get_sitefacs.bin");
     let mut cases = 0;
     while !r.done() {
         let j0 = r.usize();
         let nfreq = r.usize();
-        let vmod = r.vmod(j0);
+        let vmod = read_vmod(&mut r, j0);
         let fn_: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
         let want: Vec<f32> = (0..nfreq).map(|_| r.f32()).collect();
 
@@ -135,7 +65,7 @@ fn get_sitefacs_matches_fortran() {
 
 #[test]
 fn trav_matches_fortran() {
-    let mut r = Reader::open("trav.bin");
+    let mut r = Golden::open("tier1", "trav.bin");
 
     // ONE state across every case, mirroring the Fortran's persistent common
     // block. This is deliberate: `build_ray_path` zeroes only alp(1:100) of 500, so
@@ -155,7 +85,7 @@ fn trav_matches_fortran() {
         let ndeg = r.i32();
         let hs = r.f64();
         let hr = r.f64();
-        let vmod = r.vmod(j0);
+        let vmod = read_vmod(&mut r, j0);
 
         // `nh` holds LAYER indices, and the golden's are the Fortran's 1-based layer
         // numbers, so they shift as well as the segment index they are stored under.
@@ -197,7 +127,7 @@ fn trav_matches_fortran() {
 
 #[test]
 fn geom_terms_matches_fortran() {
-    let mut r = Reader::open("geom_terms.bin");
+    let mut r = Golden::open("tier1", "geom_terms.bin");
     let mut cases = 0;
     while !r.done() {
         let j0 = r.usize();
@@ -248,7 +178,7 @@ fn subfault_geometry_stays_close_to_fortran() {
     // `depth_km` is untouched: it comes from the dip and the down-dip index, not from the
     // geodesy, so it is still asserted BIT-EXACT. That asymmetry is the point -- if depth
     // moved, something other than §2.5 changed.
-    let mut r = Reader::open("even_dist2.bin");
+    let mut r = Golden::open("tier1", "even_dist2.bin");
     let mut cases = 0;
     let mut worst_horiz = 0.0f64;
     let mut worst_slant = 0.0f64;

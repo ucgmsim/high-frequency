@@ -37,85 +37,13 @@ use hb_high::geom::distance_azimuth;
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
-use std::path::PathBuf;
 
-/// Sequential reader over an `access='stream'` Fortran file.
-struct Reader {
-    buf: Vec<u8>,
-    pos: usize,
-    name: String,
-}
-
-impl Reader {
-    fn open(name: &str) -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/golden/tier0")
-            .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("reading {}: {e}. Run harness/kernels/gen_tier0_golden.sh", path.display())
-        });
-        Self { buf, pos: 0, name: name.to_string() }
-    }
-
-    fn take<const N: usize>(&mut self) -> [u8; N] {
-        assert!(
-            self.pos + N <= self.buf.len(),
-            "{}: ran off the end at byte {} (file is {} bytes)",
-            self.name, self.pos, self.buf.len()
-        );
-        let out = self.buf[self.pos..self.pos + N].try_into().unwrap();
-        self.pos += N;
-        out
-    }
-
-    fn f32(&mut self) -> f32 {
-        f32::from_le_bytes(self.take::<4>())
-    }
-
-    fn f64(&mut self) -> f64 {
-        f64::from_le_bytes(self.take::<8>())
-    }
-
-    fn i32(&mut self) -> i32 {
-        i32::from_le_bytes(self.take::<4>())
-    }
-
-    fn done(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-
-    /// Assert the whole file was consumed — catches a record-layout
-    /// misunderstanding that would otherwise pass silently on a prefix.
-    fn assert_exhausted(&self) {
-        assert_eq!(
-            self.pos, self.buf.len(),
-            "{}: consumed {} of {} bytes; record layout disagrees with the driver",
-            self.name, self.pos, self.buf.len()
-        );
-    }
-}
-
-#[track_caller]
-fn eq32(what: &str, got: f32, want: f32) {
-    assert_eq!(
-        got.to_bits(), want.to_bits(),
-        "{what}: rust {got:?} (0x{:08x}) vs fortran {want:?} (0x{:08x})",
-        got.to_bits(), want.to_bits()
-    );
-}
-
-#[track_caller]
-fn eq64(what: &str, got: f64, want: f64) {
-    assert_eq!(
-        got.to_bits(), want.to_bits(),
-        "{what}: rust {got:?} (0x{:016x}) vs fortran {want:?} (0x{:016x})",
-        got.to_bits(), want.to_bits()
-    );
-}
+mod common;
+use common::*;
 
 #[test]
 fn rdatn_matches_fortran() {
-    let mut r = Reader::open("rdatn.bin");
+    let mut r = Golden::open("tier0", "rdatn.bin");
     let mut n = 0;
     while !r.done() {
         let (str_, dip, rak, az, th) = (r.f32(), r.f32(), r.f32(), r.f32(), r.f32());
@@ -155,7 +83,7 @@ fn distance_azimuth_stays_close_to_fortran() {
     // So the production regime is bounded tightly and the global figure is printed, not
     // asserted. Widening a single global tolerance until it passed would have hidden which
     // of the two effects was which -- the §2.4c mistake, from the other direction.
-    let mut r = Reader::open("delaz5.bin");
+    let mut r = Golden::open("tier0", "delaz5.bin");
     let mut n = 0;
     let mut worst_km_rel = 0.0f64;
     let mut worst_km_at = String::new();
@@ -241,7 +169,7 @@ fn distance_azimuth_stays_close_to_fortran() {
 /// nothing changed at all: `atan2` never sees the constant.
 #[test]
 fn cr_stays_close_to_fortran() {
-    let mut r = Reader::open("cr.bin");
+    let mut r = Golden::open("tier0", "cr.bin");
     let mut n = 0;
     // Worst divergence, relative to the magnitude of eta for that case.
     let mut worst_rel = 0.0f64;
@@ -302,7 +230,7 @@ fn cr_stays_close_to_fortran() {
 
 #[test]
 fn flzero_matches_fortran() {
-    let mut r = Reader::open("flzero.bin");
+    let mut r = Golden::open("tier0", "flzero.bin");
     let mut cases = 0;
     while !r.done() {
         let n = r.i32() as usize;
@@ -335,7 +263,7 @@ fn flzero_matches_fortran() {
 
 #[test]
 fn siteamp_matches_fortran() {
-    let mut r = Reader::open("siteamp.bin");
+    let mut r = Golden::open("tier0", "siteamp.bin");
     let mut cases = 0;
     while !r.done() {
         let np2 = r.i32() as usize;

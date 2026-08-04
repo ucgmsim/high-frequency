@@ -13,73 +13,13 @@ use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
-use std::path::PathBuf;
 
-struct Reader {
-    buf: Vec<u8>,
-    pos: usize,
-    name: String,
-}
-
-impl Reader {
-    fn open(name: &str) -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../harness/golden/tier4")
-            .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("reading {}: {e}. Run harness/kernels/gen_tier4_golden.sh", path.display())
-        });
-        Self { buf, pos: 0, name: name.to_string() }
-    }
-    fn take<const N: usize>(&mut self) -> [u8; N] {
-        assert!(self.pos + N <= self.buf.len(),
-                "{}: ran off the end at byte {} of {}", self.name, self.pos, self.buf.len());
-        let out = self.buf[self.pos..self.pos + N].try_into().unwrap();
-        self.pos += N;
-        out
-    }
-    fn f32(&mut self) -> f32 { f32::from_le_bytes(self.take::<4>()) }
-    fn f64(&mut self) -> f64 { f64::from_le_bytes(self.take::<8>()) }
-    fn i32(&mut self) -> i32 { i32::from_le_bytes(self.take::<4>()) }
-    fn usize(&mut self) -> usize { self.i32() as usize }
-    fn done(&self) -> bool { self.pos >= self.buf.len() }
-    fn assert_exhausted(&self) {
-        assert_eq!(self.pos, self.buf.len(),
-                   "{}: consumed {} of {} bytes; record layout disagrees with the driver",
-                   self.name, self.pos, self.buf.len());
-    }
-}
-
-#[track_caller]
-fn eq32(what: &str, got: f32, want: f32) {
-    assert_eq!(got.to_bits(), want.to_bits(),
-               "{what}: rust {got:?} (0x{:08x}) vs fortran {want:?} (0x{:08x})",
-               got.to_bits(), want.to_bits());
-}
-
-/// Relative comparison against a per-record scale, for the values that pass through
-/// the transform.
-///
-/// `REFACTOR.md` §2.1 replaced the vendored radix-2 kernel with `rustfft`, which sums
-/// the butterflies in a different order. The physics either side of the transform is
-/// unchanged and still worth checking against the Fortran, so these comparisons are
-/// loosened rather than deleted — but they can no longer be exact.
-///
-/// `1e-4` of the record's peak. The measured whole-program deviation from the swap is
-/// ~1e-6 of peak, so this is 100x headroom against rounding while still catching
-/// anything structural: a wrong scale factor, a dropped taper, a mirrored half.
-fn near32(what: &str, got: f32, want: f32, scale: f32) {
-    let tol = 1e-4 * scale.max(f32::MIN_POSITIVE);
-    assert!(
-        (got - want).abs() <= tol,
-        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
-        (got - want).abs()
-    );
-}
+mod common;
+use common::*;
 
 #[test]
 fn stoc_f_matches_fortran() {
-    let mut r = Reader::open("stoc_f.bin");
+    let mut r = Golden::open("tier4", "stoc_f.bin");
     let mut cases = 0;
     let mut saw_negative_kappa = false;
 
@@ -131,7 +71,7 @@ fn stoc_f_matches_fortran() {
 
 #[test]
 fn gf_amp_tt_matches_fortran() {
-    let mut r = Reader::open("gf_amp_tt.bin");
+    let mut r = Golden::open("tier4", "gf_amp_tt.bin");
     let mut cases = 0;
     // Which ray topologies the corpus actually reached.
     let mut itypes = std::collections::BTreeSet::new();
