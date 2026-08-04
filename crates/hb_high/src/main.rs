@@ -32,6 +32,267 @@ use hb_high::stoc::stoc_f;
 const MM: usize = params::MM;
 const MMV: usize = params::MMV;
 
+/// Deck defaults, applied when the field reads below `-1.0` — **not** merely
+/// negative, which is the trap this constant set exists to make visible.
+///
+/// `czero_default` is written 2.1 in a comment and then 2.0 in code; the code
+/// wins. `fcfac` is read from nothing and hardwired to 0.0.
+mod defaults {
+    pub const CZERO: f32 = 2.0;
+    pub const RVFAC: f32 = 0.8;
+    pub const SHAL_RVFAC: f32 = 0.6;
+    pub const SHAL_DMIN: f32 = 5.0;
+    pub const SHAL_DMAX: f32 = 8.0;
+    pub const DEEP_RVFAC: f32 = 0.6;
+    pub const DEEP_DMIN: f32 = 15.0;
+    pub const DEEP_DMAX: f32 = 20.0;
+    pub const CALPHA: f32 = 0.1;
+    pub const FCFAC: f32 = 0.0;
+}
+
+/// The 22-line parameter deck.
+///
+/// Fields appear in the order the Fortran reads them, which is the only thing
+/// keeping this format working: `read(5,*)` spans record boundaries, so a missing
+/// or extra token silently rebinds everything downstream. See `REFACTOR.md` §1.1
+/// for the consequences — there is a live field-misalignment bug in production
+/// because of exactly this — and `harness/mkdeck.py` for the generator.
+///
+/// Fields that only feed dead code under `BINMOD`/`VERSION1` are read and
+/// discarded inside [`read_deck`] rather than stored: `nbu` and `flol`
+/// (`filter3d`, dead at `iftt = 0`), `vpsig`/`vshsig`/`rhosig`/`qssig` and
+/// `icflag` (velocity perturbation, all zero), and `velname` (`"-1"`).
+struct Deck {
+    stress_average: f32,
+    /// Station list path.
+    asite: String,
+    outname: String,
+    nrtyp: usize,
+    irtype: Array1<i32>,
+    isite_amp: i32,
+    iftt: i32,
+    /// High-cut frequency. Only used for the `fhigh must be <` warning.
+    fhil: f32,
+    irand: i32,
+    nsite: usize,
+    duration: f32,
+    dt: f32,
+    fmx: f32,
+    akapp: f32,
+    qfexp: f32,
+    rvfac: f32,
+    shal_rvfac: f32,
+    deep_rvfac: f32,
+    czero: f32,
+    calpha: f32,
+    /// Total seismic moment; negative means derive it from the slip model.
+    sm: f32,
+    /// Rupture velocity; non-positive means take rupture times from the slip model.
+    vr: f32,
+    slip_model: String,
+    velfile: String,
+    vsmoho: f64,
+    nlskip: i32,
+    fasig1: f32,
+    fasig2: f32,
+    rvsig1: f32,
+    ipdur_model: i32,
+    ispar_adjust: i32,
+    targ_mag: f32,
+    fault_area: f32,
+    seek_bytes: i64,
+}
+
+/// The path-duration model: a piecewise-linear duration-versus-distance table.
+///
+/// `dpdr` is the slope of each segment. For the single-segment models it is given
+/// directly; for the multi-segment ones it is differenced from `rdur`/`dpth`, and
+/// the last segment repeats the second-to-last slope so distances beyond the table
+/// extrapolate rather than flatten.
+struct PathDuration {
+    ndur: usize,
+    /// Segment start distances, km.
+    rdur: Array1<f32>,
+    /// Duration at each segment start, s.
+    dpth: Array1<f32>,
+    /// Slope of each segment, s/km.
+    dpdr: Array1<f32>,
+}
+
+/// Build the path-duration table.
+///
+/// The accepted values are not contiguous: `<=0`, 1, 2, 11 and 12. Anything else
+/// leaves `ndur` undefined in the Fortran and it proceeds to index an uninitialised
+/// table, so this refuses instead.
+fn path_duration_table(ipdur_model: i32) -> Result<PathDuration, Box<dyn std::error::Error>> {
+    let mut rdur = Array1::<f32>::new(50);
+    let mut dpth = Array1::<f32>::new(50);
+    let mut dpdr = Array1::<f32>::new(50);
+
+    // (distances, durations) for the multi-segment models; slope-only for the rest.
+    let ndur = match ipdur_model {
+        i32::MIN..=0 => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.063; 1 } // GP2010
+        1 => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.07; 1 }             // WUS
+        2 => { rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.1; 1 }              // ENA
+        11 => {
+            // BT2014 WUS. The breakpoints at 7, 45, 125 and 175 km are what the
+            // Phase 2 distance ladder is chosen to straddle.
+            let r = [0.0, 7.0, 45.0, 125.0, 175.0, 270.0];
+            let d = [0.0, 2.4, 8.4, 10.9, 17.4, 34.2];
+            for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
+                rdur[i + 1] = ri;
+                dpth[i + 1] = di;
+            }
+            r.len()
+        }
+        12 => {
+            // BT2015 ENA.
+            let r = [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0];
+            let d = [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1];
+            for (i, (&ri, &di)) in r.iter().zip(d.iter()).enumerate() {
+                rdur[i + 1] = ri;
+                dpth[i + 1] = di;
+            }
+            r.len()
+        }
+        other => {
+            return Err(format!(
+                "ipdur_model = {other} leaves ndur undefined in the Fortran \
+                 (accepted values are <=0, 1, 2, 11, 12)"
+            )
+            .into())
+        }
+    };
+
+    if ndur != 1 {
+        for i in 1..=ndur - 1 {
+            dpdr[i] = (dpth[i + 1] - dpth[i]) / (rdur[i + 1] - rdur[i]);
+        }
+        dpdr[ndur] = dpdr[ndur - 1];
+    }
+    Ok(PathDuration { ndur, rdur, dpth, dpdr })
+}
+
+/// Read the deck, in the Fortran's order.
+///
+/// Loading the files it names (`slip_model`, `velfile`, `asite`) is deliberately
+/// *not* done here. The Fortran interleaves those reads with the deck reads, but
+/// nothing in deck parsing depends on their contents, so hoisting the whole deck
+/// ahead of them is behaviour-preserving and makes both halves legible.
+fn read_deck(deck: &mut ListReader) -> Result<Deck, Box<dyn std::error::Error>> {
+    use hb_high::deck::{parse_f32, parse_f64, parse_i32};
+
+    let stress_average = deck.f32()?;
+    let asite = deck.read_filename()?;
+    let outname = deck.read_filename()?;
+
+    // `read(5,*) nrtyp,(irtype(i),i=1,nrtyp)` is ONE read whose length depends
+    // on its own first item.
+    let (nrtyp, irtype_items) = deck.read_count_and_list()?;
+    let nrtyp = nrtyp as usize;
+    let mut irtype = Array1::<i32>::new(100);
+    for i in 1..=nrtyp {
+        irtype[i] = parse_i32(irtype_items[i - 1].as_deref().unwrap_or(""))?;
+    }
+
+    let isite_amp = deck.i32()?;
+    let (iftt, fhil) = {
+        let v = deck.read_values(4)?;
+        let g = |k: usize| v[k].as_deref().unwrap_or("");
+        let _nbu = parse_i32(g(0))?;
+        let iftt = parse_i32(g(1))?;
+        let _flol = parse_f32(g(2))?;
+        (iftt, parse_f32(g(3))?)
+    };
+    let irand = deck.i32()?;
+    let nsite = deck.i32()? as usize;
+
+    let (duration, dt, fmx, akapp, qfexp) = {
+        let v = deck.read_values(5)?;
+        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        (g(0)?, g(1)?, g(2)?, g(3)?, g(4)?)
+    };
+
+    let (mut rvfac, mut shal_rvfac, mut deep_rvfac, mut czero, mut calpha) = {
+        let v = deck.read_values(5)?;
+        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        (g(0)?, g(1)?, g(2)?, g(3)?, g(4)?)
+    };
+    // Defaults apply when the input is below -1.0, not merely negative.
+    if rvfac < -1.0 { rvfac = defaults::RVFAC; }
+    if shal_rvfac < -1.0 { shal_rvfac = defaults::SHAL_RVFAC; }
+    if deep_rvfac < -1.0 { deep_rvfac = defaults::DEEP_RVFAC; }
+    if czero < -1.0 { czero = defaults::CZERO; }
+    if calpha < -1.0 { calpha = defaults::CALPHA; }
+
+    let (sm, vr) = {
+        let v = deck.read_values(2)?;
+        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        (g(0)?, g(1)?)
+    };
+
+    let slip_model = deck.read_filename()?;
+    let velfile = deck.read_filename()?;
+    let mut vsmoho = deck.f64()?; // pre-set to -1.0, then read
+    if vsmoho <= 0.0 {
+        vsmoho = 999.9;
+    }
+
+    let nlskip = {
+        let v = deck.read_values(6)?;
+        let gf = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        let nlskip = parse_i32(v[0].as_deref().unwrap_or(""))?;
+        // Velocity-model perturbation sigmas and icflag: all dead under the
+        // production deck (every sigma is 0.0), so read past them. The original
+        // also normalises icflag to 1 when it is neither 0 nor 1, which cannot
+        // matter once nothing reads it.
+        let (_vpsig, _vshsig, _rhosig, _qssig) = (gf(1)?, gf(2)?, gf(3)?, gf(4)?);
+        let _icflag = parse_i32(v[5].as_deref().unwrap_or(""))?;
+        nlskip
+    };
+    let _velname = deck.read_filename()?;
+
+    let (fasig1, fasig2, rvsig1) = {
+        let v = deck.read_values(3)?;
+        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        (g(0)?, g(1)?, g(2)?)
+    };
+
+    let ipdur_model = deck.i32()?;
+
+    // NOTE: this read wants THREE items and the deck supplies a bare `0` line
+    // followed by three more, so it takes the `0` as ispar_adjust and two from the
+    // next record -- leaving the third to be discarded when the next read starts a
+    // fresh record. That is why production's tect_type never arrives and why
+    // targ_mag and fault_area are swapped relative to what hf_sim.py intends.
+    // Reproduced deliberately; see REFACTOR.md §1.1.
+    let (ispar_adjust, targ_mag, fault_area) = {
+        let v = deck.read_values(3)?;
+        (
+            parse_i32(v[0].as_deref().unwrap_or(""))?,
+            parse_f32(v[1].as_deref().unwrap_or(""))?,
+            parse_f32(v[2].as_deref().unwrap_or(""))?,
+        )
+    };
+
+    let seek_bytes = {
+        // Pre-set to 0, then read.
+        let v = deck.read_values(1)?;
+        v[0].as_deref()
+            .map(|s| parse_f64(s).map(|x| x as i64))
+            .transpose()?
+            .unwrap_or(0)
+    };
+
+    Ok(Deck {
+        stress_average, asite, outname, nrtyp, irtype, isite_amp, iftt, fhil,
+        irand, nsite, duration, dt, fmx, akapp, qfexp, rvfac, shal_rvfac,
+        deep_rvfac, czero, calpha, sm, vr, slip_model, velfile, vsmoho, nlskip,
+        fasig1, fasig2, rvsig1, ipdur_model, ispar_adjust, targ_mag, fault_area,
+        seek_bytes,
+    })
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -76,17 +337,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tw_eps = 0.2f32; // 0.4 first, then 0.2
     let tw_eta = 0.05f32;
 
-    // Defaults. Czero_default is set to 2.1 in a comment and then 2.0 in code.
-    let czero_default = 2.0f32;
-    let rvfac_default = 0.8f32;
-    let shal_rvfac_default = 0.6f32;
-    let shal_dmin_default = 5.0f32;
-    let shal_dmax_default = 8.0f32;
-    let deep_rvfac_default = 0.6f32;
-    let mut deep_dmin_default = 15.0f32;
-    let mut deep_dmax_default = 20.0f32;
-    let calpha_default = 0.1f32;
-    let fcfac_default = 0.0f32;
+    // The rupture-velocity transition depths. The shallow pair is fixed; the deep
+    // pair is raised below to track the deepest hypocentre, which is why these two
+    // are locals and the rest live in `defaults`.
+    let shal_dmin_default = defaults::SHAL_DMIN;
+    let shal_dmax_default = defaults::SHAL_DMAX;
+    let mut deep_dmin_default = defaults::DEEP_DMIN;
+    let mut deep_dmax_default = defaults::DEEP_DMAX;
 
     let nr = 1000usize;
     let delay = 0.0f32;
@@ -103,60 +360,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---------------------------------------------------------------- deck ---
-    let mut stress_average = deck.f32()?;
-    let asite = deck.read_filename()?;
-    let outname = deck.read_filename()?;
+    // Destructured into the Fortran's own names so the body below reads as the
+    // transliteration it still is. See `Deck` for the format's hazards.
+    let Deck {
+        mut stress_average, asite, outname, nrtyp, irtype, isite_amp, iftt, fhil,
+        mut irand, nsite, duration, dt, fmx, akapp, qfexp, rvfac, shal_rvfac,
+        deep_rvfac, czero, calpha, mut sm, vr, slip_model, velfile, vsmoho,
+        mut nlskip, fasig1, fasig2, rvsig1, ipdur_model, ispar_adjust,
+        mut targ_mag, mut fault_area, seek_bytes,
+    } = read_deck(&mut deck)?;
 
-    // `read(5,*) nrtyp,(irtype(i),i=1,nrtyp)` is ONE read whose length depends
-    // on its own first item.
-    let (nrtyp, irtype_items) = deck.read_count_and_list()?;
-    let nrtyp = nrtyp as usize;
-    let mut irtype = Array1::<i32>::new(100);
-    for i in 1..=nrtyp {
-        irtype[i] = hb_high::deck::parse_i32(irtype_items[i - 1].as_deref().unwrap_or(""))?;
-    }
+    let fcfac = defaults::FCFAC;
+    let rvfmax = 1.4f32;
 
-    let isite_amp = deck.i32()?;
-    let (nbu, iftt, flol, fhil) = {
-        let v = deck.read_values(4)?;
-        let g = |k: usize| v[k].as_deref().unwrap_or("");
-        (
-            hb_high::deck::parse_i32(g(0))?,
-            hb_high::deck::parse_i32(g(1))?,
-            hb_high::deck::parse_f32(g(2))?,
-            hb_high::deck::parse_f32(g(3))?,
-        )
-    };
-    let _ = (nbu, flol, fhil); // consumed only by filter3d, dead under iftt=0
-    let mut irand = deck.i32()?;
-    let nsite = deck.i32()? as usize;
-
-    let (duration, dt, fmx, akapp, qfexp) = {
-        let v = deck.read_values(5)?;
-        let g = |k: usize| hb_high::deck::parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?, g(2)?, g(3)?, g(4)?)
-    };
-
-    let (mut rvfac, mut shal_rvfac, mut deep_rvfac, mut czero, mut calpha) = {
-        let v = deck.read_values(5)?;
-        let g = |k: usize| hb_high::deck::parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?, g(2)?, g(3)?, g(4)?)
-    };
-    // Defaults apply when the input is below -1.0, not merely negative.
-    if rvfac < -1.0 { rvfac = rvfac_default; }
-    if shal_rvfac < -1.0 { shal_rvfac = shal_rvfac_default; }
-    if deep_rvfac < -1.0 { deep_rvfac = deep_rvfac_default; }
-    if czero < -1.0 { czero = czero_default; }
-    if calpha < -1.0 { calpha = calpha_default; }
-    let fcfac = fcfac_default; // then hardwired to 0.0
-
-    let (mut sm, vr) = {
-        let v = deck.read_values(2)?;
-        let g = |k: usize| hb_high::deck::parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?)
-    };
-
-    let slip_model = deck.read_filename()?;
     let stoch_text = std::fs::read_to_string(&slip_model)
         .map_err(|e| format!("opening slip model {slip_model}: {e}"))?;
     let mut stoch = read_stoch(&stoch_text, pu)?;
@@ -183,104 +399,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let velfile = deck.read_filename()?;
-    let mut vsmoho = deck.f64()?; // pre-set to -1.0, then read
-    if vsmoho <= 0.0 {
-        vsmoho = 999.9;
-    }
-
     let mut vmod_in = VmodIn::new();
     let vel_text = std::fs::read_to_string(&velfile)
         .map_err(|e| format!("opening velocity model {velfile}: {e}"))?;
     let mut j0 = read_velocity_model(&vel_text, &mut vmod_in, vsmoho)?;
 
-    let (mut nlskip, vpsig, vshsig, rhosig, qssig, mut icflag) = {
-        let v = deck.read_values(6)?;
-        let gf = |k: usize| hb_high::deck::parse_f32(v[k].as_deref().unwrap_or(""));
-        (
-            hb_high::deck::parse_i32(v[0].as_deref().unwrap_or(""))?,
-            gf(1)?, gf(2)?, gf(3)?, gf(4)?,
-            hb_high::deck::parse_i32(v[5].as_deref().unwrap_or(""))?,
-        )
-    };
-    let velname = deck.read_filename()?;
-    if icflag != 0 && icflag != 1 {
-        icflag = 1;
-    }
-    let _ = (vpsig, vshsig, rhosig, qssig, icflag, &velname);
-
-    let (fasig1, fasig2, rvsig1) = {
-        let v = deck.read_values(3)?;
-        let g = |k: usize| hb_high::deck::parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?, g(2)?)
-    };
-    let rvfmax = 1.4f32;
-
-    let ipdur_model = deck.i32()?;
-
-    let (ispar_adjust, mut targ_mag, mut fault_area) = {
-        let v = deck.read_values(3)?;
-        (
-            hb_high::deck::parse_i32(v[0].as_deref().unwrap_or(""))?,
-            hb_high::deck::parse_f32(v[1].as_deref().unwrap_or(""))?,
-            hb_high::deck::parse_f32(v[2].as_deref().unwrap_or(""))?,
-        )
-    };
-
-    let seek_bytes = {
-        // Pre-set to 0, then read.
-        let v = deck.read_values(1)?;
-        v[0].as_deref()
-            .map(|s| hb_high::deck::parse_f64(s).map(|x| x as i64))
-            .transpose()?
-            .unwrap_or(0)
-    };
-
     // ------------------------------------------------- path duration model ---
-    let mut ndur = 0usize;
-    let mut rdur = Array1::<f32>::new(50);
-    let mut dpth = Array1::<f32>::new(50);
-    let mut dpdr = Array1::<f32>::new(50);
-    if ipdur_model <= 0 {
-        ndur = 1;
-        rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.063; // GP2010
-    } else if ipdur_model == 1 {
-        ndur = 1;
-        rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.07; // WUS
-    } else if ipdur_model == 2 {
-        ndur = 1;
-        rdur[1] = 0.0; dpth[1] = 0.0; dpdr[1] = 0.1; // ENA
-    } else if ipdur_model == 11 {
-        ndur = 6; // BT2014 WUS
-        for (i, v) in [0.0, 7.0, 45.0, 125.0, 175.0, 270.0].iter().enumerate() {
-            rdur[i + 1] = *v;
-        }
-        for (i, v) in [0.0, 2.4, 8.4, 10.9, 17.4, 34.2].iter().enumerate() {
-            dpth[i + 1] = *v;
-        }
-    } else if ipdur_model == 12 {
-        ndur = 8; // BT2015 ENA
-        for (i, v) in [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0].iter().enumerate() {
-            rdur[i + 1] = *v;
-        }
-        for (i, v) in [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1].iter().enumerate() {
-            dpth[i + 1] = *v;
-        }
-    }
-    // Any other value leaves ndur undefined in the Fortran; refuse rather than
-    // read garbage.
-    if ndur == 0 {
-        return Err(format!(
-            "ipdur_model = {ipdur_model} leaves ndur undefined in the Fortran \
-             (accepted values are <=0, 1, 2, 11, 12)"
-        ).into());
-    }
-    if ndur != 1 {
-        for i in 1..=ndur - 1 {
-            dpdr[i] = (dpth[i + 1] - dpth[i]) / (rdur[i + 1] - rdur[i]);
-        }
-        dpdr[ndur] = dpdr[ndur - 1];
-    }
+    let PathDuration { ndur, rdur, dpth, dpdr } = path_duration_table(ipdur_model)?;
 
     // ------------------------------------------------------- air layer -------
     let (j0_air, nlskip_air) = insert_air_layer(&mut vmod_in, j0, nlskip);
@@ -290,6 +415,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if fhil > 1.0 / 2.0 / dt {
         eprintln!("fhigh must be < {} {} {}", 1.0 / 2.0 / dt, fhil, dt);
     }
+
+    // Built here, after the deep transition depths have been raised to track the
+    // deepest hypocentre above.
+    let rv = RuptureVelocity {
+        rvfac,
+        shal_rvfac,
+        deep_rvfac,
+        shal_dmin: shal_dmin_default,
+        shal_dmax: shal_dmax_default,
+        deep_dmin: deep_dmin_default,
+        deep_dmax: deep_dmax_default,
+    };
 
     // ------------------------------------ average subfault size and max slip -
     let mut dlm = 0.0f32;
@@ -342,11 +479,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 stoch.segments[iv].sddp[(i, j)] = v;
                 xsum += v;
 
-                let rvf = rupture_velocity_factor(
-                    zdep, rvfac, shal_rvfac, deep_rvfac,
-                    shal_dmin_default, shal_dmax_default,
-                    deep_dmin_default, deep_dmax_default,
-                );
+                let rvf = rv.factor(zdep);
                 let alphat = alpha_t(
                     stoch.segments[iv].dipq, stoch.segments[iv].rakeq, calpha,
                 );
@@ -528,11 +661,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    let rvf = rupture_velocity_factor(
-                        zet[(i, j)], rvfac, shal_rvfac, deep_rvfac,
-                        shal_dmin_default, shal_dmax_default,
-                        deep_dmin_default, deep_dmax_default,
-                    );
+                    let rvf = rv.factor(zet[(i, j)]);
                     let alphat = alpha_t(seg.dipq, seg.rakeq, calpha);
                     let zz = czero * (1.0 + fcfac) / alphat;
 
@@ -627,11 +756,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!(" wrong!");
                     }
 
-                    let rvf0 = rupture_velocity_factor(
-                        zet[(i, j)], rvfac, shal_rvfac, deep_rvfac,
-                        shal_dmin_default, shal_dmax_default,
-                        deep_dmin_default, deep_dmax_default,
-                    );
+                    let rvf0 = rv.factor(zet[(i, j)]);
                     let mut rvf = rvf0;
                     if rvsig1 > 0.0 {
                         irandcnt += 1;
@@ -799,18 +924,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Depth-dependent rupture-velocity factor.
+/// The depth-dependent rupture-velocity taper.
 ///
-/// Appears three times in the main program with identical logic — at `:573`
-/// (moment pass), `:983` (window pass) and `:1159` (subfault pass). Factored out
-/// because the three copies are character-identical, not because the port is
-/// being tidied.
+/// These seven values are always used together, at three call sites — the moment
+/// pass (`:573`), the window pass (`:983`) and the subfault pass (`:1159`) — where
+/// the Fortran repeats the taper character-for-character. Bundling them turns an
+/// eight-argument call into `rv.factor(zdep)`.
 ///
-/// Shallow taper first, then the deep taper *overwrites* it where the depth
-/// falls in the deep band.
-#[allow(clippy::too_many_arguments)]
-fn rupture_velocity_factor(
-    zdep: f32,
+/// The deep transition depths are not constants: they are raised to track the
+/// deepest hypocentre in the slip model, so this is built after the model is read.
+struct RuptureVelocity {
     rvfac: f32,
     shal_rvfac: f32,
     deep_rvfac: f32,
@@ -818,19 +941,28 @@ fn rupture_velocity_factor(
     shal_dmax: f32,
     deep_dmin: f32,
     deep_dmax: f32,
-) -> f32 {
-    let mut rvf = rvfac * shal_rvfac;
-    if zdep >= shal_dmin && zdep < shal_dmax {
-        rvf = rvfac * (shal_rvfac + (1.0 - shal_rvfac) * (zdep - shal_dmin) / (shal_dmax - shal_dmin));
-    } else if zdep >= shal_dmax {
-        rvf = rvfac;
+}
+
+impl RuptureVelocity {
+    /// Shallow taper first, then the deep taper *overwrites* it where the depth
+    /// falls in the deep band — not a blend of the two.
+    fn factor(&self, zdep: f32) -> f32 {
+        let Self { rvfac, shal_rvfac, deep_rvfac, shal_dmin, shal_dmax, deep_dmin, deep_dmax } =
+            *self;
+        let mut rvf = rvfac * shal_rvfac;
+        if zdep >= shal_dmin && zdep < shal_dmax {
+            rvf = rvfac
+                * (shal_rvfac + (1.0 - shal_rvfac) * (zdep - shal_dmin) / (shal_dmax - shal_dmin));
+        } else if zdep >= shal_dmax {
+            rvf = rvfac;
+        }
+        if zdep >= deep_dmin && zdep < deep_dmax {
+            rvf = rvfac * (1.0 + (deep_rvfac - 1.0) * (zdep - deep_dmin) / (deep_dmax - deep_dmin));
+        } else if zdep >= deep_dmax {
+            rvf = rvfac * deep_rvfac;
+        }
+        rvf
     }
-    if zdep >= deep_dmin && zdep < deep_dmax {
-        rvf = rvfac * (1.0 + (deep_rvfac - 1.0) * (zdep - deep_dmin) / (deep_dmax - deep_dmin));
-    } else if zdep >= deep_dmax {
-        rvf = rvfac * deep_rvfac;
-    }
-    rvf
 }
 
 /// The `alphaT` corner-frequency adjustment (2013-11-20).
