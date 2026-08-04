@@ -32,26 +32,10 @@ impl<T: Copy + Default> Array1<T> {
         Self { data: vec![value; n] }
     }
 
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     /// Underlying storage, 0-based. For I/O and tests only — never for indexing
     /// inside a transliterated routine.
     pub fn as_slice(&self) -> &[T] {
         &self.data
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
-    }
-
-    pub fn fill(&mut self, value: T) {
-        self.data.fill(value);
     }
 }
 
@@ -87,14 +71,6 @@ impl<T: Copy + Default> Array2<T> {
     /// `dimension x(rows, cols)` — valid indices are `1..=rows`, `1..=cols`.
     pub fn new(rows: usize, cols: usize) -> Self {
         Self { data: vec![T::default(); rows * cols], rows }
-    }
-
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
-    pub fn cols(&self) -> usize {
-        self.data.len() / self.rows
     }
 
     /// Column-major backing store. For I/O and tests only.
@@ -281,31 +257,12 @@ pub fn nint(x: f32) -> i32 {
     x.round() as i32
 }
 
-pub fn nint64(x: f64) -> i32 {
-    x.round() as i32
-}
-
 /// `int(x)` — truncate **toward zero**, so `int(-1.7) == -1`.
 ///
 /// `k2` at line 1371 of the original depends on this and can come out negative;
 /// see `PORTING_RULES.md` §7.
 pub fn int_trunc(x: f32) -> i32 {
     x.trunc() as i32
-}
-
-pub fn int_trunc64(x: f64) -> i32 {
-    x.trunc() as i32
-}
-
-/// `sign(a,b)` — magnitude of `a` with the sign of `b`. Not `signum`.
-pub fn sign(a: f32, b: f32) -> f32 {
-    if b >= 0.0 { a.abs() } else { -a.abs() }
-}
-
-/// `mod(a,b)` for integers — takes the sign of `a`, same as Rust `%`.
-/// Present so call sites read like the Fortran rather than needing a comment.
-pub fn imod(a: i32, b: i32) -> i32 {
-    a % b
 }
 
 #[cfg(test)]
@@ -340,7 +297,6 @@ mod tests {
         assert_eq!(a.as_slice()[0], 11.0);
         assert_eq!(a.as_slice()[1], 21.0);
         assert_eq!(a.as_slice()[2], 12.0);
-        assert_eq!(a.cols(), 3);
     }
 
     #[test]
@@ -357,13 +313,6 @@ mod tests {
         assert_eq!(int_trunc(1.7), 1);
         assert_eq!(int_trunc(-1.7), -1); // toward zero, not floor
         assert_eq!(int_trunc(-0.2), 0);
-    }
-
-    #[test]
-    fn sign_takes_magnitude_of_a_and_sign_of_b() {
-        assert_eq!(sign(3.0, -1.0), -3.0);
-        assert_eq!(sign(-3.0, 1.0), 3.0);
-        assert_eq!(sign(-3.0, 0.0), 3.0); // +0 counts as positive
     }
 
     #[test]

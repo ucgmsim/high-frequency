@@ -57,11 +57,6 @@ impl ListReader {
         }
     }
 
-    /// Records consumed so far — for diagnostics.
-    pub fn position(&self) -> usize {
-        self.next_rec
-    }
-
     /// `read(unit,'(aN)') s` — take the next record verbatim.
     ///
     /// A formatted read does **not** skip blank records: it takes whatever comes
