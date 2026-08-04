@@ -673,20 +673,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mode = 4; // hardwired SH
                 for ir in 1..=nrtyp {
-                    let mut irtyp = irtype[ir];
-                    if irtyp == 0 {
-                        irtyp = 1;
-                    }
+                    let kind = RayKind::of(irtype[ir]);
 
+                    // The tracing runs even for a straight ray: the Fortran calls
+                    // gf_amp_tt unconditionally and overwrites the results below,
+                    // and type 0 borrows type 1's tracing to do it.
                     let g = gf_amp_tt(
-                        &mut ray, &vmod, j0, zet[(i, j)], dst[(i, j)], irtyp, mode,
+                        &mut ray, &vmod, j0, zet[(i, j)], dst[(i, j)],
+                        kind.trace_type(irtype[ir]), mode,
                     );
                     let mut stime = g.stime;
                     let mut rpath = g.rpath;
                     let mut qbar = g.qbar;
                     let mut sub_tstart = stime - tw_eps * twin[(i, j)];
 
-                    if irtype[ir] == 0 {
+                    if kind == RayKind::StraightRay {
                         rpath = rlsu[(i, j)];
                         qbar = rpath / (bet * 150.0);
                         stime = rpath / 3.7;
@@ -717,18 +718,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // Incidence angle from the ray parameter: sin(i)/vs = p0.
                     // th = i for a downgoing ray, pi - i for upgoing.
                     let p0 = g.rp0;
-                    let mut th = if bet * p0 > 1.0 {
-                        0.5 * pai
-                    } else {
-                        (bet * p0).asin()
+                    let incidence =
+                        if bet * p0 > 1.0 { 0.5 * pai } else { (bet * p0).asin() };
+                    let th = match kind {
+                        // The straight-ray approximation ignores the traced ray
+                        // parameter and uses the geometric take-off angle.
+                        RayKind::StraightRay => thsu[(i, j)],
+                        RayKind::Upgoing => pai - incidence,
+                        RayKind::Downgoing => incidence,
                     };
-                    if irtype[ir] == 0 {
-                        // Straight-ray approximation uses the geometric
-                        // take-off angle instead.
-                        th = thsu[(i, j)];
-                    } else if irtype[ir] % 2 == 1 {
-                        th = pai - th;
-                    }
                     let pa = phsu[(i, j)];
 
                     let cmp = -90.0 * pu;
@@ -958,6 +956,45 @@ fn normalise_source(
     }
 
     SourceScale { dlm, sm, fce_avg, fcmain, nstot }
+}
+
+/// How one entry of the deck's `rayset` is interpreted.
+///
+/// `irtype = 0` is not a ray at all: it selects the straight-line geometric path
+/// instead of a traced one. For traced rays the **parity** of the number selects
+/// the take-off direction, which is why the Fortran tests `mod(irtype,2) == 1`.
+///
+/// Production runs `rayset = [1]`, so only `Upgoing` is exercised there; the other
+/// two are reached by the `rayset=1,2` and `rayset=1,3` parity decks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RayKind {
+    /// `0` — straight-line path, no ray tracing used.
+    StraightRay,
+    /// Odd — leaves the source upward, so the incidence angle is supplemented.
+    Upgoing,
+    /// Even and non-zero — leaves the source downward.
+    Downgoing,
+}
+
+impl RayKind {
+    fn of(irtype: i32) -> Self {
+        if irtype == 0 {
+            Self::StraightRay
+        } else if irtype % 2 == 1 {
+            Self::Upgoing
+        } else {
+            Self::Downgoing
+        }
+    }
+
+    /// The `itype` to trace with. A straight ray still gets traced, as type 1,
+    /// because the Fortran calls `gf_amp_tt` before it checks for type 0.
+    fn trace_type(self, irtype: i32) -> i32 {
+        match self {
+            Self::StraightRay => 1,
+            _ => irtype,
+        }
+    }
 }
 
 /// The depth-dependent rupture-velocity taper.
