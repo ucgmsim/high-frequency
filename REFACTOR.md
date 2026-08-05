@@ -1478,3 +1478,151 @@ on optimisation-level float behaviour — which has already caught one real bug.
 **Still open:** `workflow/scripts/hf_sim.py` has not been slimmed. That edit belongs in the
 `workflow` repo and is the remaining payoff — `build_hf_input`, `hf_simulate_station` and
 `station_seeds` all disappear, and `hf_simulate_chunk` becomes one call.
+
+---
+
+# Stage 5 — ndarray, and the arguments
+
+Stage 4 changed what the crate *is* — a library with a Python boundary. Stage 5 changes how
+its numerics *read*: element-wise array work expressed as element-wise array work, and
+signatures that a compiler can check.
+
+The trigger was a single observation. `apply_radiation_and_invert` took five arguments, two
+of them out-parameters, and had four `for` loops over arrays doing scalar multiplication.
+Every one of those was a Fortran subroutine's shape surviving into Rust.
+
+## §5.0–§5.1a — the function that started it
+
+    apply_radiation_and_invert(fold_count, mirror_count,
+        spectrum: &mut [Complex32], time_series: &mut [f32], radiation: &[f32])
+
+    radiate_and_invert(spectrum: Array1<Complex32>,
+        radiation: ArrayView1<f32>) -> Array1<f32>
+
+Five parameters to two, two out-parameters to none, four loops to zero. `fold_count` and
+`mirror_count` were parameters only because a Fortran subroutine cannot ask an array its
+length: the first **is** `radiation.len()`, the second is always `fold_count - 2`, which the
+old code already `debug_assert`ed. `highcor.rs` went with it — the module existed because
+the Fortran had a subroutine called `HIGHCOR`.
+
+## §5.2 — out-parameters to values
+
+`stochastic_spectrum` returned its spectrum instead of filling a caller's scratch buffer. The
+value now **moves**: out of the vector holding three components, into `radiate_and_invert`
+(which consumes it, the inverse transform being in place), on into the accumulator. Nothing
+copies.
+
+This is what ndarray's by-value operator overloads need: `2.0 * a` reuses the buffer,
+`2.0 * &a` allocates. An out-parameter forces every consumer to borrow or clone.
+
+## §5.3 — nineteen arguments to four
+
+| | before | after |
+| --- | ---: | ---: |
+| `stochastic_spectrum` | 19 | **4** |
+| `subfault_pass` | 13 | 4 |
+| `subfault_geometry` | 10 | 2 |
+| `horizontal_radiation_spectrum` | 11 | 6 |
+| `vertical_radiation_spectrum` | 11 | 6 |
+
+Every `#[allow(clippy::too_many_arguments)]` in `crates/` is gone; `normalise_source`'s was
+simply **stale**, guarding a five-argument function.
+
+Three arguments were **deleted**, not rehomed. `_avg_subfault_km` was declared, never used,
+and kept "for call-site parity" with a Fortran signature. `fold_count` in both radiation
+routines equalled the length of two slices already passed — three ways to say one thing, two
+of which could disagree. Same for `site_amplification_factors`'s `frequency_count`.
+
+The groupings are not bags. `SourceModel` is what is fixed for the whole run and `RayPath`
+what changes per call, so six of the nineteen were re-passed hundreds of thousands of times
+to say the same thing. `RadiationAngles` exists because `(strike, dip, rake, azimuth,
+takeoff)` are five adjacent radians where a transposition is a wrong answer rather than a
+compile error — and `FaultPlane` for the sharper case: `subfault_geometry` took two
+**adjacent, interchangeable** `GeoPoint`s, one the fault origin and one the station.
+
+Two `#[allow]`s survive, in `src-rust/lib.rs`, deliberately: they are pyo3 entry points whose
+`#[pyo3(signature = (*, ..))]` makes every argument keyword-only, so the hazard cannot occur.
+
+`fort.rs` is **deleted** — `Complex32`/`Complex64` to `fft.rs`, and `truncate_toward_zero`
+inlined, its body having been `x.trunc() as i32`, which is what a bare `as` cast already does.
+
+## §5.4–§5.5 — the loops
+
+Six element-wise loops became `azip!`, `scaled_add` or `scan`. All are bit-identical by
+construction, so a green snapshot was the expected outcome rather than a lucky one.
+
+Two were worth more than a spelling change. `accumulate_subfault` was a nested pair of
+index-sliced loops around `*slot += weight * value` — that is axpy, and `scaled_add` is its
+name. The envelope table was a zero-fill followed by a loop overwriting every element; as a
+`scan` it is written once.
+
+**The mirror loops got their own commit**, being the only off-by-one risk in the stage. The
+insight that collapsed them: the negative-frequency half is not a second computation, it is
+the Hermitian symmetry of the first. `as_` and `amp` are real, so conjugation commutes with
+both — scale the positive half and the negative half is a pure `conj` mirror. Three things
+fell out: a dead write the Nyquist store had been overwriting, the separate Nyquist line, and
+§5.2's temporary buffer.
+
+**Three reductions did NOT convert**, and the distinction is the whole point: `fsa`,
+`fill_normal_deviates`'s sum of squares, and `radv`. They look exactly like the element-wise
+operations and are not. Reassociating an `f32` fold — chunked, pairwise, parallel, or
+ndarray's own `.sum()` — moves every waveform. `ENGINEERING_RULES` §4 permits that with an
+argument; it must not ride along inside a mechanical sweep.
+
+Nor did the sequential ones: five-draws-per-iteration in `radiation.rs` (draw order **is** the
+stream), `remove_quadratic_trend`'s trapezoidal integration, `site.rs`'s advancing
+interpolation cursor, and twelve ray-tracing state machines in `ray.rs`.
+
+## §5.6 — the last two modules
+
+`special.rs` was 72 lines for one `#[inline]` line; `gamma` moved to `stoc.rs`, its only
+caller. It stays a **named function** rather than an inlined `libm::tgamma` because
+`properties.rs` pins its recurrence and factorial agreement — tests that mean "the gamma this
+crate uses" and would otherwise become tests of a dependency.
+
+`rng.rs` carried `#![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]`,
+justified by a line-for-line diff against `reference/pcg32.f` pending §2.7's `rand_pcg`
+replacement. **Both halves of that reason had expired** — §4.3 deleted `reference/`, and §2.7
+never happened. It was a blanket suppression on a module nobody was about to delete, which is
+the exact failure `ENGINEERING_RULES` §3 names.
+
+## §5.7 — the LTO experiment was two experiments
+
+Stage 2 tested `lto = "fat"` and `codegen-units = 1` as **one change**, found it 1.2% slower,
+and rejected both. They do not behave the same way.
+
+| | instructions | cycles | IPC |
+| --- | ---: | ---: | ---: |
+| baseline, `codegen-units = 16` | 3,489,660,418 | 1,699,821,294 | 2.053 |
+| **`codegen-units = 1`** | −1.58% | **−7.29%** | **2.180** |
+| `+ lto = "fat"` | **−3.18%** | −2.40% | 2.037 |
+
+LTO removes the **most** instructions and is still the wrong choice: it hands back most of the
+cycle win by dropping IPC. That is exactly the mechanism the old note guessed at — `rustfft`'s
+AVX kernels are hand-tuned and cross-crate inlining disturbs their register allocation — so
+the reasoning was right and only the bundling was wrong.
+
+**The lesson is about the instrument.** Every other entry in `PROFILE.md`'s rejected list is
+settled on instructions retired, and *on instructions alone LTO wins and is wrong*. A change
+that alters how well code schedules needs cycles too.
+
+Measured on a box that was **not idle**, deliberately: instructions reproduced to 1.7 parts in
+10⁷ under load, and cycle spread within a build was ~0.5% against gaps of 7.3% and 2.4%. The
+wall-clock tables in `PROFILE.md` were **not** re-measured, rather than silently refreshed
+with contended numbers.
+
+## Net
+
+| | Stage 4 end | Stage 5 end |
+| --- | ---: | ---: |
+| Rust | 7,927 | 8,138 |
+| `hb_high` modules | 15 | **12** |
+| `too_many_arguments` allows in `crates/` | 5 | **0** |
+| blanket `#![allow]`s | 1 | **0** |
+
+**Rust grew by 211 lines, and that is the honest outcome.** Roughly 190 of it is struct
+definitions and struct-literal call sites replacing positional argument lists no compiler
+could check, and most of the rest is comment recording decisions — the Vec-not-array
+reasoning, the conjugation-commutes argument, the three reductions that must not move.
+`ENGINEERING_RULES` §1 calls the line delta a signal rather than a gate, and this is the case
+it describes: twenty lines to delete a hazard is a good trade.
