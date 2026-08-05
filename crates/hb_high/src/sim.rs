@@ -289,9 +289,10 @@ pub fn simulate(
     };
 
     // ------------------------------------------------- the single station ---
-    // Only read after the segment loop, and only meaningful if there was one: a
-    // zero-segment model returns this sentinel, which `main` then prints as a distance.
-    let mut d10 = 1000.0f32;
+    // Starts at infinity so the first segment's value wins the `min` below; a
+    // zero-segment model falls through to the Fortran's 1000.0 sentinel, which `main`
+    // then prints as a distance.
+    let mut d10 = f32::INFINITY;
 
     // A non-negative `nl_skip` would route the model through `grandvel`, the
     // velocity-model perturbation, which is dead under the production deck and not
@@ -313,9 +314,12 @@ pub fn simulate(
         );
 
         let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
-        // Re-initialised per segment, which is why the stderr distance reports only the
-        // LAST segment on a multi-segment model. Reproduced.
-        d10 = windows.d10_km;
+        // FIXED (§3.4). The Fortran RE-INITIALISES this inside the segment loop, so on a
+        // multi-segment model the distance it reports describes only the LAST segment --
+        // and it escapes: `hf_sim.py` parses it off stderr. Every fixture is
+        // single-segment, which is why it was invisible. Now the minimum over all of them,
+        // which is what "closest subfault distance" means.
+        d10 = d10.min(windows.d10_km);
 
         let plan = plan_segment_spectrum(windows.tmax, dt, &run);
 
@@ -345,7 +349,8 @@ pub fn simulate(
         .collect();
     debug_assert_eq!(out.len(), ndata * 3);
 
-    Ok(Simulation { ndata, dt, acc: out, d10_km: d10 })
+    let d10_km = if d10.is_finite() { d10 } else { 1000.0 };
+    Ok(Simulation { ndata, dt, acc: out, d10_km })
 }
 
 

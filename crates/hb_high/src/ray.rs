@@ -67,13 +67,12 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
 /// argument "during transliteration" and drop it in Phase 3, which is here. `state.rs`
 /// dropped the dimension itself back in §2.3.
 ///
-/// # Known bug, reproduced
+/// # A Fortran bug, fixed in §3.4
 ///
-/// The zeroing loop runs `i = 1,100` while `alp`/`als` are dimensioned
-/// `nlaymax = 500`. Layers above 100 therefore retain multipliers from the
-/// previous ray. Harmless at the ~34 layers production uses, but it is not
-/// widened here: doing so would change results for any deeper model, silently.
-/// See `PORTING_RULES.md` §7.
+/// The original zeroes `alp(1:100)` while the arrays are `nlaymax = 500`, so layers
+/// above 100 keep multipliers from the *previous ray*. Harmless at the ~34 layers
+/// production uses, which is why it went unnoticed; wrong for any deeper model. Now
+/// zeroed in full.
 pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_km: f64, receiver_depth_km: f64) {
 
     // `/rmode/love`: 2 for SH, 1 otherwise. Written here, read by nothing live.
@@ -84,12 +83,13 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // beats an index arithmetic overflow.
     assert!(n >= 1, "build_ray_path needs at least one ray segment, got nd = 0");
 
-    // DO 10 I=1,100 -- deliberately not NLAYMAX. See the note above. 0-based, so this is
-    // layers 0..100, the same hundred layers the Fortran zeroed. The bound stays a
-    // visible 100 rather than becoming `.fill()` over the whole array, because the
-    // difference between 100 and NLAYMAX is the reproduced bug.
-    state.travel.alp[..100].fill(0.0);
-    state.travel.als[..100].fill(0.0);
+    // FIXED (§3.4). The Fortran zeroes `alp(1:100)` while the arrays are dimensioned
+    // `nlaymax = 500`, so a model deeper than 100 layers inherits multipliers from the
+    // PREVIOUS ray and silently produces wrong travel times. Production uses 34 layers,
+    // so this was harmless there and is why it survived -- but it is wrong for any deeper
+    // model, and nothing warned.
+    state.travel.alp.fill(0.0);
+    state.travel.als.fill(0.0);
 
     // Count how many times each layer is traversed, by wave mode. Both indices are
     // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
@@ -728,8 +728,10 @@ pub fn green_function(
 
     build_ray_path(state, vmod, hs, hr);
     let (p0, t0) = stationary_ray_parameter(state, vmod, rr);
-    // Outputs discarded by the Fortran; the call is kept for comparability.
-    let (_p1, _t1) = travel_time(state, vmod, p0, t0, rr);
+    // The Fortran calls `travel_time` here and discards both outputs. It writes no common
+    // block, so the call is side-effect-free and was kept only to keep the two sources
+    // line-comparable. §3.4 drops it: `travel_time` is still exercised directly by the
+    // tier-3 golden, so deleting the dead call loses no coverage.
 
     let (rpd, qbar) =
         geometric_spreading(state, vmod, hs, p0, Takeoff::from_ray_type(ray_type));
