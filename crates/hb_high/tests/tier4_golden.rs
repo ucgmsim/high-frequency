@@ -42,15 +42,14 @@ fn stoc_f_matches_fortran() {
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let (mut rng, _) = Pcg32::seed(seed);
-        let mut cw = vec![Complex32::ZERO; np2];
         // The two per-segment tables `SpectrumPlan` precomputes in the program. Built
         // here from the golden's own inputs, so this still checks the arithmetic rather
         // than the caching: `powf` is deterministic, so hoisting it is bit-exact.
         let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - qfe)).collect();
         let b = -eps * eta.ln() / (1.0 + eps * (eps.ln() - 1.0));
         let env_pow: Vec<f32> = (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
-        stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
-               fc, fmx, akapp, cw.as_mut_slice(), dfr.as_slice(),
+        let cw = stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
+               fc, fmx, akapp, dfr.as_slice(),
                path_exp.as_slice(), env_pow.as_slice(), qb, bigc);
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");

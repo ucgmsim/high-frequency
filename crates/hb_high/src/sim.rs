@@ -28,7 +28,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
 };
-use ndarray::{Array1, ArrayView1};
+use ndarray::{s, Array1, ArrayView1};
 
 use crate::fort::{truncate_toward_zero, Complex32};
 use crate::geom::{subfault_geometry, GeoPoint, SubfaultGeometry};
@@ -658,9 +658,14 @@ fn subfault_pass(
     siteamp_log_freq: &[f32],
 ) {
     let np2 = plan.np2;
-    let mut spectrum: [Vec<Complex32>; 3] =
-        std::array::from_fn(|_| vec![Complex32::ZERO; np2]);
-    let mut subfault_acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; np2]);
+    // Holds three owned spectra between the two component loops. A `Vec` rather than a
+    // `[_; 3]` because the values MOVE out at the end -- `drain` hands each one to
+    // `radiate_and_invert`, which consumes it -- and because it must be filled by an
+    // explicit sequential loop: the fill order is the RNG stream, and neither
+    // `array::from_fn` nor `array::map` documents its evaluation order. The Vec's own
+    // three-pointer allocation is made once here and reused; `drain` leaves the capacity.
+    let mut spectrum: Vec<Array1<Complex32>> = Vec::with_capacity(3);
+    let mut subfault_acc: [Array1<f32>; 3] = std::array::from_fn(|_| Array1::zeros(np2));
     let mut radiation = vec![0.0f32; plan.fold_count];
     let mut siteamp_factors = vec![0.0f32; run.site_table_len];
     let mut ray = RayState::default();
@@ -719,15 +724,16 @@ fn subfault_pass(
             }
 
             // Three calls in component order: each draws `np2` normal deviates.
-            for (component, spec) in Component::ALL.into_iter().zip(spectrum.iter_mut()) {
-                stochastic_spectrum(
+            spectrum.clear();
+            for component in Component::ALL {
+                spectrum.push(stochastic_spectrum(
                     rng, np2, rpath, subfault_window_s, run.window_eps, run.window_eta,
                     shear_velocity_km_s, density_g_cm3, run.dt,
                     run.subevent_moment, run.avg_subfault_km, fce,
                     component.capped_fmax(run.fmax_hz), run.kappa_s,
-                    spec, &plan.frequency_hz, &plan.path_exponent,
+                    &plan.frequency_hz, &plan.path_exponent,
                     &plan.envelope_power, qbar, run.moment_scale,
-                );
+                ));
             }
 
             if config.site_amp {
@@ -736,7 +742,8 @@ fn subfault_pass(
                 );
                 for spec in &mut spectrum {
                     apply_site_amplification(
-                        spec, &plan.log_frequency_hz, run.site_table_len,
+                        spec.as_slice_mut().expect("an owned Array1 is contiguous"),
+                        &plan.log_frequency_hz, run.site_table_len,
                         siteamp_log_freq, &siteamp_factors,
                     );
                 }
@@ -762,7 +769,10 @@ fn subfault_pass(
             // The ONLY difference between the three components is which radiation
             // routine runs, and the `Option` carries it: `Some` is a horizontal, which
             // draws 5,000 deviates; `None` is the vertical, which draws none.
-            for component in Component::ALL {
+            // `drain` moves each spectrum out. The zip is sound because the fill loop
+            // above pushes in `Component::ALL` order and this walks the same order; the
+            // Vec is left empty and reusable for the next ray type.
+            for (component, spec) in Component::ALL.into_iter().zip(spectrum.drain(..)) {
                 match component.azimuth_offset_deg() {
                     Some(offset_deg) => horizontal_radiation_spectrum(
                         rng, angles.strike_rad, angles.dip_rad, angles.rake_rad, pa, th,
@@ -776,19 +786,11 @@ fn subfault_pass(
                         run.radv_sample_count, &mut radiation,
                     ),
                 };
-                let k = component.index();
-                // TEMPORARY clone, and the reason is worth stating: `radiate_and_invert`
-                // takes the spectrum BY VALUE because the inverse transform consumes it,
-                // but `spectrum[k]` is a scratch buffer that `stochastic_spectrum` refills
-                // through an out-parameter on the next subfault. `mem::take` would hand
-                // that call an empty buffer. §5.2 makes `stochastic_spectrum` RETURN its
-                // spectrum, at which point the value flows straight through and this clone
-                // and the copy below both go.
-                let samples = radiate_and_invert(
-                    Array1::from(spectrum[k].clone()),
-                    ArrayView1::from(&radiation[..]),
-                );
-                subfault_acc[k].copy_from_slice(samples.as_slice().expect("contiguous"));
+                // The spectrum moves: out of the Vec, into `radiate_and_invert`, which
+                // consumes it because the inverse transform is in place, and the samples
+                // move on into the accumulator. No copy anywhere on this path.
+                subfault_acc[component.index()] =
+                    radiate_and_invert(spec, ArrayView1::from(&radiation[..]));
             }
 
             // Rupture time at this subfault.
@@ -844,7 +846,7 @@ fn subfault_pass(
 /// rather than crash.
 fn accumulate_subfault(
     acc: &mut [Vec<f32>; 3],
-    subfault_acc: &[Vec<f32>; 3],
+    subfault_acc: &[Array1<f32>; 3],
     weight: f32,
     start_sample: i32,
     np2: usize,
@@ -873,8 +875,9 @@ fn accumulate_subfault(
     let dst = first_sample as usize - 1;
 
     for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
-        for (slot, &value) in
-            out[dst..dst + count].iter_mut().zip(&contribution[skip..skip + count])
+        for (slot, &value) in out[dst..dst + count]
+            .iter_mut()
+            .zip(contribution.slice(s![skip..skip + count]))
         {
             *slot += weight * value;
         }
@@ -1115,7 +1118,7 @@ mod tests {
     /// Reference implementation: the Fortran's own loop, transliterated.
     fn accumulate_reference(
         acc: &mut [Vec<f32>; 3],
-        subfault_acc: &[Vec<f32>; 3],
+        subfault_acc: &[Array1<f32>; 3],
         weight: f32,
         start_sample: i32,
         np2: usize,
@@ -1146,7 +1149,7 @@ mod tests {
     fn accumulate_matches_the_fortran_loop_at_every_alignment() {
         let np2 = 8usize;
         let ndata = 10usize;
-        let subfault_acc: [Vec<f32>; 3] =
+        let subfault_acc: [Array1<f32>; 3] =
             std::array::from_fn(|c| (0..np2).map(|i| (c * 100 + i + 1) as f32).collect());
 
         // Well before the record, straddling both edges, and well past the end.

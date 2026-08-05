@@ -338,13 +338,17 @@ fn bench_spectrum(c: &mut Criterion) {
         group.throughput(Throughput::Elements(np2 as u64));
 
         // stochastic_spectrum: one FFT plus np2 normal draws plus the per-bin spectral shape.
+        //
+        // Returns the spectrum since §5.2, so this timing INCLUDES the result allocation
+        // where the out-parameter form reused a caller buffer and excluded it -- the same
+        // note as `radiate_and_invert` below. §5.5 folds the internal mirror buffer into
+        // the returned array, which is where that allocation comes back out.
         group.bench_with_input(BenchmarkId::new("stochastic_spectrum", np2), &np2, |b, &np2| {
             let (mut g, _) = Pcg32::seed(5);
-            let mut cw = vec![Complex32::ZERO; np2];
             b.iter(|| {
                 stochastic_spectrum(
                     &mut g, np2, 60.0, 2.0, 0.2, 0.05, 3.2, 2.7, DT, 3.0e22, 0.0,
-                    1.5, 10.0, 0.045, cw.as_mut_slice(), dfr.as_slice(),
+                    1.5, 10.0, 0.045, dfr.as_slice(),
                     path_exp.as_slice(), env_pow.as_slice(), 0.02, 2.1,
                 )
             })

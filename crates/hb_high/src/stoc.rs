@@ -11,7 +11,11 @@ use crate::special::gamma;
 /// Builds the complex Fourier spectrum of one subfault's stochastic S-wave
 /// motion: a Brune omega-squared source, a kappa/fmax high-cut, path Q, and the
 /// Frankel two-corner operator, multiplied by a unit-power random phase
-/// spectrum and mirrored to Hermitian symmetry. Writes `np2` values into `spectrum`.
+/// spectrum and mirrored to Hermitian symmetry. Returns `np2` values.
+///
+/// The spectrum was an out-parameter — a caller-owned scratch buffer refilled once per
+/// subfault per component. Returning it lets the value flow straight into
+/// [`radiate_and_invert`], which consumes it, so the caller no longer clones.
 ///
 /// `dlm` is declared and never used; kept in the signature for call-site parity.
 ///
@@ -71,7 +75,6 @@ pub fn stochastic_spectrum(
     corner_frequency_hz: f32,
     fmax_hz: f32,
     kappa_s: f32,
-    spectrum: &mut [Complex32],
     frequency_hz: &[f32],
     // `frequency_hz[i]^(1 - qfexp)`, precomputed per segment -- see `SpectrumPlan`.
     path_exponent: &[f32],
@@ -79,7 +82,7 @@ pub fn stochastic_spectrum(
     envelope_power: &[f32],
     qbar: f32,
     moment_scale: f32,
-) {
+) -> Array1<Complex32> {
     let pai = std::f32::consts::PI;
     let rp = 0.63f32;
 
@@ -238,6 +241,16 @@ pub fn stochastic_spectrum(
     // Note the partner of the LAST iteration and the Nyquist store below are the same
     // element -- Fortran i = np writes spectrum(np + 1) = spectrum(fold_count) -- so the
     // Nyquist assignment overwrites it. That ordering is the original's and is kept.
+    // TEMPORARY second buffer. The mirror below reads `ac` and writes `spectrum`, and an
+    // in-place merge is possible -- every index is read before it is written -- but it
+    // needs the Nyquist value saved before the loop, and that index reasoning is §5.5's
+    // job, isolated so that a red snapshot there means the indices rather than this
+    // plumbing. §5.5 folds the two together and this allocation goes.
+    //
+    // The zero fill is not waste that survives: the loop writes `0..np`, `np..np2` and
+    // the Nyquist, which is every element.
+    let mut spectrum = Array1::from_elem(np2, Complex32::ZERO);
+
     let np = np2 / 2;
     for j in 0..np {
         spectrum[j] = scale(ac[j], as_[j], amp);
@@ -247,6 +260,8 @@ pub fn stochastic_spectrum(
         spectrum[np2 - j - 1] = Complex32::new(d.re as f32, d.im as f32);
     }
     spectrum[fold_count - 1] = scale(ac[fold_count - 1], as_[fold_count - 1], amp);
+
+    spectrum
 }
 
 /// Multiply a spectrum by its radiation pattern, invert, scale and taper.
