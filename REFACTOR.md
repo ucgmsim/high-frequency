@@ -1146,6 +1146,98 @@ here so it does not get done by accident during a tidy.
 
 ---
 
+---
+
+## Stage 3 — leaving the transliteration
+
+Stage 2 optimised for demonstrable fidelity to `hb_high_ref.f`. Stage 3 optimises for
+**fewer lines, no Fortranisms, idiomatic Rust, and speed ahead of obedience**, and it
+begins by replacing the gates, because §2.7 breaks both of Stage 2's at once:
+`run_selfparity`'s bit-exact mode dies when accumulation order stops being binding, and
+Tier B's pairing dies when the generator changes.
+
+`ENGINEERING_RULES.md` is now the rulebook. `PORTING_RULES.md` is relabelled archaeology
+with a per-section status index — it still explains why the *Fortran* does what it does,
+which is needed for reading the oracle, but it stopped describing this crate.
+
+### The gate that could not fail
+
+Tier B reported PASS when it was broken. It gated only on `Refuted`, and `Undetermined` is
+by design not a failure — but nothing checked that the sample could decide *anything*. A
+desynced paired stream inflates the half-width from ~1e-6 to ~0.066 (±6.8% against a ±2%
+band), sends every endpoint to `Undetermined`, and passes with a plausible CSV. Replacing
+the RNG would have walked straight through it.
+
+> **Every gate asserts its own resolution, not only its verdict.** A tier that cannot
+> resolve the band it claims to test has *abstained*, and abstention must not be spelled
+> the same way as success.
+
+Demonstrated both ways: at n=20 the acceptance tier now fails with "it has abstained, not
+passed"; at n=2500 the median half-width is 0.93% and the real campaign is unaffected.
+
+### CHEAP and LONG
+
+| | what | when |
+| --- | --- | --- |
+| `run_cheap.sh` | tests, clippy, replay-parity at 1e-6 | **every commit**, ~20 s |
+| `run_long.sh` | equivalence vs production Fortran — mean, **scatter and quantiles** — plus inter-frequency correlation and its A/A control | **once per stage** |
+| `run_long.sh --quick` | the same at n=100, ±10% | bisection only |
+
+**Replay-parity** is the Tier B replacement and the reason the stage is safe. Both binaries
+run on `HB_FIXTURE_RNG`, a frozen SplitMix64 draw source that is *not* the production
+generator, so the draws provably do not move and any difference is attributable to the
+code. It goes red **by design** when a commit changes the draw structure, which happened
+three times and was correct each time.
+
+The long tier gained **shape gates**, because the mean is the first moment and a change in
+sampling moves shape while leaving the centre alone. Both gates carry their own resolution
+guard: an unguarded quantile test reported 220 "failures" of 375 at n=100, none real,
+because `verdict_of` refutes on the point estimate and a 5th percentile of 100 draws is
+just the 5th smallest value.
+
+### What changed in the program
+
+| | effect |
+| --- | --- |
+| **Seeding** | The Fortran folded `seed, seed+1, …, seed+7` into the state with a constant `inc`, which reduces exactly to `state = C·seed + D` — an affine map onto **one** LCG orbit, with PCG's stream parameter unused. Now `rand_core`'s `seed_from_u64`, which fills state *and* increment, so different seeds get different **streams**. `HB_LEGACY_SEEDING=1` reproduces the old behaviour bit-for-bit |
+| **MMV** | 262,144 normal deviates per station for a buffer with **one** read site and 4–2,827 reads. Gone: mini fault **10.8 → 7.5 ms**, 1.0 MiB less resident |
+| **Transcendentals** | Three loop-invariant `powf`/`ln` tables hoisted into `SpectrumPlan`: medium fault **262 → 193 ms**, instructions **2.34G → 1.67G**, and bit-exact |
+| **Defects** | Six fixed — the 100-of-500 multiplier zeroing, `d10`'s per-segment reset (which escapes to `hf_sim.py`), `travel_time`'s discarded call, and the two halves of "source below the model" |
+
+### Three findings worth keeping
+
+**A documented claim was wrong.** `rng.rs` and `stoc.rs` both asserted that
+`stochastic_spectrum`'s amplitude calibration depends on `fill_normal_deviates`'s unit-RMS
+rescale, and §2.7's risk list rested on it. It does not: `amp` is measured from the very
+sequence that was rescaled, so a scale `s` propagates as `s` into `ac`, `s²` into `fsa`,
+`1/s` into `amp`, and cancels. The rescale's only live consumer was the rupture
+perturbation, where it bought 0.14%.
+
+**The seeding was not the cause of the reported problem.** It was replaced on a complaint
+about spatial correlation, and the measurement does not support that: nearby seeds give
+max |r| 0.081 against a 0.067 noise floor, indistinguishable from properly-seeded, and
+`hf_sim.py` derives per-station seeds as `int32(root) ^ hash(name)` so consecutive seeds
+never arise. The likely cause is structural — every station is an independent process with
+an independent seed, so the model produces **zero** inter-station correlation of random
+phase by construction. That is a modelling question. The seeding was replaced anyway
+because it is indefensible on its own terms.
+
+**An "optimisation" measured slower and was reverted.** `as_` is allocated at `np2` while
+only `fold_count` is read. Shrinking it cost +5.4M instructions: at `np2 = 16384` the
+buffer is exactly 128 KB, glibc's mmap threshold, so `calloc` returns already-zero pages
+for free; at 64 KB it comes off the heap and must be memset. The measurement now sits at
+the allocation so the next reader finds it instead of repeating it.
+
+### A bug the type system could not catch
+
+`apply_site_amplification` was changed to take **log** frequencies and the call site kept
+passing the linear ones. It compiled — both are `&[f32]` — and the whole suite passed,
+because the golden calls the routine directly with correct input and the whole-program
+tests are property tests. Only clippy's "field `log_frequency_hz` is never read" exposed
+it. That is the primitive-obsession hazard §2.8's own review flagged; a newtype would have
+made it a compile error.
+
+
 ## Size budget
 
 Current `crates/hb_high/src` is **4,336 lines**. Rough targets:
