@@ -11,10 +11,30 @@ function deleted in §2.1, and its whole-program numbers timed a subprocess.
 | mini | 4 | **3.44 ms** |
 | medium | 112 | **176.4 ms** |
 
-Runtime is close to linear in subfault count — 112/4 = 28× the subfaults for 51× the time,
-the excess being the larger `np2` a longer record needs. Extrapolating to a 4,070-subfault
-rupture gives seconds per station, which is the figure that decides whether a campaign wants
-a cluster; it has not been measured directly and should be before anyone relies on it.
+## Realistic scale, measured
+
+Extrapolating the table above linearly to a 4,070-subfault rupture gives ~7 s per station.
+**Measured, it is 26 s** — 3.7× worse — because runtime is not linear in subfault count alone.
+
+| | subfaults | duration | 1 station | 4 stations |
+| --- | ---: | ---: | ---: | ---: |
+| medium, 40 s | 112 | 40 s | 176 ms | — |
+| medium, 60 s, shallow dip | 112 | 60 s | **1.52 s** | 5.97 s |
+| realistic, 60 s, shallow dip | 4,070 | 60 s | **26.2 s** | 104.7 s |
+
+Two effects compound. A longer record raises `np2`, so every subfault's FFT costs more; and a
+shallow-dipping deep-topped geometry lengthens ray paths, which adds time windows per
+subfault. The same 112 subfaults cost **8.6×** more at 60 s with a subduction-like geometry
+than at 40 s with a crustal one. **Subfault count alone does not predict runtime** — anyone
+sizing a campaign needs to time their own geometry.
+
+For a 1,000-station run that is ~7.2 CPU-hours, so about an hour on this 8-core box or a few
+minutes on a large node. A 100-realisation campaign is ~720 CPU-hours, which is genuinely
+cluster work.
+
+Four stations cost exactly 4× one (26.16 vs 26.19 s each), confirming the batch loop is
+serial by design: the GIL is released so a dask thread pool scales across chunks, and there is
+no internal thread pool to compete with it.
 
 ## What the batch API removed
 
