@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate tier-0 kernel goldens from the Fortran reference.
-# Committed, so `cargo test` works without gfortran. See gen_rng_golden.sh.
+# Committed, so `cargo test` works without gfortran.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
