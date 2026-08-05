@@ -2,7 +2,7 @@
 
 use crate::fft::{forward, remove_quadratic_trend};
 use crate::fort::{Complex32, Complex64};
-use crate::rng::{fill_normal_deviates, Pcg32};
+use crate::rng::{fill_normal_deviates, Draws};
 use crate::special::gamma;
 
 /// `subroutine stochastic_spectrum(...)` — `hb_high_ref.f:1670`.
@@ -37,17 +37,26 @@ use crate::special::gamma;
 ///   The only `x**0.5` in this routine feeds a dead store and is simply not
 ///   computed. See `PORTING_RULES.md` §4b.
 ///
-/// # The random sequence must be unit-RMS
+/// # The power normalisation is self-referential, which makes it robust
 ///
 /// `amp = 1/(dt*sqrt(fsa/fold_count))` normalises so the average *power* spectrum is
 /// unity, per Boore (1983) — a 2009-03-18 change from normalising the amplitude
-/// spectrum, which reduced motions about 10% and was offset by raising the
-/// default corner frequency 5%. This calibration assumes
-/// [`normal_deviates`]'s renormalisation, so substituting a plain N(0,1)
-/// generator would silently change the output level.
+/// spectrum, which reduced motions about 10% and was offset by raising the default
+/// corner frequency 5%.
+///
+/// This comment used to claim the calibration depends on `fill_normal_deviates`'s
+/// unit-RMS rescale, so that a plain N(0,1) generator would change the output level.
+/// **That is wrong.** `fsa` is measured from the very sequence that was rescaled, so if
+/// the deviates carry a scale factor `s`, then `ac` does too, `fsa` carries `s^2`, and
+/// `amp` carries `1/s`. The product `ac * as_ * amp` is invariant. See
+/// [`crate::rng::fill_normal_deviates`] for the full trace.
+///
+/// The practical consequence is the opposite of what was documented: this routine is
+/// **indifferent** to the deviate source's scale, which is one less thing tying it to a
+/// particular generator.
 #[allow(clippy::too_many_arguments)]
 pub fn stochastic_spectrum(
-    rng: &mut Pcg32,
+    rng: &mut impl Draws,
     np2: usize,
     distance_km: f32,
     window_s: f32,

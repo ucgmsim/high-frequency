@@ -86,7 +86,7 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
 /// are omitted here.
 #[allow(clippy::too_many_arguments)]
 pub fn horizontal_radiation_spectrum(
-    rng: &mut crate::rng::Pcg32,
+    rng: &mut impl crate::rng::Draws,
     strike_rad: f32,
     dip_rad: f32,
     rake_rad: f32,

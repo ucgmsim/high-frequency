@@ -24,6 +24,25 @@
 // Both are staying until §2.7 deletes the module; see the note above.
 #![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]
 
+/// A source of uniform deviates in `[0, 1)`.
+///
+/// This exists so that *validation* can drive the program with a draw source that is not
+/// the production generator. Replacing the RNG is the one change that moves every number
+/// at once, so a gate that compares two builds needs a source both can share — otherwise
+/// there is no way to tell a refactoring mistake from the engine change carrying it.
+///
+/// Consumers are generic over this rather than taking an enum, so each is monomorphised
+/// and the production path keeps a direct call. The draw loop is 80% of the program's
+/// RNG traffic; it should not pay a branch to be testable.
+///
+/// **The `[0, 1)` half-open range is a contract, not a convention.**
+/// `fill_normal_deviates` rejects zeros by re-drawing, and a source that could return
+/// exactly 1.0 would break `-ln(x)` at the other end. See [`Pcg32::next_f32`] for why the
+/// obvious `u32 / 2^32` does not satisfy it.
+pub trait Draws {
+    fn next_f32(&mut self) -> f32;
+}
+
 const PCG_MULT: u64 = 6364136223846793005;
 const PCG_INC_DEFAULT: u64 = 1442695040888963407;
 
@@ -94,17 +113,42 @@ impl Pcg32 {
     }
 }
 
+impl Draws for Pcg32 {
+    #[inline]
+    fn next_f32(&mut self) -> f32 {
+        Pcg32::next_f32(self)
+    }
+}
+
 /// `subroutine fill_normal_deviates(count,out)` — `hb_high_ref.f:4033`.
 ///
-/// Box-Muller pairs, then the whole vector is rescaled so that
-/// `sum(out**2) == count` exactly. That renormalisation is **not** cosmetic:
-/// `stochastic_spectrum`'s amplitude calibration is tuned against a unit-RMS sequence, so
-/// substituting a plain N(0,1) generator changes the output level.
+/// Box-Muller pairs, then the whole vector is rescaled so that `sum(out**2) == count`
+/// exactly.
+///
+/// # What the renormalisation actually buys — the old claim here was wrong
+///
+/// This comment used to say the rescale was load-bearing because
+/// `stochastic_spectrum`'s amplitude calibration is tuned against a unit-RMS sequence.
+/// **It is not.** Trace the scale factor `s` through that routine: `a` is proportional to
+/// `s`; `remove_quadratic_trend` is linear and homogeneous of degree 1, so its output is
+/// too; `ac = a * w` and the forward transform are linear, so `ac ∝ s`; therefore
+/// `fsa = sum|ac|^2 ∝ s^2` and `amp = 1/(dt*sqrt(fsa/fold_count)) ∝ 1/s`. The product
+/// `ac * as_ * amp` is **proportional to `s^0`**. `amp` is a self-normalisation against
+/// the power of the very sequence that was rescaled, so the two cancel exactly.
+///
+/// The one live consumer is the rupture-velocity perturbation in `sim`, which uses a
+/// deviate directly as a standard normal with sigma = `rv_sig1`. There the rescale pins
+/// the RMS to exactly 1 where an un-normalised generator would land within
+/// `1/sqrt(2N)` ~ 0.14% of it.
+///
+/// So this is two full passes over the buffer buying a 0.14% correction on the handful of
+/// deviates that are read directly. Kept for now because it is also what the draw
+/// accounting below describes, but it is not the calibration barrier it was documented as.
 ///
 /// Draw accounting, which the shared stream depends on: `2*ceil(count/2)` draws
 /// plus one extra per rejected zero. When `count` is odd the sine partner of the
 /// final pair is generated and discarded.
-pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
+pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]) {
     // `count` is the DRAW count and stays an explicit argument, deliberately not
     // inferred from `out.len()`. The number of deviates drawn is part of the RNG
     // stream -- every later draw depends on where the generator ended up -- so it is a
@@ -156,7 +200,7 @@ pub fn fill_normal_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
 }
 
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
-pub fn fill_uniform_deviates(rng: &mut Pcg32, count: usize, out: &mut [f32]) {
+pub fn fill_uniform_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]) {
     // Explicit `count` for the same reason as `fill_normal_deviates`.
     assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
     for i in 0..count {

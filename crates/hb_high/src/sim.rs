@@ -34,7 +34,7 @@ use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use crate::ray::green_function;
-use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
+use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Draws, Pcg32};
 use crate::site::{site_amplification_factors, apply_site_amplification};
 use crate::state::{params, RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::stochastic_spectrum;
@@ -594,7 +594,7 @@ fn plan_segment_spectrum(tmax: f32, dt: f32) -> SpectrumPlan {
 /// See `PORTING_RULES.md` §5.
 #[allow(clippy::too_many_arguments)]
 fn subfault_pass(
-    rng: &mut Pcg32,
+    rng: &mut impl Draws,
     acc: &mut [Vec<f32>; 3],
     seg: &Segment,
     geom: &SubfaultGeometry,
