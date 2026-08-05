@@ -324,6 +324,11 @@ fn bench_spectrum(c: &mut Criterion) {
         let nf = np2 / 2 + 1;
         let mf = np2 / 2 - 1;
         let dfr = dfr_axis(np2);
+        // Precomputed per-segment tables, as `SpectrumPlan` supplies in the real program.
+        let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - 0.6)).collect();
+        let b = -0.2f32 * 0.05f32.ln() / (1.0 + 0.2 * (0.2f32.ln() - 1.0));
+        let env_pow: Vec<f32> = (0..np2).map(|i| (i as f32 * DT).powf(b)).collect();
+        let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
         let src = spectrum(np2);
         let (fn_, an) = site_table();
         let mut rdna = vec![0.0; np2];
@@ -340,7 +345,8 @@ fn bench_spectrum(c: &mut Criterion) {
             b.iter(|| {
                 stochastic_spectrum(
                     &mut g, np2, 60.0, 2.0, 0.2, 0.05, 3.2, 2.7, DT, 3.0e22, 0.0,
-                    1.5, 10.0, 0.045, cw.as_mut_slice(), dfr.as_slice(), 0.02, 0.6, 2.1,
+                    1.5, 10.0, 0.045, cw.as_mut_slice(), dfr.as_slice(),
+                    path_exp.as_slice(), env_pow.as_slice(), 0.02, 2.1,
                 )
             })
         });
@@ -359,7 +365,7 @@ fn bench_spectrum(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("apply_site_amplification", np2), &np2, |b, &_np2| {
             b.iter_batched_ref(
                 || src.clone(),
-                |cw| apply_site_amplification(cw.as_mut_slice(), dfr.as_slice(), 20, fn_.as_slice(), an.as_slice()),
+                |cw| apply_site_amplification(cw.as_mut_slice(), log_dfr.as_slice(), 20, fn_.as_slice(), an.as_slice()),
                 criterion::BatchSize::SmallInput,
             )
         });

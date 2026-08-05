@@ -72,8 +72,11 @@ pub fn stochastic_spectrum(
     kappa_s: f32,
     spectrum: &mut [Complex32],
     frequency_hz: &[f32],
+    // `frequency_hz[i]^(1 - qfexp)`, precomputed per segment -- see `SpectrumPlan`.
+    path_exponent: &[f32],
+    // `(i * dt)^b`, precomputed per segment -- see `SpectrumPlan`.
+    envelope_power: &[f32],
     qbar: f32,
-    q_exponent: f32,
     moment_scale: f32,
 ) {
     let pai = std::f32::consts::PI;
@@ -113,15 +116,15 @@ pub fn stochastic_spectrum(
     // product reaches zero it stays there, exactly as `expf` of a large negative
     // argument would.
     //
-    // `t^b` has no such recurrence for real `b` and stays a `powf`.
+    // `t^b` has no recurrence for real `b`, but it does not need one: `b` comes from the
+    // window shape, which is fixed for the whole run, and `t` is `index * dt` on a fixed
+    // grid. So the whole table is a per-segment constant and arrives precomputed. That
+    // removed 5.5M `powf` per medium-fault run computing at most `np2` distinct values.
     let decay_per_sample = (-(c as f64) * dt as f64).exp();
     let mut decay = 1.0f64; // exp(0) at the first sample
     let mut w = vec![0.0f32; np2];
-    // 0-based since §2.3, which also makes `t` honest: it was `(i - 1) * dt` for a
-    // 1-based `i`, i.e. just `index * dt`.
-    for (index, envelope) in w.iter_mut().enumerate() {
-        let t = index as f32 * dt;
-        *envelope = aa * t.powf(b) * decay as f32;
+    for (envelope, &power) in w.iter_mut().zip(envelope_power) {
+        *envelope = aa * power * decay as f32;
         decay *= decay_per_sample;
     }
 
@@ -133,7 +136,11 @@ pub fn stochastic_spectrum(
     // Bin 0 (DC) stays zero; bins 1..fold_count get the shape. Slicing both from 1 keeps
     // the two arrays' correspondence in the types instead of in two matching `[i]`s.
     let mut as_ = vec![0.0f64; np2];
-    for (shape, &fr) in as_[1..fold_count].iter_mut().zip(&frequency_hz[1..]) {
+    for ((shape, &fr), &path_fr) in as_[1..fold_count]
+        .iter_mut()
+        .zip(&frequency_hz[1..])
+        .zip(&path_exponent[1..])
+    {
         let fr2 = fr * fr;
 
         // The Q model qv = 150.0*fr**0.5 is computed by the Fortran but feeds
@@ -167,7 +174,7 @@ pub fn stochastic_spectrum(
         //
         // No assumption is made about the frequency axis being evenly spaced, unlike
         // the envelope recurrence above. `frequency_hz` is caller-supplied data.
-        let path = qbar * fr.powf(1.0 - q_exponent);
+        let path = qbar * path_fr;
         let a2a3 = if kappa_s <= 0.0 {
             let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
             let a3 = ((-pai * path).exp() / distance_cm) as f64;

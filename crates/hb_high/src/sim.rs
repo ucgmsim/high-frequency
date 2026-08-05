@@ -317,7 +317,7 @@ pub fn simulate(
         // LAST segment on a multi-segment model. Reproduced.
         d10 = windows.d10_km;
 
-        let plan = plan_segment_spectrum(windows.tmax, dt);
+        let plan = plan_segment_spectrum(windows.tmax, dt, &run);
 
         subfault_pass(
             &mut rng, &mut acc, seg, &geom, &windows, &plan, &vmod, &rv, &angles, &run,
@@ -563,10 +563,31 @@ struct SpectrumPlan {
     /// `mfold` — mirrored bin count, `np2/2 - 1`.
     mirror_count: usize,
     frequency_hz: Vec<f32>,
+
+    // ---- precomputed transcendentals -------------------------------------------------
+    //
+    // The three tables below were, between them, the largest single cost in the program:
+    // 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, computing at most
+    // `np2`, `fold_count` and `fold_count` DISTINCT values respectively. Every one was a
+    // pure function of quantities that do not change within a segment, recomputed once
+    // per subfault per ray per component.
+    //
+    // Hoisting them is bit-exact by construction: `powf` and `ln` are deterministic, so
+    // evaluating a pure function once and reusing it gives the identical `f32`.
+    /// `ln(frequency_hz[i])`. Index 0 is `-inf` and is never read — the site-amplification
+    /// interpolation starts at bin 1, because `ln(0)` has no meaning as a frequency.
+    log_frequency_hz: Vec<f32>,
+    /// `frequency_hz[i]^(1 - qfexp)` — the path-attenuation frequency dependence.
+    path_exponent: Vec<f32>,
+    /// `(i * dt)^b` — the power-law factor of the Saragoni-Hart envelope.
+    ///
+    /// `b` comes from the window shape `(eps, eta)`, which is fixed for the whole run, so
+    /// this is `np2` values that were being recomputed 336 times on the medium fault.
+    envelope_power: Vec<f32>,
 }
 
 /// Smallest power of two at or above `2 * tmax / dt`, and the axis that goes with it.
-fn plan_segment_spectrum(tmax: f32, dt: f32) -> SpectrumPlan {
+fn plan_segment_spectrum(tmax: f32, dt: f32, run: &RunScalars) -> SpectrumPlan {
     let ntmax = truncate_toward_zero(2.0 * tmax / dt) as usize;
     let mut np2 = 2usize;
     while np2 < ntmax {
@@ -579,7 +600,26 @@ fn plan_segment_spectrum(tmax: f32, dt: f32) -> SpectrumPlan {
     // 0-based, which also removes the `- 1`: the axis is `df * bin`.
     let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
 
-    SpectrumPlan { np2, fold_count, mirror_count, frequency_hz }
+    let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
+    let path_exponent: Vec<f32> =
+        frequency_hz.iter().map(|f| f.powf(1.0 - run.q_exponent)).collect();
+
+    // The Saragoni-Hart shape parameter, from the window shape alone. Identical to the
+    // expression in `stochastic_spectrum`, which is where it used to live.
+    let b = -run.window_eps * run.window_eta.ln()
+        / (1.0 + run.window_eps * (run.window_eps.ln() - 1.0));
+    let envelope_power: Vec<f32> =
+        (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
+
+    SpectrumPlan {
+        np2,
+        fold_count,
+        mirror_count,
+        frequency_hz,
+        log_frequency_hz,
+        path_exponent,
+        envelope_power,
+    }
 }
 
 /// Subfault pass — `hb_high_ref.f`'s second subfault loop.
@@ -691,8 +731,8 @@ fn subfault_pass(
                     shear_velocity_km_s, density_g_cm3, run.dt,
                     run.subevent_moment, run.avg_subfault_km, fce,
                     component.capped_fmax(run.fmax_hz), run.kappa_s,
-                    spec, &plan.frequency_hz, qbar, run.q_exponent,
-                    run.moment_scale,
+                    spec, &plan.frequency_hz, &plan.path_exponent,
+                    &plan.envelope_power, qbar, run.moment_scale,
                 );
             }
 
@@ -702,7 +742,7 @@ fn subfault_pass(
                 );
                 for spec in &mut spectrum {
                     apply_site_amplification(
-                        spec, &plan.frequency_hz, run.site_table_len,
+                        spec, &plan.log_frequency_hz, run.site_table_len,
                         siteamp_log_freq, &siteamp_factors,
                     );
                 }

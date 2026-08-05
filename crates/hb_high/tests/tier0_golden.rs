@@ -281,7 +281,11 @@ fn siteamp_matches_fortran() {
         let want: Vec<Complex32> =
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
-        apply_site_amplification(cw.as_mut_slice(), dfr.as_slice(), nn, fn_.as_slice(), an.as_slice());
+        // The routine now takes LOG frequencies, precomputed per segment by
+        // `SpectrumPlan`. `ln` is deterministic, so hoisting it out of the inner loop is
+        // bit-exact and this golden still holds.
+        let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
+        apply_site_amplification(cw.as_mut_slice(), log_dfr.as_slice(), nn, fn_.as_slice(), an.as_slice());
 
         // §2.6 defect 2: the Fortran scales the DC bin (1) and the Nyquist bin
         // (np2/2 + 1) by the raw factor while exponentiating every bin between, two

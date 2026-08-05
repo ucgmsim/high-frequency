@@ -88,7 +88,8 @@ pub fn site_amplification_factors(
 /// result is exponentiated.
 pub fn apply_site_amplification(
     spectrum: &mut [Complex32],
-    frequency_hz: &[f32],
+    // `ln(frequency_hz[i])`, precomputed per segment. Index 0 is never read.
+    log_frequency_hz: &[f32],
     table_count: usize,
     log_frequency: &[f32],
     factors: &[f32],
@@ -114,7 +115,7 @@ pub fn apply_site_amplification(
     spectrum[0] *= factors[0].exp();
 
     for i in 1..np {
-        let freq = frequency_hz[i].ln();
+        let freq = log_frequency_hz[i];
 
         // Label 9123: advance the interpolation bracket. Written as an
         // if-then-with-backward-goto in the source, which is a do-while.
