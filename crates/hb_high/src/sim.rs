@@ -403,20 +403,19 @@ struct RunScalars {
     /// `nsfac` — length of the site-amplification frequency table.
     site_table_len: usize,
     ndata: usize,
-    /// `j0` — layer count. Read as an INDEX where a source is below the model; see
-    /// `PORTING_RULES.md` §7.
+    /// Layer count. Also read as an INDEX where a source sits below the model — see
+    /// [`source_layer_for`], which is where that case is resolved.
     layer_count: usize,
     /// Whether the rupture-time jitter draw happens.
     ///
-    /// The Fortran tests `irand > 0` on the seed AFTER `init_random_seed` advanced it by
-    /// `SEED_WORDS = 8`, so this is really `config.seed > -8`. Deciding it once, at the
-    /// seeding site, keeps that eight-off comparison from looking like a seed test at the
-    /// point of use.
+    /// Under legacy seeding this is a sign test on the seed *after* the seeding ritual has
+    /// advanced it by 8, i.e. really `seed > -8`. Decided once, at the seeding site, so that
+    /// eight-off comparison does not look like a plain seed test at the point of use.
     jitter_enabled: bool,
 }
 
-/// Per-segment angles, plus the one quantity the Fortran recomputes per subfault and
-/// needn't.
+/// Per-segment angles, plus the corner-frequency coefficient hoisted out of the subfault
+/// loops.
 struct SegmentAngles {
     strike_rad: f32,
     dip_rad: f32,
@@ -441,11 +440,11 @@ impl SegmentAngles {
     }
 }
 
-/// The generator and the three pre-drawn blocks, in the order the Fortran draws them.
+/// The generator and the pre-drawn blocks. **The fill order is the draw order**, and the draw
+/// order is part of the answer.
 struct Deviates {
-    /// Whether the rupture-time jitter draw happens. Under modern seeding it always
-    /// does; legacy reproduces the Fortran's `irand + 8 > 0` sign test, which is an
-    /// artifact of `init_random_seed` mutating its argument in place.
+    /// Whether the rupture-time jitter draw happens. Under modern seeding it always does;
+    /// legacy reproduces the old `seed + 8 > 0` sign test.
     jitter_enabled: bool,
 
     /// `rna` / `rnb` — the vertical component's uniforms.
@@ -470,8 +469,9 @@ fn seed_and_predraw(
 ) -> (DrawSource, Deviates) {
     let (mut rng, jitter_enabled) = DrawSource::for_station(seed);
 
-    // `nr` values, not `mmv`. `vertical_radiation_spectrum` reads exactly this many, and
-    // the Fortran reserved and zeroed 262144 to use 1000 of them.
+    // Exactly `radv_sample_count` values, which is what `vertical_radiation_spectrum` reads.
+    // Filled by two SEPARATE sequential passes -- see the note there on why they must not be
+    // interleaved.
     let mut radv_uniform_a = vec![0.0f32; radv_sample_count];
     let mut radv_uniform_b = vec![0.0f32; radv_sample_count];
     fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_a);
@@ -497,22 +497,21 @@ fn seed_and_predraw(
 
 /// The velocity-model layer a source at `depth_km` sits in.
 ///
-/// # The defect this replaces (§3.4)
+/// # The defect this replaces
 ///
 /// The two subfault passes disagreed about what to do when a source is deeper than the
 /// whole model, and **both answers were wrong**:
 ///
 /// * the window pass had no fallback at all, so it silently reused the *previous
 ///   subfault's* velocity — and on the very first subfault of the first station the
-///   Fortran read uninitialised memory. The port pinned that to 0.0, which is a choice
-///   rather than the original's behaviour, and no more defensible.
+///   original read uninitialised memory. Pinning that to 0.0 would be a choice rather than
+///   a behaviour, and no more defensible.
 /// * the subfault pass fell back to layer 0 for the velocity — which after
 ///   `insert_air_layer` is the **air layer**, `vsh = 0.0005 km/s` — and set `ksrc` to
 ///   `layer_count`, one PAST the model. That index then reached
 ///   `site_amplification_factors`, which read a zeroed `Layer`, computed
 ///   `ln(0 / (bz*pz)) = -inf`, and exponentiated it back to a gain of **zero**. A
-///   subfault below the model contributed nothing at all. The Fortran prints ` wrong!`
-///   at that point, which is a fair summary.
+///   subfault below the model contributed nothing at all.
 ///
 /// Both now take the deepest real layer, which is the only physically sensible reading:
 /// a source below the model is in the half-space, and the half-space is the bottom layer.
@@ -555,19 +554,17 @@ fn time_window_pass(
     for (i, j) in seg.depth_major() {
         let ray = geom.at(i, j);
         // A subfault below the whole model takes the DEEPEST layer -- see
-        // `source_layer_for`, and §3.4 for why neither of the original fallbacks was
-        // defensible.
+        // [`source_layer_for`] for why neither of the original fallbacks was defensible.
         let shear_velocity_km_s = vmod[source_layer_for(vmod, run, ray.depth_km)].vsh_km_s as f32;
 
         let rvf = rupture.factor(ray.depth_km);
 
-        // The last table segment this distance is past. The Fortran scans the whole
-        // table letting later matches overwrite earlier ones, which is `.last()` -- NOT
-        // `.find()`, since the table ascends and the first match is the wrong end.
+        // The last table segment this distance is past. `.last()`, NOT `.find()` -- the table
+        // ascends, so the first match is the wrong end.
         //
-        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches
-        // NOTHING and the duration terms stay zero. The Fortran leaves them undefined
-        // there; zero is this port's choice, and `unwrap_or` is where it lives.
+        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches NOTHING and
+        // the duration terms stay zero. That zero is a deliberate choice for an undefined
+        // case, and `unwrap_or` is where it lives.
         let bin = path_duration
             .iter()
             .take_while(|s| ray.slant_km > s.start_km)
@@ -706,9 +703,10 @@ fn subfault_pass(
         for &ray_type in &config.rayset {
             let kind = ray_type.kind();
 
-            // The tracing runs even for a straight ray: the Fortran calls
-            // green_function unconditionally and overwrites the results below, and
-            // type 0 borrows type 1's tracing to do it.
+            // The tracing runs even for a straight ray -- type 0 borrows type 1's tracing and
+            // then the straight-line values below overwrite the results. Wasteful, but the
+            // tracer also advances no random state, so removing it is safe only if you are
+            // sure of that.
             let g = green_function(
                 &mut ray, vmod, run.layer_count, ray_geometry.depth_km,
                 ray_geometry.horiz_km, ray_type.trace_type(), WaveMode::Sh,
@@ -829,21 +827,18 @@ fn subfault_pass(
             // relies on that and clips; see `PORTING_RULES.md` §7.
             //
             // `trunc()` is written explicitly even though `as i32` alone would round the
-            // same way, because it is the rounding MODE that is load-bearing here and a
-            // bare cast does not say so. This was a `truncate_toward_zero` shim in
-            // `fort.rs` until §5.3 -- a function whose body was `x.trunc() as i32`, i.e.
-            // documentation with parentheses around it.
+            // same way, because it is the rounding MODE that is load-bearing here and a bare
+            // cast does not say so.
             let kst = (ratim / run.dt).trunc() as i32 + (sub_tstart / run.dt).trunc() as i32;
 
-            // ONE DRAW, AND IT MUST STAY. The Fortran loops `k = 1, nsum` here, draws a
-            // uniform, and turns it into a sub-event time offset. But `nsum` was frozen
-            // at 1 in 2004, so the loop ran once and the next statement was
-            // `if (nsum.eq.1) k2 = 0` -- the offset was computed and then thrown away.
+            // ONE DRAW, AND IT MUST STAY. A sub-event loop here once drew a uniform and
+            // turned it into a time offset, but the sub-event count was frozen at 1 and the
+            // offset was then unconditionally zeroed -- computed and thrown away.
             //
-            // The arithmetic is gone. The draw is not: it advances the shared generator
-            // once per (subfault, ray), and every sample after it depends on where the
-            // stream ends up. Deleting this as "obviously dead code" changes every
-            // waveform in the program.
+            // The arithmetic is gone. THE DRAW IS NOT. It advances the shared generator once
+            // per (subfault, ray), and every sample drawn after it depends on where the stream
+            // ends up. Deleting this as obviously-dead code changes every waveform in the
+            // program. See `PHYSICS.md` §9.
             let _stream_advance = rng.next_f32();
 
             accumulate_subfault(acc, &subfault_acc, subfault.slip, kst, np2, run.ndata);
@@ -853,17 +848,16 @@ fn subfault_pass(
 
 /// Place one subfault's `np2`-sample contribution into the station accumulator.
 ///
-/// `start_sample` is the Fortran's 1-based sample number and **can be negative**:
-/// `int()` truncates toward zero and `sub_tstart` can be negative. Samples landing
-/// before sample 1 are discarded rather than written, matching the Fortran, whose output
-/// only ever reads `DS(1..ndata)`.
+/// `start_sample` is a 1-based sample number and **can be negative**: truncation is toward
+/// zero and the window start can precede the origin time. Samples landing before sample 1 are
+/// discarded rather than written.
 ///
-/// §2.6 defect 1 lives here: sample 1 of the subfault's trace lands on `start_sample`,
-/// not on `start_sample + 1`. The Fortran read `stdd(li - k2, l)`, so its first iteration
-/// read index 0 -- one element before the column, which nothing writes -- and every
-/// subfault's contribution arrived one sample late. See `REFACTOR.md` §2.6 for the
-/// analysis and `PORTING_RULES.md` §7 for the aliasing that made that read return zero
-/// rather than crash.
+/// # A fixed off-by-one
+///
+/// Sample 1 of the subfault's trace lands on `start_sample`, not on `start_sample + 1`. The
+/// original indexed one element before the column -- which nothing wrote, and which aliasing
+/// made read as zero rather than crash -- so every subfault's contribution arrived one sample
+/// late. Corrected here.
 fn accumulate_subfault(
     acc: &mut [Vec<f32>; 3],
     subfault_acc: &[Array1<f32>; 3],
@@ -879,13 +873,11 @@ fn accumulate_subfault(
     // before the record starts.
     let first_sample = start_sample.max(1);
 
-    // BOTH ends can put the window entirely outside the record, and they are different
-    // cases: `last < 1` is a contribution that ends before the record begins (a large
-    // negative `sub_tstart`), and `last < first` is one that begins after it ends
-    // (`start_sample > ndata`, which a long-path ray at a far station reaches). The
-    // Fortran's `do while (li <= kend)` covers both by simply not iterating. Written as
-    // an explicit range, the second case computes a negative length and must be rejected
-    // before it is cast — this is exactly what the parity gate caught when it was not.
+    // BOTH ends can put the window entirely outside the record, and they are different cases:
+    // one contribution ends before the record begins (a large negative start), another begins
+    // after it ends (a long-path ray at a far station). AS AN EXPLICIT RANGE THE SECOND CASE
+    // COMPUTES A NEGATIVE LENGTH, which must be rejected before it is cast to `usize` or it
+    // wraps to something enormous. A gate caught exactly that once.
     if last_sample < first_sample {
         return;
     }
@@ -894,9 +886,8 @@ fn accumulate_subfault(
     let count = (last_sample - first_sample + 1) as usize;
     let dst = first_sample as usize - 1;
 
-    // `scaled_add` IS this operation: `y += alpha * x`, the axpy every linear-algebra
-    // library names. Written as a nested pair of index-sliced loops it read as bookkeeping;
-    // the slicing above is the part that carries the actual thought.
+    // `scaled_add` IS this operation: `y += alpha * x`, the axpy every linear-algebra library
+    // names. The clipping above is the part that carries the actual thought.
     for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
         ArrayViewMut1::from(&mut out[dst..dst + count])
             .scaled_add(weight, &contribution.slice(s![skip..skip + count]));
@@ -905,9 +896,8 @@ fn accumulate_subfault(
 
 /// One segment of the piecewise-linear duration-versus-distance table.
 ///
-/// The Fortran keeps these as three parallel `real dur(50)` arrays plus an `ndur` count.
-/// Every read of one is at the same index as the other two, so this is one value per
-/// segment — the same argument `Subfault` and `SubfaultRay` already make (§2.3).
+/// One value per segment rather than three parallel arrays: every read of one field is at the
+/// same index as the other two, so they belong together.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DurationSegment {
     /// `rdur` — distance at which this segment starts, km.
@@ -920,16 +910,15 @@ struct DurationSegment {
 
 /// The path-duration model: a piecewise-linear duration-versus-distance table.
 ///
-/// The `50` the Fortran sized its arrays at is gone with the parallel arrays. It was a
-/// ceiling nothing enforced and the largest model uses 8 of it; `len()` is now the count,
-/// so `ndur` is gone too — a length and a capacity can no longer disagree.
+/// `len()` is the segment count, so a length and a capacity can no longer disagree. The largest
+/// model here uses eight segments.
 type PathDuration = Vec<DurationSegment>;
 
 /// Build the path-duration table.
 ///
-/// Total by construction now that the model is an enum: the Fortran's
-/// undefined-`ndur` path is unrepresentable, and rejecting a bad integer happens
-/// once, in `PathDurationModel::from_deck`.
+/// Total by construction, now that the model is an enum: there is no way to reach an
+/// uninitialised table, and rejecting a bad selector happens once, in
+/// [`PathDurationModel::from_deck`].
 fn path_duration_table(model: PathDurationModel) -> PathDuration {
     /// The single-segment models give their slope directly and have no breakpoints.
     fn constant_slope(slope_s_per_km: f32) -> PathDuration {
@@ -1004,17 +993,16 @@ struct SourceScale {
 /// Convert relative slip to relative moment, then normalise to unit average
 /// weight, mutating `stoch.segments[..].slip` in place.
 ///
-/// Three passes over the subfault grid, in the Fortran's order:
+/// Three passes over the subfault grid, in this order:
 ///
 /// 1. average subfault size, and the maximum absolute slip (computed and discarded)
 /// 2. slip → moment via the rigidity `xmu`, accumulating `xsum`, `fce_avg`,
 ///    `trise_avg` and a count of *all* subfaults
 /// 3. re-count only the subfaults above 0.001 and rescale so their mean weight is 1
 ///
-/// The two counts are different and both matter: pass 2's count normalises the
-/// averages, pass 3's is the one that reaches `moment_scale`. The Fortran shadows one
-/// `subfault_count` with the other, so only the second survives — hence only that one is
-/// returned.
+/// The two counts are different and both matter: pass 2's normalises the averages, pass 3's is
+/// the one that reaches `moment_scale` — the `N` of Graves & Pitarka (2010) eq. 12. Only the
+/// second is returned, because only it is read downstream.
 fn normalise_source(
     stoch: &mut StochModel,
     layer_count: usize,
@@ -1025,9 +1013,8 @@ fn normalise_source(
     let nevnt = stoch.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
-    // The Fortran also accumulates `slip_max` over every subfault here. Nothing
-    // reads it: its only consumer is the commented-out `!print*,'Maximum slip '`
-    // at hb_high_ref.f:683. Dropped, along with the O(subfault_count) loop that fed it.
+    // A maximum-slip accumulation over every subfault used to happen here. Nothing read it, so
+    // it is gone along with the whole loop that fed it.
     let mut dlm = 0.0f32;
     for s in &stoch.segments {
         dlm += (s.subfault_length_km * s.subfault_width_km).sqrt();
@@ -1035,9 +1022,9 @@ fn normalise_source(
     dlm /= nevnt as f32;
 
     // --- pass 2: relative slip to relative moment -----------------------------
-    // The Fortran also accumulates `fce_avg` and `trise_avg` in this loop, doing a
-    // rupture-velocity taper, an `alphaT` evaluation (with a sine and a square root)
-    // and four more arithmetic ops PER SUBFAULT. All of it is dead:
+    // An average corner frequency and rise time were also accumulated here, at the cost of a
+    // rupture-velocity taper, an `alpha_tau` evaluation and several more operations PER
+    // SUBFAULT. All of it fed a quantity nothing reads:
     //
     //   fce_avg, trise_avg -> fcmain -> bigC3  (hb_high_ref.f:805)
     //
@@ -1054,20 +1041,18 @@ fn normalise_source(
     for segment in &mut stoch.segments {
         let dwdj = segment.subfault_width_km * (segment.dip_deg * deg_to_rad).sin();
         let top_depth_km = segment.top_depth_km;
-        // vsh_km_s and density_g_cm3 are real*8 and the Fortran's dx/dw real*4, so the
-        // WHOLE product below is computed in double (dx/dw promoted) and narrows only on
-        // assignment to xmu, which is implicit real*4. Narrowing earlier shifts every
+        // THE WHOLE PRODUCT BELOW IS COMPUTED IN f64 and narrows only on assignment to `xmu`.
+        // Narrowing earlier -- for instance by keeping the dimensions in `f32` -- shifts every
         // subfault moment by an ulp or two.
         let (length_km, width_km) =
             (segment.subfault_length_km as f64, segment.subfault_width_km as f64);
 
-        // Depth-major, which is storage order, so `xsum` accumulates in the Fortran's
-        // order without any index arithmetic. Rigidity is per depth row, not per
-        // subfault, which is why the row is the unit here.
+        // Depth-major, which is storage order, so `xsum` accumulates without index arithmetic.
+        // Rigidity is per depth row, not per subfault, which is why the row is the unit.
         for (row_index, row) in segment.depth_rows_mut().enumerate() {
             let zdep = top_depth_km + (row_index as f32 + 0.5) * dwdj;
-            // Layer lookup. Falls through with k = j0+1 if zdep is below the
-            // model, which the Fortran then indexes -- so the fall-through is
+            // Layer lookup. FALLS THROUGH to `layer_count` -- one past the model -- when the
+            // depth is below every layer, and that index is then used. The fall-through is
             // load-bearing, not an error path.
             let k = (0..layer_count).find(|&kk| zdep <= vmod_in[kk].depth_km).unwrap_or(layer_count);
             let xmu = (vmod_in[k].vsh_km_s * vmod_in[k].vsh_km_s * vmod_in[k].density_g_cm3
@@ -1141,7 +1126,7 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
 
     let mut fr = 0.0f32;
     if (0.0..=180.0).contains(&avgrak) {
-        // sqrt(x*x) rather than abs(x); the Fortran writes it this way.
+        // `sqrt(x*x)` rather than `abs(x)`: kept because the two can differ in the last bit.
         fr = 1.0 - ((avgrak - 90.0) * (avgrak - 90.0)).sqrt() / 90.0;
     }
 
@@ -1152,7 +1137,7 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// Reference implementation: the Fortran's own loop, transliterated.
+    /// The straightforward sample-at-a-time loop, as an independent check on the slice form.
     fn accumulate_reference(
         acc: &mut [Vec<f32>; 3],
         subfault_acc: &[Array1<f32>; 3],
@@ -1178,12 +1163,12 @@ mod tests {
     /// The slice form must agree with the loop form at every alignment, including the
     /// two that put the window entirely outside the record.
     ///
-    /// `start_sample > ndata` is the case §2.8 got wrong: it computes a negative length,
-    /// and casting that to `usize` wraps. The parity gate caught it on one deck
-    /// (`rayset=1,3`, where the Moho multiple makes the path long enough to start past
-    /// the end of the record); this pins it without needing a 22-deck run.
+    /// `start_sample > ndata` is the case that was once wrong: it computes a negative length,
+    /// and casting that to `usize` wraps. It is reachable -- a Moho multiple can make the path
+    /// long enough to start past the end of the record -- and this pins it directly rather
+    /// than relying on a deck that happens to trigger it.
     #[test]
-    fn accumulate_matches_the_fortran_loop_at_every_alignment() {
+    fn accumulate_matches_the_reference_loop_at_every_alignment() {
         let np2 = 8usize;
         let ndata = 10usize;
         let subfault_acc: [Array1<f32>; 3] =

@@ -482,14 +482,14 @@ mod tests {
     #[test]
     fn the_production_gamma_argument_survives_narrowing_to_f32() {
         let gsa = 3.5062997341156006f64;
-        let fortran = 3.346549271566832f64;
+        let reference = 3.346549271566832f64;
         let got = gamma(gsa);
         assert!(
-            (got - fortran).abs() / fortran < 1e-15,
-            "gamma({gsa}) = {got}, Fortran gave {fortran}"
+            (got - reference).abs() / reference < 1e-15,
+            "gamma({gsa}) = {got}, reference value {reference}"
         );
         // The consumer narrows to f32; show the difference does not survive that.
-        assert_eq!((got as f32).to_bits(), (fortran as f32).to_bits());
+        assert_eq!((got as f32).to_bits(), (reference as f32).to_bits());
     }
 
     /// A pole must be loud. The caller never checks, so a finite sentinel would propagate a
