@@ -982,8 +982,10 @@ Numbered after §2.7 because it was planned later; sequenced before it deliberat
 moves at once. Doing the structural work first means anything that moves when §2.7 lands
 is unambiguously the RNG rather than a refactor riding along.
 
-Nine commits, `7397c36..3745bb2`. One NUMERIC, the rest bit-exact and gated per commit by
-`run_selfparity.sh HEAD~1`.
+Thirteen commits, `7397c36..HEAD`. One NUMERIC, the rest bit-exact and gated per commit
+by `run_selfparity.sh HEAD~1`. The campaign below was run at commit 8; `run_selfparity`
+against that commit is bit-identical at HEAD, so its verdict carries -- proven rather than
+assumed, as the gate policy above requires.
 
 **The pi commit is the only numeric one.** Nine literals — the Fortran's own truncations,
 carried faithfully while bit-identity was the contract — became `std::consts`. Eight were
@@ -1056,13 +1058,39 @@ plus a 236-line shared module. What improved is not line count: `nm == 3 .or. nm
 appears zero times instead of four, the two `panic!("unreachable")` arms are gone, and the
 velocity model can gain a field without seven edit sites and no compiler help.
 
-**What §2.8 did NOT do**, and is still open: `green_function`'s four copy-pasted
-descending loops and three Moho scans; the `simulate()` decomposition (still ~500 lines —
-`REFACTOR.md` §1.3 named `time_window_pass`/`subfault_pass` specifically and they are
-still not extracted); the deck's `read_values` + positional-closure pattern at 13 call
-sites; `GeoPoint` for the lat-first/lon-first mismatch between `distance_azimuth` and
-`subfault_geometry`; and the two deliberately-last index sites (`ksrc` coming back one
-past the model, and the sample accumulate where §2.6 defect 1 lived).
+**The second half** (commits 9-12) finished the decomposition. `green_function`'s
+segment builder was 60 lines of which ~45 were duplicates — the same descending loop four
+times, the same Moho scan three times — and is now a `RayPath` with three methods and a
+`match` on `RayShape`. `simulate()` went 500 lines to 213 by extracting the passes §1.3
+named. The deck's 13 positional read sites became an `Items` cursor. `GeoPoint` retired
+the lat-first/lon-first mismatch between the file's two entry points.
+
+Three more `panic!("unreachable")` arms are gone in total, all of which existed only
+because an integer could hold a value the domain could not, plus two latent bugs the deck
+cursor exposed: indexing a `/`-terminated short read was an index panic, and four
+`i32 as usize` counts would wrap a negative into an abort inside `Vec::with_capacity`.
+
+**The gate earned its keep, once.** The first `accumulate_subfault` guarded the window
+*ending* before the record but not the window *starting* after it ends, which computes a
+negative length that wraps on the cast. `run_selfparity` failed on exactly one deck of 22
+— `rayset=1,3`, where the Moho multiple makes a path long enough for a subfault to start
+past the end of the record. Inspection would not have found it and the 21 green decks
+would have read as success. It is now pinned by a unit test that runs the slice form and
+the Fortran's own loop side by side at every alignment, so the edge no longer depends on
+a 22-deck run to notice.
+
+**Still open**, deliberately: the two index sites where a sentinel and an `Option` carry
+the same signal — `ksrc` coming back as `layer_count`, one past the model, which
+`site_amplification_factors` then indexes, and which is only INERT if the replacement
+reproduces the zero read exactly. Naming that with an enum is worth doing and was not
+worth rushing at the end of a pass.
+
+**Size, final.** `crates/hb_high/src` 4,899 → 5,633, up 15%. Commits 9-12 *added* about
+400 lines net while deleting ~45 lines of duplication, because eleven extracted functions
+and four new types cost more in signatures and doc comments than the bodies they replaced
+saved. That is the trade, stated plainly: `simulate()` is a function you can read in one
+sitting and `green_function` no longer says the same thing four times, and both cost
+lines to achieve.
 
 ### 2.7 `rng.rs` → `rand` / `rand_pcg` — LAST, and carefully
 
