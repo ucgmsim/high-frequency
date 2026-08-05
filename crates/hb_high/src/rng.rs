@@ -120,6 +120,92 @@ impl Draws for Pcg32 {
     }
 }
 
+/// A draw source for **validation only**, and frozen forever.
+///
+/// # Why this exists
+///
+/// The cheap per-commit gate compares two builds of this program over the deck ladder.
+/// That only means anything if both builds see the *same* draws — and the whole point of
+/// Stage 3 is that the production generator is going to change. Driving both sides from a
+/// source that is not the production generator makes the comparison independent of it: a
+/// difference is then attributable to the code, because the draws provably did not move.
+///
+/// # Frozen means frozen
+///
+/// **Do not change this algorithm, ever.** Not to improve it, not to match a new
+/// production engine, not to make it faster. Its only job is to produce the same sequence
+/// today and in five years, so that a baseline recorded now is still comparable then. It
+/// has no statistical burden to carry: nothing scientific is computed from it, and the
+/// only property it needs is a decent spread over `[0, 1)` so the code paths exercised
+/// are representative.
+///
+/// SplitMix64 (Steele et al. 2014), chosen because it is short enough to be obviously
+/// correct and has no state beyond a counter. The `[0, 1)` conversion is the same top-24-
+/// bits form [`Pcg32::next_f32`] uses, and for the same reason.
+#[derive(Clone, Debug)]
+pub struct FixtureDraws {
+    state: u64,
+}
+
+impl FixtureDraws {
+    /// The deck's seed is folded in so different seeds still give different runs — the
+    /// gate compares two binaries at matched seeds, not one binary against a constant.
+    pub fn seed(irand: i32) -> Self {
+        Self { state: (irand as i64 as u64) ^ 0x9E37_79B9_7F4A_7C15 }
+    }
+}
+
+impl Draws for FixtureDraws {
+    fn next_f32(&mut self) -> f32 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // Top 24 bits over 2^24, exactly as `Pcg32::next_f32` does, so the `[0, 1)`
+        // contract holds identically.
+        ((z >> 40) as u32) as f32 / 16777216.0
+    }
+}
+
+/// Which draw source a run uses.
+///
+/// Chosen once per run from the `HB_FIXTURE_RNG` environment variable, because the deck
+/// format is a downstream interface contract and cannot grow a field. Anything other than
+/// the variable being set means production.
+pub enum DrawSource {
+    Production(Pcg32),
+    /// Validation only — see [`FixtureDraws`]. Never reachable without the env var.
+    Fixture(FixtureDraws),
+}
+
+impl DrawSource {
+    /// Returns the source and the **mutated seed**, which gates the rupture-time jitter.
+    ///
+    /// `init_random_seed` advances `irand` by [`SEED_WORDS`], and the Fortran reads the
+    /// advanced value at `:1366`. That is pure arithmetic on the deck's seed, so both
+    /// sources report it identically and the jitter branch does not depend on which
+    /// source is in use — otherwise the gate would be comparing two different programs.
+    pub fn for_run(irand: i32) -> (Self, i32) {
+        if std::env::var_os("HB_FIXTURE_RNG").is_some() {
+            (Self::Fixture(FixtureDraws::seed(irand)), irand + SEED_WORDS)
+        } else {
+            let (rng, seeded) = Pcg32::seed(irand);
+            (Self::Production(rng), seeded)
+        }
+    }
+}
+
+impl Draws for DrawSource {
+    #[inline]
+    fn next_f32(&mut self) -> f32 {
+        match self {
+            Self::Production(g) => g.next_f32(),
+            Self::Fixture(g) => g.next_f32(),
+        }
+    }
+}
+
 /// `subroutine fill_normal_deviates(count,out)` — `hb_high_ref.f:4033`.
 ///
 /// Box-Muller pairs, then the whole vector is rescaled so that `sum(out**2) == count`

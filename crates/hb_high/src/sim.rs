@@ -34,7 +34,7 @@ use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use crate::ray::green_function;
-use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Draws, Pcg32};
+use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Draws, DrawSource};
 use crate::site::{site_amplification_factors, apply_site_amplification};
 use crate::state::{params, RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::stochastic_spectrum;
@@ -458,8 +458,8 @@ fn seed_and_predraw(
     irand: i32,
     radv_sample_count: usize,
     draw_normals: bool,
-) -> (Pcg32, Deviates) {
-    let (mut rng, seeded_irand) = Pcg32::seed(irand);
+) -> (DrawSource, Deviates) {
+    let (mut rng, seeded_irand) = DrawSource::for_run(irand);
 
     // `nr` values, not `mmv`. `vertical_radiation_spectrum` reads exactly this many, and
     // the Fortran reserved and zeroed 262144 to use 1000 of them.
