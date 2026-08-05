@@ -222,10 +222,14 @@ pub fn vertical_radiation_spectrum(
     // FILLED by two separate sequential passes -- draws 1..nr into `a`, then nr+1..2nr
     // into `b` -- and that must not become one interleaved pass, or every vertical
     // component moves. Zipping the consumption is free; zipping the fill is not.
+    // The two limits are fixed above, so their cosines are loop invariants -- they were
+    // being recomputed on every one of `sample_count` iterations, 224,000 wasted `cos`
+    // per medium-fault run.
+    let (cos_tha1, cos_tha2) = (tha1.cos(), tha2.cos());
     let mut radv = 0.0f32;
     for (&ua, &ub) in uniform_a[..sample_count].iter().zip(uniform_b) {
         // Uniform in cos(th) between the clamped limits.
-        let th = ((1.0 - ua) * tha1.cos() + ua * tha2.cos()).acos();
+        let th = ((1.0 - ua) * cos_tha1 + ua * cos_tha2).acos();
         let fa = 360.0 * pu * ub;
         let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
         let rads = rdsva * th.sin();

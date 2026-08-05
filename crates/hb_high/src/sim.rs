@@ -662,9 +662,10 @@ fn subfault_pass(
         let ray_geometry = geom.at(i, j);
         let subfault_window_s = windows.window_s[seg.grid_index(i, j)];
 
-        for component in &mut subfault_acc {
-            component.fill(0.0);
-        }
+        // No pre-zeroing. `apply_radiation_and_invert` ASSIGNS over `time_series[..np2]`
+        // -- `*sample = fac * bin.re`, not `+=` -- for all three components before
+        // `accumulate_subfault` reads any of them, so every element is written before it
+        // is read. The fill was 192 KB of memset per subfault that nothing could observe.
 
         // This pass DOES default the velocity and density before the lookup, unlike the
         // window pass, which carries the previous subfault's value.

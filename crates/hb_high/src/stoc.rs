@@ -135,6 +135,13 @@ pub fn stochastic_spectrum(
 
     // Bin 0 (DC) stays zero; bins 1..fold_count get the shape. Slicing both from 1 keeps
     // the two arrays' correspondence in the types instead of in two matching `[i]`s.
+    // Sized at `np2` even though the highest index ever read is `fold_count - 1`, i.e.
+    // half of it is never touched. Shrinking it to `fold_count` MEASURED SLOWER: at np2 =
+    // 16384 the `f64` buffer is exactly 128 KB, which is glibc's mmap threshold, so
+    // `calloc` hands back fresh already-zero pages and the zeroing costs nothing. At
+    // `fold_count` it is 64 KB, comes off the heap, and has to be memset for real.
+    // +5.4M instructions per run for "using less memory". See REFACTOR.md §2.6b, which
+    // measured the same effect from the other direction.
     let mut as_ = vec![0.0f64; np2];
     for ((shape, &fr), &path_fr) in as_[1..fold_count]
         .iter_mut()
