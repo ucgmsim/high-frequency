@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ndarray::{azip, ArrayViewMut1};
 use rustfft::{Fft, FftDirection, FftPlanner};
 
 // `complex*8` / `complex*16` are `num_complex::Complex`, re-exported here because this is
@@ -158,8 +159,8 @@ pub fn remove_quadratic_trend(dt: f32, acceleration: &mut [f32]) {
     // for that reason; `a3` keeps the same value it had (`i - 1` for Fortran index `i`,
     // which is `k + 2` here) and the multiply order is unchanged, so this too is
     // bit-exact.
-    for (k, sample) in acceleration[2..].iter_mut().enumerate() {
+    azip!((index k, sample in ArrayViewMut1::from(&mut acceleration[2..])) {
         let a3 = (k + 2) as f32;
         *sample = *sample + c1 + c2 * a3 * dt;
-    }
+    });
 }

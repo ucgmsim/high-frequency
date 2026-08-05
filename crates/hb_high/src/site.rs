@@ -1,5 +1,7 @@
 //! Site amplification.
 
+use ndarray::{azip, ArrayView1, ArrayViewMut1};
+
 use crate::fft::Complex32;
 use crate::state::VelocityModel;
 
@@ -32,7 +34,6 @@ use crate::state::VelocityModel;
 pub fn site_amplification_factors(
     vmod: &VelocityModel,
     source_layer: usize,
-    frequency_count: usize,
     log_frequency: &[f32],
     factors: &mut [f32],
 ) {
@@ -40,7 +41,14 @@ pub fn site_amplification_factors(
 
     // Both the frequency table and the velocity model are 0-based since §2.3. The two
     // tables are walked in lockstep, one factor per frequency.
-    for (factor, &log_freq) in factors[..frequency_count].iter_mut().zip(log_frequency) {
+    //
+    // `frequency_count` was a third argument saying how many, and equalled both lengths --
+    // the same redundancy §5.3 deleted from the radiation routines. `azip!` asserts the two
+    // agree instead of letting `zip` silently stop at the shorter.
+    azip!((
+        factor in ArrayViewMut1::from(factors),
+        &log_freq in ArrayView1::from(log_frequency),
+    ) {
         let stt = 0.25 / log_freq.exp();
 
         // Starts at the layer below the air layer: the Fortran's layer 2.
@@ -68,7 +76,7 @@ pub fn site_amplification_factors(
         let pz = ((pz as f64 + vmod[i].density_g_cm3 * (stt - tt) as f64) / stt as f64) as f32;
 
         *factor = 0.5 * (vdsrc / (bz * pz)).ln();
-    }
+    });
 }
 
 /// `subroutine apply_site_amplification(np2,spectrum,frequency_hz,table_count,fn,factors)` — `hb_high_ref.f:3120`.

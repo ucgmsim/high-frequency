@@ -420,7 +420,7 @@ fn bench_spectrum(c: &mut Criterion) {
     let (fn_, mut an) = site_table();
     group.throughput(Throughput::Elements(1));
     group.bench_function("site_amplification_factors", |b| {
-        b.iter(|| site_amplification_factors(&v, black_box(20), black_box(20), fn_.as_slice(), an.as_mut_slice()))
+        b.iter(|| site_amplification_factors(&v, black_box(20), &fn_[..20], &mut an[..20]))
     });
 
     group.finish();

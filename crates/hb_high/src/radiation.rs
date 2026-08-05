@@ -2,6 +2,8 @@
 //!
 //! Tier 0 holds `RDATN` only; `RADFRQ_lin` and `RADV_lin` land here in tier 2.
 
+use ndarray::{azip, ArrayView1, ArrayViewMut1};
+
 /// Fault orientation and the ray's arrival direction — the five angles every radiation
 /// calculation takes, and takes in the same order.
 ///
@@ -153,7 +155,10 @@ pub fn horizontal_radiation_spectrum(
 
     let radvh = (radv / sample_count as f32).sqrt();
 
-    for (gain, &freq) in radiation.iter_mut().zip(frequency_hz) {
+    azip!((
+        gain in ArrayViewMut1::from(radiation),
+        &freq in ArrayView1::from(frequency_hz),
+    ) {
         let del = if freq <= fr1 {
             radmin
         } else if freq <= fr2 {
@@ -164,7 +169,7 @@ pub fn horizontal_radiation_spectrum(
             1.0
         };
         *gain = polarity * (rdx + (radvh - rdx) * del);
-    }
+    });
 
     fr1
 }
@@ -237,7 +242,10 @@ pub fn vertical_radiation_spectrum(
     // blend between. The Fortran writes `rdx` first and then overwrites or adds to it,
     // which reads as three branches only once you notice the fall-through; written as
     // one expression per bin it is visibly a piecewise function.
-    for (gain, &freq) in radiation.iter_mut().zip(frequency_hz) {
+    azip!((
+        gain in ArrayViewMut1::from(radiation),
+        &freq in ArrayView1::from(frequency_hz),
+    ) {
         *gain = if freq <= fr1 {
             rdx
         } else if freq <= fr2 {
@@ -245,7 +253,7 @@ pub fn vertical_radiation_spectrum(
         } else {
             radvh
         };
-    }
+    });
 
     fr1
 }

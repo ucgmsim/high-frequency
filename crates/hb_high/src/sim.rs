@@ -28,7 +28,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
 };
-use ndarray::{s, Array1, ArrayView1};
+use ndarray::{s, Array1, ArrayView1, ArrayViewMut1};
 
 use crate::fft::Complex32;
 use crate::geom::{subfault_geometry, FaultPlane, GeoPoint, SubfaultGeometry};
@@ -731,7 +731,7 @@ fn subfault_pass(
 
             if config.site_amp {
                 site_amplification_factors(
-                    vmod, ksrc, run.site_table_len, siteamp_log_freq, &mut siteamp_factors,
+                    vmod, ksrc, siteamp_log_freq, &mut siteamp_factors,
                 );
                 for spec in &mut spectrum {
                     apply_site_amplification(
@@ -878,13 +878,12 @@ fn accumulate_subfault(
     let count = (last_sample - first_sample + 1) as usize;
     let dst = first_sample as usize - 1;
 
+    // `scaled_add` IS this operation: `y += alpha * x`, the axpy every linear-algebra
+    // library names. Written as a nested pair of index-sliced loops it read as bookkeeping;
+    // the slicing above is the part that carries the actual thought.
     for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
-        for (slot, &value) in out[dst..dst + count]
-            .iter_mut()
-            .zip(contribution.slice(s![skip..skip + count]))
-        {
-            *slot += weight * value;
-        }
+        ArrayViewMut1::from(&mut out[dst..dst + count])
+            .scaled_add(weight, &contribution.slice(s![skip..skip + count]));
     }
 }
 

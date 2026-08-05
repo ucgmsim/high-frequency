@@ -1,6 +1,6 @@
 //! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
-use ndarray::{azip, s, Array1, ArrayView1};
+use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
@@ -220,13 +220,19 @@ pub fn stochastic_spectrum(
     // window shape, which is fixed for the whole run, and `t` is `index * dt` on a fixed
     // grid. So the whole table is a per-segment constant and arrives precomputed. That
     // removed 5.5M `powf` per medium-fault run computing at most `np2` distinct values.
+    // The recurrence is what stops this being a plain elementwise expression, and `scan`
+    // is the shape that says so: `aa * power` is per-element, `decay` is carried. Built by
+    // scanning rather than zero-filling then overwriting -- `np2` floats were being written
+    // twice per call, three calls per subfault.
     let decay_per_sample = (-(c as f64) * dt as f64).exp();
-    let mut decay = 1.0f64; // exp(0) at the first sample
-    let mut w = vec![0.0f32; np2];
-    for (envelope, &power) in w.iter_mut().zip(envelope_power) {
-        *envelope = aa * power * decay as f32;
-        decay *= decay_per_sample;
-    }
+    let w: Vec<f32> = envelope_power
+        .iter()
+        .scan(1.0f64, |decay, &power| {
+            let envelope = aa * power * *decay as f32;
+            *decay *= decay_per_sample; // exp(0) at the first sample, so this advances after
+            Some(envelope)
+        })
+        .collect();
 
     let beta = shear_velocity_km_s * 100000.0;
     let cc = rp * fs * prtitn / (4.0 * pai * density_g_cm3 * (beta * beta * beta));
@@ -242,12 +248,20 @@ pub fn stochastic_spectrum(
     // `fold_count` it is 64 KB, comes off the heap, and has to be memset for real.
     // +5.4M instructions per run for "using less memory". See REFACTOR.md §2.6b, which
     // measured the same effect from the other direction.
+    // Kept a `Vec` rather than an `Array1` precisely so the allocation above stays the one
+    // that was measured: `vec![0.0f64; n]` reaches `alloc_zeroed`, which is what puts it on
+    // the mmap path at 128 KB.
+    //
+    // `azip!` rather than a nested `.zip().zip()`: three arrays walked together read as
+    // three named bindings instead of a `((shape, fr), path_fr)` tuple unpacked in the
+    // pattern. It also ASSERTS the three lengths agree, where `zip` silently stops at the
+    // shortest -- a real check, since `frequency_hz` and `path_exponent` are caller-supplied.
     let mut as_ = vec![0.0f64; np2];
-    for ((shape, &fr), &path_fr) in as_[1..fold_count]
-        .iter_mut()
-        .zip(&frequency_hz[1..])
-        .zip(&path_exponent[1..])
-    {
+    azip!((
+        shape in ArrayViewMut1::from(&mut as_[1..fold_count]),
+        &fr in ArrayView1::from(&frequency_hz[1..fold_count]),
+        &path_fr in ArrayView1::from(&path_exponent[1..fold_count]),
+    ) {
         let fr2 = fr * fr;
 
         // The Q model qv = 150.0*fr**0.5 is computed by the Fortran but feeds
@@ -293,7 +307,8 @@ pub fn stochastic_spectrum(
         let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
 
         *shape = a1 * a2a3 * frank as f64;
-    }
+    });
+
 
     let mut a = vec![0.0f32; np2];
     fill_normal_deviates(rng, np2, &mut a);
