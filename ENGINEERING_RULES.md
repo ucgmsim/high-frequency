@@ -47,10 +47,20 @@ Extend the conventions already in force rather than inventing new ones:
   type, `f32()`/`i32()` — went with `deck.rs` in §4.3.
 - Unit suffixes on public arguments — `_km`, `_s`, `_rad`, `_hz`. `dt` is exempt; its
   interpretation is unambiguous.
-- **Keep the provenance line.** Every ported routine's doc comment names its Fortran original
-  and `hb_high_ref.f:NNN`. §4.3 deleted `reference/`, which makes these *more* valuable rather
-  than less: they are now the only map from this code back to the original, and the original
-  is recoverable from git history when a question needs it.
+- **Keep the provenance line, and only the line.** A ported routine's doc comment may carry a
+  single `(orig. hb_high_ref.f:NNN)` as a hook into git history — cheap, and the only map back
+  now that §4.3 deleted `reference/`. **Everything else about the Fortran goes.** §6.x deleted
+  the narrative: what the Fortran computed, which of its two assignments survived, what a
+  `goto` did, how gfortran's arithmetic compared. None of it answers a question a reader of the
+  Rust has, and the port has been certified twice over.
+- **Cite the paper, not the ancestor.** Where the code implements a published model, name it
+  with an equation number — `Boore (1983) eq. 8`, `Graves & Pitarka (2010) eq. 12` — and only
+  after reading that equation in that paper. `papers/README.md` holds the citations and their
+  verification status; `PHYSICS.md` is the walkthrough. A citation nobody has checked is worse
+  than none, because it reads as authority.
+- **A numerical invariant is not archaeology.** "This fold must stay left-to-right", "these
+  casts are the narrowing points", "this buffer is sized for the mmap threshold" — keep these,
+  but phrase them as what breaks if you change it, with no Fortran in the sentence.
 - Lints are `warn`, never `deny`, and a suppression is a targeted `#[allow]` **with the
   reason written next to it**. A crate-root blanket is how 28 warnings accumulated unseen.
 

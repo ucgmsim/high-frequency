@@ -1,81 +1,73 @@
 //! The simulation configuration, as a typed value rather than a positional deck.
 //!
-//! # Why this exists
+//! Every field is named, every magic integer is an enum, and every "use the default" sentinel
+//! is an `Option` with a single accessor that resolves it. Python builds one of these directly.
 //!
-//! The Fortran is driven by a 22-line list-directed deck on stdin. That format is
-//! not merely inconvenient, it is unsafe: `read(5,*)` spans record boundaries, so a
-//! missing or extra token silently rebinds every field after it, with no error and
-//! no way to notice. Production has a live bug of exactly this shape — see
-//! `REFACTOR.md` §1.1, where `ispar_adjust` is permanently `0` and two other fields
-//! are swapped, which quietly disables the whole stress-parameter-adjustment
-//! feature.
+//! # Why the types matter here more than usual
 //!
-//! This module is the replacement: named fields, enums instead of magic integers,
-//! and `Option` instead of out-of-band sentinel values. `read_deck` in the binary
-//! remains the bridge from the old format, because the parity gate drives that
-//! binary with generated decks and it is the only remaining tie to the Fortran
-//! oracle.
-//!
-//! # Sentinels become `Option`
-//!
-//! The deck signals "use the default" with a value **below −1.0** — not merely
-//! negative, which is the sort of distinction that is invisible at a call site and
-//! obvious in a type. Each such field is an `Option` here, with an accessor that
-//! resolves it, so the resolved value is computed in exactly one place.
+//! The original was driven by a 22-line list-directed deck on stdin, where `read(5,*)` spans
+//! record boundaries — so a missing or extra token silently rebinds every field after it, with
+//! no error and no way to notice. **Production had a live bug of exactly that shape**, which
+//! left the stress-parameter adjustment permanently disabled (see [`StressParamAdjust`]). That
+//! class of bug is unrepresentable now, which is the point.
 
-/// Pi.
+/// Pi, and the degrees-to-radians factor derived from it.
 ///
-/// This was `3.1415926` — the Fortran's own 8-digit truncation from
-/// `hb_high_ref.f:150`, carried verbatim for as long as bit-identity was the contract.
-/// It is now `std::f32::consts::PI`, the correctly rounded value.
-///
-/// The truncation was wrong by 3.5e-8 relative (about 1 `f32` ulp), and being
-/// deliberately wrong about pi is not a thing to keep for precedent once the contract
-/// that required it has expired. Both the slip model reader and the simulation convert
-/// degrees with this, so it lives in one place to keep them from drifting.
+/// Both the slip-model reader and the simulation convert degrees, so this lives in one place to
+/// keep them from drifting. The original carried an 8-digit truncation, wrong by about one `f32`
+/// ulp; this is the correctly rounded value.
 pub const PI: f32 = std::f32::consts::PI;
 
 /// Degrees to radians, from the same literal.
 pub const DEG_TO_RAD: f32 = PI / 180.0;
 
-/// Built-in defaults for the fields the deck can leave unset.
+/// Built-in defaults for the fields the caller can leave unset.
 ///
-/// `CZERO` is written 2.1 in a comment in the original and then 2.0 in code; the
-/// code wins. `FCFAC` is never read from input at all — it is assigned from a
-/// default and then hardwired to 0.0.
+/// Most of these are Graves & Pitarka values; see the note on [`RuptureVelocity`] for the ones
+/// that differ from the published papers, and `papers/README.md` finding 5 for `CZERO`.
 pub mod defaults {
+    /// `c₀` in Graves & Pitarka (2010) eq. 13 / (2015) eq. 1, the corner-frequency constant.
+    ///
+    /// **2.0 is the 2015 value; Graves & Pitarka (2010) used 2.1.** This is a version marker:
+    /// the code tracks the later parameterisation. See `papers/README.md` finding 5.
     pub const CZERO: f32 = 2.0;
+    /// Rupture speed as a fraction of the local shear-wave velocity. Graves & Pitarka (2010)
+    /// set "the average rupture speed at 80% of the local shear-wave velocity".
     pub const RVFAC: f32 = 0.8;
     pub const SHAL_RVFAC: f32 = 0.6;
+    /// The shallow weak zone starts at 5 km, matching Graves & Pitarka (2010).
     pub const SHAL_DMIN: f32 = 5.0;
     pub const SHAL_DMAX: f32 = 8.0;
     pub const DEEP_RVFAC: f32 = 0.6;
     pub const DEEP_DMIN: f32 = 15.0;
     pub const DEEP_DMAX: f32 = 20.0;
+    /// `c_α`, the coefficient of the dip-and-rake corner-frequency adjustment `α_τ`.
     pub const CALPHA: f32 = 0.1;
+    /// Never supplied by any caller; hardwired to zero. Retained as a named quantity because it
+    /// appears in the corner-frequency expression `c₀(1 + fcfac)`.
     pub const FCFAC: f32 = 0.0;
-    /// `vsmoho` when the deck leaves it non-positive: high enough that no layer
-    /// reaches it, i.e. "do not truncate at the Moho".
+    /// `vsmoho` when left non-positive: high enough that no layer reaches it, i.e. "do not
+    /// truncate at the Moho".
     pub const VS_MOHO: f64 = 999.9;
-    /// Ceiling on the perturbed rupture-velocity factor.
+    /// Ceiling on the perturbed rupture-velocity factor, so the randomisation in
+    /// [`crate::sim`] cannot drive the rupture supershear.
     pub const RVFMAX: f32 = 1.4;
 }
 
-/// One entry of the deck's `rayset`.
+/// One requested ray path.
 ///
-/// The integer is kept because `green_function` needs it, but the two things the program
-/// actually asks about it are exposed as methods.
+/// The integer is kept because the ray tracer needs it, but the two things the program actually
+/// asks about it are methods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RayType(pub i32);
 
 /// How a [`RayType`] is interpreted.
 ///
-/// `0` is not a ray at all: it selects the straight-line geometric path instead of
-/// a traced one. For traced rays the **parity** of the number picks the take-off
-/// direction, which is why the Fortran tests `mod(irtype,2) == 1`.
+/// `0` is not a ray at all: it selects a straight-line geometric path instead of a traced one.
+/// For traced rays the **parity** picks the take-off direction. These are the `j = 1, M` rays
+/// summed over in Graves & Pitarka (2010) eq. 10 — direct, Moho-reflected, and multiples.
 ///
-/// Production runs `rayset = [1]`, so only `Upgoing` is exercised there; the other
-/// two are reached by the `rayset=0` and `rayset=1,2` parity decks.
+/// Production runs `rayset = [1]`, so only `Upgoing` is exercised there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RayKind {
     /// `0` — straight-line path, no ray tracing used.
@@ -97,9 +89,8 @@ impl RayType {
         }
     }
 
-    /// The `itype` to trace with. A straight ray still gets traced, as type 1,
-    /// because the Fortran calls `green_function` before it checks for type 0 and only
-    /// afterwards overwrites the results.
+    /// The `itype` to trace with. A straight ray is still traced, as type 1, because the tracer
+    /// runs unconditionally and the straight-line results overwrite its output afterwards.
     pub fn trace_type(self) -> i32 {
         match self.kind() {
             RayKind::StraightRay => 1,
@@ -110,27 +101,30 @@ impl RayType {
 
 /// The path-duration model: how record duration grows with distance.
 ///
-/// The deck encodes these as `0`/`1`/`2`/`11`/`12` — a non-contiguous set where
-/// every other value leaves `ndur` undefined in the Fortran, which then indexes an
-/// uninitialised table. An enum makes that unrepresentable.
+/// This is the `c₁·R` term of Graves & Pitarka (2010) eq. 17, `T_di = f_ci⁻¹ + c₁R_i`,
+/// generalised to a piecewise-linear table so that the Boore & Thompson models can be selected
+/// instead. See `PHYSICS.md` §7.
+///
+/// The wire encoding is a non-contiguous integer set (`0`/`1`/`2`/`11`/`12`) where every other
+/// value left the table uninitialised in the original. An enum makes that unrepresentable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathDurationModel {
-    /// `<= 0` — Graves & Pitarka 2010, single segment, slope 0.063 s/km.
+    /// `<= 0` — Graves & Pitarka (2010) eq. 17, single segment, slope `c₁ = 0.063` s/km.
     Gp2010,
     /// `1` — western US, slope 0.070.
     Wus,
     /// `2` — eastern North America, slope 0.100.
     Ena,
-    /// `11` — Boore & Thompson 2014 WUS. Six segments; its breakpoints at 7, 45,
-    /// 125 and 175 km are what the Phase 2 distance ladder straddles.
+    /// `11` — Boore & Thompson (2014) Table 1, active crustal regions. Breakpoints at 0, 7, 45,
+    /// 125, 175 and 270 km. **See the note in [`crate::sim`] on the extrapolation beyond
+    /// 270 km, which does not match the paper.**
     Bt2014Wus,
-    /// `12` — Boore & Thompson 2015 ENA. Eight segments.
+    /// `12` — Boore & Thompson (2015), stable continental regions. Eight breakpoints.
     Bt2015Ena,
 }
 
 impl PathDurationModel {
-    /// Decode the deck's integer. Note `<= 0` all map to `Gp2010`, matching the
-    /// Fortran's `if(ipdur_model.le.0)`.
+    /// Decode the wire integer. Everything `<= 0` maps to `Gp2010`.
     pub fn from_deck(v: i32) -> Option<Self> {
         Some(match v {
             i32::MIN..=0 => Self::Gp2010,
@@ -143,15 +137,19 @@ impl PathDurationModel {
     }
 }
 
-/// Stress-parameter adjustment to a target magnitude.
+/// Stress-parameter adjustment towards a target magnitude, using the Leonard (2010)
+/// magnitude–area scaling relations.
 ///
-/// **Inert in production**, and not by configuration: the deck misalignment
-/// described in `REFACTOR.md` §1.1 means the Fortran always reads `ispar_adjust`
-/// as the literal `0` that `hf_sim.py` writes on its own line, so `spar_fac` is
-/// always 1.0 no matter what the workflow config says.
+/// # This path has never run in production
+///
+/// Not by configuration, but by accident: the original's deck misalignment meant the selector
+/// was always read as the literal `0`, so the adjustment factor was always 1.0 regardless of
+/// what the workflow config asked for. **The typed interface here fixes that**, which means the
+/// branch is now reachable for the first time and has correspondingly little field exposure.
+/// Treat a non-`None` value as untested rather than as supported.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StressParamAdjust {
-    /// `0` or anything unrecognised — no adjustment, `spar_fac = 1`.
+    /// `0` or anything unrecognised — no adjustment, factor 1.
     None,
     /// `1` — Leonard (2010) scaling for active tectonic regions.
     LeonardActive,
@@ -160,8 +158,8 @@ pub enum StressParamAdjust {
 }
 
 impl StressParamAdjust {
-    /// Anything other than 1 or 2 means no adjustment — the Fortran's `else`
-    /// branch, which is what makes an unrecognised value silently harmless.
+    /// Anything other than 1 or 2 means no adjustment, which is what made the misaligned deck
+    /// silently harmless rather than an error.
     pub fn from_deck(v: i32) -> Self {
         match v {
             1 => Self::LeonardActive,
@@ -173,11 +171,24 @@ impl StressParamAdjust {
 
 /// The depth-dependent rupture-velocity taper.
 ///
-/// These seven values are always used together, at three call sites where the
-/// Fortran repeats the taper character-for-character.
+/// Rupture propagates more slowly near the surface — Graves & Pitarka (2010) attribute this to
+/// unconsolidated material and low effective friction at shallow depth, and model it as a
+/// "shallow weak zone" above 5 km. Graves & Pitarka (2015) added an analogous **deep** weak
+/// zone, which is why there are two bands here.
 ///
-/// The deep transition depths are **not** constants: they are raised to track the
-/// deepest hypocentre in the slip model, so [`RuptureVelocity::resolve`] takes it.
+/// This feeds `V_Ri` in eq. 13's corner frequency, so a slower rupture means a lower corner
+/// frequency and less high-frequency energy.
+///
+/// # The default reduction factors differ from the published values
+///
+/// Graves & Pitarka (2010) give a 70% factor for the shallow zone and (2015) a 30% reduction
+/// for the deep one; the defaults here are 0.6 for both. These are **overridable**, so a caller
+/// may well be supplying locally calibrated values — but if you are reading the defaults as
+/// "the paper's numbers", they are not. Worth checking against whatever calibration this
+/// deployment intends.
+///
+/// The deep transition depths are **not** constants: they track the deepest hypocentre in the
+/// slip model, so [`RuptureVelocity::resolve`] takes it as an argument.
 #[derive(Clone, Copy, Debug)]
 pub struct RuptureVelocity {
     /// `rvfac` — base fraction of the shear velocity.
@@ -203,9 +214,9 @@ pub struct RuptureVelocityTaper {
 impl RuptureVelocity {
     /// Apply the defaults and set the transition depths.
     ///
-    /// `max_hypocentre_depth_km` is the deepest hypocentre in the slip model. When it is below the
-    /// default deep transition the defaults stand; otherwise the deep band moves
-    /// down to start at the hypocentre and span 5 km.
+    /// When the deepest hypocentre is above the default deep transition the defaults stand;
+    /// otherwise the deep band moves down to start at that hypocentre and span 5 km, so the
+    /// weak zone always sits below the nucleation point rather than cutting through it.
     pub fn resolve(self, max_hypocentre_depth_km: f32) -> RuptureVelocityTaper {
         let (deep_dmin, deep_dmax) = if max_hypocentre_depth_km > defaults::DEEP_DMIN {
             (max_hypocentre_depth_km, max_hypocentre_depth_km + 5.0)
@@ -225,8 +236,12 @@ impl RuptureVelocity {
 }
 
 impl RuptureVelocityTaper {
-    /// Shallow taper first, then the deep taper *overwrites* it where the depth
-    /// falls in the deep band — not a blend of the two.
+    /// The rupture-velocity factor at a given depth.
+    ///
+    /// Ramps up through the shallow band, sits at `rvfac` in between, and ramps down through the
+    /// deep band. **The deep taper OVERWRITES the shallow one where the bands overlap** — it is
+    /// not a blend of the two, and the `if`/`else if` structure below is what makes that
+    /// explicit. Overlap is possible because the deep band tracks the hypocentre.
     pub fn factor(&self, zdep: f32) -> f32 {
         let Self { rvfac, shal_rvfac, deep_rvfac, shal_dmin, shal_dmax, deep_dmin, deep_dmax } =
             *self;
@@ -246,66 +261,66 @@ impl RuptureVelocityTaper {
     }
 }
 
-/// Everything needed to simulate one station, with nothing about where the inputs
-/// came from or where the output goes.
+/// Everything needed to simulate one station, with nothing about where the inputs came from or
+/// where the output goes.
 #[derive(Clone, Debug)]
 pub struct HfConfig {
-    /// `sdrop` — average stress drop, bars.
+    /// `Δσ` — the Brune stress parameter, bars. Graves & Pitarka use 50 bars.
+    ///
+    /// Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
+    /// parameter controlling the strength of the high-frequency radiation", not as a measured
+    /// static stress drop.
     pub stress_drop: f32,
-    /// `rayset`. Production is `[RayType(1)]`.
+    /// Which ray paths to sum over. Production is `[RayType(1)]`.
     pub rayset: Vec<RayType>,
-    /// `isite_amp != 0`.
+    /// Whether to apply quarter-wavelength site amplification ([`crate::site`]).
     pub site_amp: bool,
     /// This station's seed, and the whole of its identity as far as the generator is
     /// concerned.
     ///
-    /// `u64` rather than the deck's `i32`. It is per-station, not per-run: each station gets
-    /// an independent PCG stream via [`crate::rng::DrawSource::for_station`], which is what
-    /// makes a batch of stations safe to reorder, subset or resume. The Fortran shared one
-    /// stream across its station loop, which is why `nsite != 1` had to be refused.
-    ///
-    /// The Fortran's `irand` was also *mutated* by seeding — `init_random_seed` advanced it
-    /// and the advanced value gated the rupture-time jitter. That is gone; only
-    /// `HB_LEGACY_SEEDING` still reproduces the sign test.
+    /// **Per-station, not per-run.** Each station gets an independent PCG stream via
+    /// [`crate::rng::DrawSource::for_station`], which is what makes a batch of stations safe to
+    /// reorder, subset or resume. The original shared one stream across its station loop, so a
+    /// multi-station run was not a concatenation of single-station runs.
     pub seed: u64,
     /// Record length, seconds.
     pub duration: f32,
     /// Sample interval, seconds.
     pub dt: f32,
-    /// `fmax` — high-frequency cutoff, Hz.
+    /// `f_max` — the high-cut corner, Hz. See `PHYSICS.md` §3 on the `f_max`-versus-`κ`
+    /// question; both parameters exist because both physical interpretations do.
     pub fmax: f32,
-    /// `kappa` — near-surface attenuation, seconds.
+    /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
     pub kappa: f32,
-    /// `qfexp` — frequency exponent of Q.
+    /// `x` in `Q(f) = Q₀·f^x`, the frequency exponent of the quality factor.
     pub qfexp: f32,
     pub rupture_velocity: RuptureVelocity,
-    /// `czero` — corner-frequency constant.
+    /// `c₀`, the corner-frequency constant of eq. 13. `None` uses [`defaults::CZERO`].
     pub czero: Option<f32>,
-    /// `calpha` — the `alphaT` corner-frequency adjustment coefficient.
+    /// `c_α`, the coefficient of the `α_τ` dip-and-rake adjustment.
     pub calpha: Option<f32>,
-    /// `mom` — total seismic moment. `None` derives it from the slip model.
+    /// `M₀` — total seismic moment. `None` derives it from the slip model.
     pub moment: Option<f32>,
-    /// `rupv` — constant rupture velocity. `None` takes rupture times from the slip
-    /// model instead, which is what production does.
+    /// A constant rupture velocity, overriding the slip model's rupture times. `None` takes
+    /// those times from the slip model instead, which is what production does.
     pub rupture_velocity_override: Option<f32>,
-    /// `vs_moho` — shear velocity at which to truncate the model.
+    /// Shear velocity at which to truncate the velocity model at the Moho.
     pub vs_moho: Option<f64>,
-    /// `nl_skip`. Negative means the velocity model is used unperturbed; a
-    /// non-negative value would route through `grandvel`, which is dead here.
+    /// Negative means the velocity model is used unperturbed. A non-negative value would route
+    /// through a velocity-randomisation path that is not implemented here.
     pub nl_skip: i32,
-    /// `fa_sig1`, `fa_sig2` — Fourier-amplitude randomisation sigmas. Both 0.0 in
-    /// production, which is what makes `famprand` dead.
+    /// Fourier-amplitude randomisation sigmas. **Both 0.0 in production**, which is what makes
+    /// that whole path dead.
     pub fa_sig1: f32,
     pub fa_sig2: f32,
-    /// `rv_sig1` — rupture-velocity randomisation sigma. **0.1 in production**, so
-    /// unlike the two above this path is live.
+    /// Rupture-velocity randomisation sigma. **0.1 in production**, so unlike the two above
+    /// this path is live: it perturbs `rvf` per subfault, capped by [`defaults::RVFMAX`].
     pub rv_sig1: f32,
     pub path_duration: PathDurationModel,
     pub stress_param_adjust: StressParamAdjust,
-    /// `targ_mag` — target magnitude for the adjustment. `None` derives it from the
-    /// moment.
+    /// Target magnitude for the stress-parameter adjustment. `None` derives it from the moment.
     pub target_magnitude: Option<f32>,
-    /// `fault_area` — km². `None` takes it from the slip model.
+    /// Total fault area, km². `None` takes it from the slip model.
     pub fault_area: Option<f32>,
 }
 
@@ -319,13 +334,13 @@ impl HfConfig {
     pub fn vs_moho(&self) -> f64 {
         self.vs_moho.unwrap_or(defaults::VS_MOHO)
     }
-    /// `fcfac`. Read from nothing and hardwired to zero in the original; kept as a
-    /// named quantity because it appears in the corner-frequency expression.
+    /// Always zero. Kept as a named quantity because it appears in the corner-frequency
+    /// expression `c₀(1 + fcfac)`.
     pub fn fcfac(&self) -> f32 {
         defaults::FCFAC
     }
-    /// True when any randomisation sigma is set, which is the condition under which
-    /// the normal deviates are drawn at all.
+    /// True when any randomisation sigma is set, which is the condition under which the block of
+    /// normal deviates is drawn at all — and therefore affects the draw count.
     pub fn draws_normal_deviates(&self) -> bool {
         self.fa_sig1 > 0.0 || self.fa_sig2 > 0.0 || self.rv_sig1 > 0.0
     }
@@ -352,7 +367,7 @@ mod tests {
         assert_eq!(PathDurationModel::from_deck(0), Some(PathDurationModel::Gp2010));
         assert_eq!(PathDurationModel::from_deck(-7), Some(PathDurationModel::Gp2010));
         assert_eq!(PathDurationModel::from_deck(11), Some(PathDurationModel::Bt2014Wus));
-        // The gaps are the point: 3..=10 leave ndur undefined in the Fortran.
+        // The gaps are the point: these values left the duration table uninitialised.
         for bad in [3, 5, 10, 13, 99] {
             assert_eq!(PathDurationModel::from_deck(bad), None, "{bad} should be rejected");
         }
@@ -371,8 +386,7 @@ mod tests {
 
     #[test]
     fn unrecognised_stress_adjustment_is_silently_none() {
-        // The Fortran's else branch. This is why production's misaligned deck is
-        // inert rather than an error.
+        // This is why the original's misaligned deck was inert rather than an error.
         assert_eq!(StressParamAdjust::from_deck(0), StressParamAdjust::None);
         assert_eq!(StressParamAdjust::from_deck(-1), StressParamAdjust::None);
         assert_eq!(StressParamAdjust::from_deck(7), StressParamAdjust::None);

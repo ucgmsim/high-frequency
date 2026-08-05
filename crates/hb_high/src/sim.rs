@@ -1,29 +1,31 @@
-//! Simulating one station.
+//! Simulating one station: the finite-fault layer.
 //!
-//! This is the physics, separated from the deck that used to drive it and from the
-//! file the result used to be written to. [`simulate`] takes a [`HfConfig`], a slip
-//! model, a velocity model and one station, and returns samples.
+//! This module is **Graves & Pitarka (2010)**, "Broadband ground-motion simulation using a
+//! hybrid approach", *BSSA* 100(5A), 2095–2123 — specifically its high-frequency module,
+//! equations 10 through 17. [`crate::stoc`] builds one subfault's spectrum (Boore 1983); this
+//! walks the rupture and sums them.
+//!
+//! ```text
+//! A_i(f) = Σ_j  C_ij · S_i(f) · G_ij(f) · P(f)          eq. 10
+//! ```
+//!
+//! The loops here are that sum: over subfaults `i`, over ray paths `j`, and over the three
+//! output components. See `PHYSICS.md` §7 for the assembly, and `papers/README.md` for the
+//! equation-by-equation verification.
 //!
 //! # One station per call
 //!
-//! The Fortran loops over `nsite` stations sharing a single generator: `uniform_deviates` fills
-//! the `vertical_radiation_spectrum` uniforms once before the loop, and each station's
-//! `normal_deviates` draw continues from wherever the previous station left the
-//! stream. A multi-station run is therefore **not** a concatenation of
-//! single-station runs.
-//!
-//! Production never relies on that — `hf_sim.py` runs one process per station — so
-//! this takes one station and seeds from `config.seed`, which reproduces the
-//! `nsite = 1` case exactly. The driver refuses anything else rather than silently
-//! computing something different.
+//! **A multi-station run is not a concatenation of single-station runs**, at least not in the
+//! original: it shared one generator across its station loop, so each station's draws continued
+//! from wherever the previous one stopped. Here each station gets an independent stream seeded
+//! from `config.seed`, which makes a batch safe to reorder, subset or resume.
 //!
 //! # Cost note
 //!
-//! Each call re-does the slip-model normalisation and the air-layer insertion, both
-//! of which are station-independent. That is deliberate for now: it keeps the
-//! signature honest about what it needs. A `Simulator` type holding the prepared
-//! model and the reusable `mmv`-sized buffers is the obvious next step once the
-//! Python wrapper starts looping over stations.
+//! Each call re-does the slip-model normalisation and the air-layer insertion, both of which are
+//! station-independent. Deliberate for now — it keeps the signature honest about what it needs.
+//! A `Simulator` type holding the prepared model and the reusable buffers is the obvious next
+//! step once a caller starts looping over many stations.
 
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
@@ -40,21 +42,21 @@ use crate::site::{site_amplification_factors, apply_site_amplification};
 use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::{radiate_and_invert, stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
 
-/// The three output components, in the order the Fortran computes them.
+/// The three output components, in the order they are computed — which is also the order a
+/// caller receives them in.
 ///
-/// **The order is load-bearing and this enum does not make it safe to change.** The two
+/// **The order is load-bearing, and this enum does not make it safe to change.** The two
 /// horizontals each draw 5,000 deviates from the shared stream inside
-/// `horizontal_radiation_spectrum`; the vertical draws none, reading the uniforms filled
-/// once before the station loop. Reordering these three, or iterating them in anything
-/// that does not preserve declaration order, moves every waveform. `REFACTOR.md`'s Tier D
-/// finding turns on exactly that asymmetry.
+/// [`crate::radiation::horizontal_radiation_spectrum`]; the vertical draws none, reading a
+/// pre-filled table instead. So the three are *not* interchangeable positions in a loop:
+/// reordering them, or iterating them in anything that does not preserve declaration order,
+/// moves every waveform. See `PHYSICS.md` §9.
 ///
-/// `REFACTOR.md` §1.3b called for this and argued against the alternative: a trait would
-/// have to smuggle the horizontal/vertical difference through an associated type and
-/// would read worse. **Prefer the enum**, and match on it.
+/// An enum rather than a trait deliberately — a trait would have to smuggle the
+/// horizontal/vertical difference through an associated type and would read worse. Match on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Component {
-    /// `090` — east, the Fortran's first.
+    /// `090` — east, and the first computed.
     E090,
     /// `000` — north.
     N000,
@@ -88,9 +90,11 @@ impl Component {
         }
     }
 
-    /// `fmax`, capped at 15 Hz for the vertical only. The Fortran writes this as
-    /// `if (fmx1 > 15.0 .and. kf == 3) fmx1 = 15.0`, where `kf` is simultaneously a
-    /// 1-based array index and a behaviour flag.
+    /// `f_max`, capped at 15 Hz for the vertical only.
+    ///
+    /// The cap is empirical: vertical-component spectra fall off from a lower corner than the
+    /// horizontals do. It is the one place the component identity changes the *physics* rather
+    /// than just which radiation routine runs.
     #[inline]
     fn capped_fmax(self, fmax_hz: f32) -> f32 {
         match self {
@@ -105,15 +109,16 @@ pub struct Simulation {
     /// Samples per component.
     pub ndata: usize,
     pub dt: f32,
-    /// Ground motion, **interleaved** 090/000/ver — `ndata * 3` values, component
-    /// fastest, which is the order the Fortran streams to disk.
+    /// Ground motion, **interleaved** 090/000/ver — `ndata * 3` values, component fastest.
+    /// Callers consume the three channels positionally, so the order is part of the interface.
     pub acc: Vec<f32>,
 }
 
 /// Why a simulation could not be produced.
 #[derive(Debug)]
 pub enum SimError {
-    /// Segment dimensions disagree, which the Fortran refuses.
+    /// Segment dimensions disagree. Every segment must share the first one's subfault size,
+    /// because `dl` is a single per-run quantity in the corner-frequency and duration models.
     InconsistentSegments(String),
 }
 
@@ -137,24 +142,24 @@ pub fn simulate(
 ) -> Result<Simulation, SimError> {
     let (deg_to_rad, pi) = (crate::config::DEG_TO_RAD, crate::config::PI);
 
-    let tw_eps = 0.2f32; // 0.4 first, then 0.2
+    // Boore (1983, p. 1869)'s own envelope-shape values, and the ones Graves & Pitarka (2010)
+    // use: the peak sits at 0.2 of the duration, decayed to 0.05 of the peak by the end.
+    let tw_eps = 0.2f32;
     let tw_eta = 0.05f32;
 
     let nr = 1000usize;
     let nsfac = 20usize;
 
-    // Site-amplification frequency table, log-transformed in place (:196-218).
     let fn_hz: [f32; 20] = [
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70,
         1.00, 2.00, 3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    // `nsfac` entries, not `NLAYMAX` = 500. The Fortran declared this and `siteamp_factors`
-    // over the layer ceiling because they sat in a common block sized for the velocity
-    // model, but both are indexed `0..nsfac` -- a frequency table, not a layer table.
+    // The 20-entry site-amplification frequency table, log-transformed once. It is a FREQUENCY
+    // table, not a layer table -- sized by its own entry count, not by the velocity model.
     let siteamp_log_freq: Vec<f32> = fn_hz[..nsfac].iter().map(|hz| hz.ln()).collect();
 
-    // Resolved-default accessors are called once, here; the body below then reads
-    // under the Fortran's names as the transliteration it still largely is.
+    // Resolved-default accessors are called once, here, so each default is applied in exactly
+    // one place.
     let czero = config.czero();
     let calpha = config.calpha();
     let fcfac = config.fcfac();
@@ -175,8 +180,8 @@ pub fn simulate(
     // Every segment must agree with the FIRST on subfault size, so the first is the
     // reference and the rest are the candidates -- `split_first` says that, where
     // re-indexing `segments[0]` inside a loop over `segments` left it to the reader to
-    // notice the index was constant. The reported numbers stay 1-based, matching the
-    // Fortran's message.
+    // notice the index was constant. The reported numbers stay 1-based, to match the input
+    // file's own numbering.
     if let Some((reference, rest)) = stoch.segments.split_first() {
         for (k, s) in rest.iter().enumerate() {
             if s.subfault_length_km != reference.subfault_length_km {
@@ -225,33 +230,37 @@ pub fn simulate(
     spar_fac = spar_fac.sqrt();
     stress_average *= spar_fac;
 
-    // Seismic moment of the subevent, from the average stress on the fault.
+    // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
+    // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
     let subevent_moment = stress_average * dlm * dlm * dlm * 1.0e+21;
-    // The Fortran's `nsum` -- the sub-event count -- is computed from `ratio` and then
-    // forced to 1 (2004-04-20), which is why the Frankel operator in
-    // stochastic_spectrum carries the scaling instead. It is not bound here because
-    // nothing reads it; the one place it reached is documented at its use site in the
-    // subfault pass, where the draw it used to gate still has to happen.
 
-    // The Fortran computes four candidate moment scalings in a row and lets the
-    // last assignment win, leaving the other three as documentation of what was
-    // tried. Reproduced with the names attached to their formulae rather than to
-    // their order, and only the surviving one bound.
+    // `F` in Graves & Pitarka (2010) eq. 12 -- Frankel's (1995) finite-fault factor. It scales
+    // the subfault corner frequency towards the mainshock's while keeping the summed moment
+    // right; `crate::stoc` is where it does its work, and the note on `frank` there shows the
+    // algebra.
     //
-    //   by_count      sm / (subevent_moment * subfault_count)          -- linear in subfault count
-    //   by_sqrt_count sm / (subevent_moment * sqrt(subfault_count))    -- THE LIVE ONE
-    //   by_two_thirds (sm/subevent_moment)^(2/3)
-    //   by_corner_sq  (fce_avg / fcmain)^2
+    // DEVIATION FROM THE PUBLISHED METHOD, AND IT IS A PHYSICS CHOICE. G&P define
+    // `F = M_o / (N * sigma_p * dl^3)` -- LINEAR in subfault count. This uses `sqrt(N)`.
+    // Graves & Pitarka (2015) does not revise `F`, so neither paper licenses the square root;
+    // it may come from the subfault-summation scheme instead. Three other candidate scalings
+    // were tried and abandoned upstream, which is some evidence this was tuned rather than
+    // derived:
     //
-    // `1.0 *` in by_sqrt_count is the Fortran's, and it matters: it forces the
-    // integer subfault_count through a real multiply before the sqrt.
+    //   sm / (subevent_moment * subfault_count)          linear in N -- what G&P specify
+    //   sm / (subevent_moment * sqrt(subfault_count))    THE LIVE ONE
+    //   (sm / subevent_moment)^(2/3)
+    //   (fce_avg / fcmain)^2
+    //
+    // Flagged in `papers/README.md` finding 4 and left alone: changing it would move every
+    // waveform, and it wants a domain judgement rather than a tidy-up.
+    //
+    // The `1.0 *` forces the integer count through a real multiply before the sqrt, and is
+    // load-bearing for the exact result.
     let moment_scale = sm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
 
     // ------------------------------------------------------------ stations ---
-    // No ceiling. The Fortran clamped this to `mmv`, which SILENTLY TRUNCATED a record
-    // longer than the compiled array rather than reporting anything -- arguably worse
-    // than the `np2 > mm` abort below it, which at least said something. Both are gone;
-    // the buffers are sized from the deck.
+    // No ceiling on the record length: buffers are sized from the requested duration. The
+    // original clamped this to a compile-time maximum and SILENTLY TRUNCATED anything longer.
     let ndata = (duration / dt).trunc() as usize;
 
     // The draw source and whether the rupture-time jitter applies are decided together,
@@ -259,9 +268,8 @@ pub fn simulate(
     let (mut rng, deviates) = seed_and_predraw(config, irand, nr, config.draws_normal_deviates());
 
     let mut vmod = VelocityModel::new();
-    // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
-    // touches this. Three component traces, not a 2-D array -- the Fortran's `DS(3, mmv)`
-    // was a 2-D block because Fortran had no better option.
+    // Three separate component traces rather than one interleaved 2-D block. The interleaving
+    // that the output format wants happens once, at the end.
     let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
 
     // Everything the two passes need that is constant for the whole run, gathered once
@@ -283,9 +291,7 @@ pub fn simulate(
     };
 
     // ------------------------------------------------- the single station ---
-    // Starts at infinity so the first segment's value wins the `min` below; a
-    // zero-segment model falls through to the Fortran's 1000.0 sentinel, which `main`
-    // then prints as a distance.
+    // Starts at infinity so the first segment's value wins the `min` below.
 
     // A non-negative `nl_skip` would route the model through `grandvel`, the
     // velocity-model perturbation, which is dead under the production deck and not
@@ -314,10 +320,9 @@ pub fn simulate(
         );
 
         let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
-        // FIXED (§3.4). The Fortran RE-INITIALISES this inside the segment loop, so on a
-        // multi-segment model the distance it reports describes only the LAST segment --
-        // and it escapes: `hf_sim.py` parses it off stderr. Every fixture is
-        // single-segment, which is why it was invisible. Now the minimum over all of them,
+        // The minimum over ALL segments. The original re-initialised this inside the segment
+        // loop, so on a multi-segment model the reported distance described only the last
+        // segment -- invisible while every fixture was single-segment. Now the minimum,
         // which is what "closest subfault distance" means.
 
         let plan =
@@ -338,13 +343,11 @@ pub fn simulate(
         );
     }
 
-    // filter3d is not reachable from here at all: the switch that would enable it
-    // (`ift`) is a driver-level deck field, and it is dead under production. The
-    // driver refuses a non-zero value rather than passing it through.
+    // An optional output filter is not reachable from here: the switch that would enable it is
+    // a caller-level field, and a non-zero value is refused rather than passed through.
 
-    // The Fortran scans all three components for their peak amplitude here. Under
-    // BINMOD nothing writes the result -- the only consumer is the commented-out
-    // `!WRITE(6,*) 'ACC.MAX='` at hb_high_ref.f:1423 -- so the scan is dropped.
+    // A peak-amplitude scan over all three components used to happen here. Nothing consumed
+    // the result, so it is gone.
     // Interleaved, component fastest: 090/000/ver per time sample.
     // Interleaved, component fastest: 090/000/ver per time sample. Destructuring the
     // three traces first is what lets this be a zip -- `acc[c][sample]` over a loop nest
@@ -418,11 +421,12 @@ struct SegmentAngles {
     strike_rad: f32,
     dip_rad: f32,
     rake_rad: f32,
-    /// `czero * (1 + fcfac) / alphaT`.
+    /// `c₀(1 + fcfac) / α_τ` — everything in Graves & Pitarka (2010) eq. 13's corner frequency
+    /// that does not vary within a segment.
     ///
-    /// **Hoisted.** The Fortran evaluates `alphaT` inside BOTH subfault loops, from three
-    /// per-segment constants — a sine, a square root and four arithmetic ops per subfault,
-    /// producing the same value every time. Bit-identical to compute it once.
+    /// **Hoisted**, and bit-identically so: `α_τ` is a pure function of three per-segment
+    /// constants, so evaluating it once per segment rather than once per subfault per loop gives
+    /// the identical `f32`.
     corner_coeff: f32,
 }
 
@@ -571,11 +575,23 @@ fn time_window_pass(
             .copied()
             .unwrap_or(DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km: 0.0 });
 
+        // Graves & Pitarka (2010) eq. 13: `f_ci = c0 * V_Ri / (alpha_tau * pi * dl)`, with
+        // `corner_coeff` carrying `c0 / alpha_tau` and `rvf * beta` being the local rupture
+        // speed `V_Ri`.
         let fce = angles.corner_coeff * rvf * shear_velocity_km_s
             / (run.avg_subfault_km * run.pi);
+        // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
+        // term. Two details worth stating:
+        //
+        //   * the source term uses `sqrt(F)/f_ci`, which is `1/f_c_effective` for the RESCALED
+        //     corner of eq. 12 -- see the `frank` note in `crate::stoc`. So the duration
+        //     follows the mainshock-scaled corner, not the raw subfault corner.
+        //   * the 2.12 is Boore (1983, p. 1869), who sets the record length to about twice the
+        //     duration of strong shaking so the windowed transient has room to decay.
+        //
+        // No upper cap on the window length.
         let tw0 = run.moment_scale.sqrt() * (1.0 / fce);
         let dpath = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
-        // VERSION1: no 81.92 s cap.
         let window = 2.12 * (tw0 + dpath);
         window_s[seg.grid_index(i, j)] = window;
 
@@ -947,11 +963,20 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
     }
 
     match model {
+        // Graves & Pitarka (2010) eq. 17: `T_di = f_ci^-1 + c1*R_i` with `c1 = 0.063`.
         PathDurationModel::Gp2010 => constant_slope(0.063),
         PathDurationModel::Wus => constant_slope(0.07),
         PathDurationModel::Ena => constant_slope(0.1),
-        // BT2014 WUS. The breakpoints at 7, 45, 125 and 175 km are what the Phase 2
-        // distance ladder is chosen to straddle.
+        // Boore & Thompson (2014) Table 1, reproduced exactly: breakpoints at 0, 7, 45, 125,
+        // 175, 270 km with durations 0, 2.4, 8.4, 10.9, 17.4, 34.2 s.
+        //
+        // KNOWN DEVIATION FROM THE PAPER, BEYOND 270 km. Table 1 specifies a tail slope of
+        // 0.156 s/km for `R` past the last breakpoint. `from_breakpoints` instead copies the
+        // slope of the final tabulated segment, `(34.2 - 17.4)/(270 - 175) = 0.177` -- about
+        // 13% steeper. This reproduces the original faithfully (it did
+        // `dpdr(ndur) = dpdr(ndur-1)`), so the deviation is in the model as implemented rather
+        // than in this port, and it only bites for ray paths longer than 270 km. Recorded in
+        // `papers/README.md`; not changed here, because it would move every long-path waveform.
         PathDurationModel::Bt2014Wus => from_breakpoints(
             [0.0, 7.0, 45.0, 125.0, 175.0, 270.0],
             [0.0, 2.4, 8.4, 10.9, 17.4, 34.2],
@@ -1082,12 +1107,22 @@ fn normalise_source(
     SourceScale { dlm, sm, subfault_count }
 }
 
-/// The `alphaT` corner-frequency adjustment (2013-11-20).
+/// `α_τ`, the dip-and-rake corner-frequency and rise-time adjustment.
 ///
-/// Also appears three times identically. `fD` tapers with dip above 45 degrees;
-/// `fR` peaks at a rake of 90 degrees. The rake is first wrapped into
-/// `[-180, 180]` by repeated addition or subtraction of 360, which the Fortran
-/// does with backward `goto`s.
+/// Graves & Pitarka (2015) eq. 3, `α_T = 1 + F_D·F_R·c_α`. **Returns the RECIPROCAL of that**,
+/// because the caller divides `c₀` by it and eq. 13 has `α_τ` in the denominator — so the value
+/// returned here is `α_τ` itself, ≤ 1, and smaller for a shallow-dipping thrust. Physically that
+/// means such a fault gets a *higher* corner frequency and a shorter rise time, which is the
+/// observed trend (Graves & Pitarka 2010, p. 2099, citing Somerville 1998: shorter rise times for
+/// thrust events imply relatively high dynamic stress drops).
+///
+/// Graves & Pitarka (2010) eq. 9 parameterised this on **dip alone**, piecewise — 1 above 60°,
+/// 0.82 below 45°. The continuous dip-and-rake form below is the 2015 revision, and is another
+/// marker that this code tracks the later method (see [`crate::config::defaults::CZERO`]).
+///
+/// `fD` tapers with dip above 45 degrees; `fR` peaks at a rake of 90 degrees. The rake is first
+/// wrapped into
+/// `[-180, 180]` by repeated addition or subtraction of 360.
 fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
     let mut fd = 0.0f32;
     if avgdip <= 90.0 && avgdip > 45.0 {
