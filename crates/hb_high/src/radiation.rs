@@ -1,6 +1,9 @@
-//! Double-couple far-field radiation coefficients.
+//! Double-couple radiation coefficients, and the conical average taken over them.
 //!
-//! Tier 0 holds `RDATN` only; `RADFRQ_lin` and `RADV_lin` land here in tier 2.
+//! A double couple does not radiate equally in all directions, and a single subfault's
+//! theoretical pattern is too sharp to be realistic. Graves & Pitarka (2010) therefore use a
+//! **conically averaged** pattern: perturb the five angles randomly and average. See
+//! `PHYSICS.md` §5.
 
 use ndarray::{azip, ArrayView1, ArrayViewMut1};
 
@@ -20,21 +23,18 @@ pub struct RadiationAngles {
     pub takeoff_rad: f32,
 }
 
-/// `SUBROUTINE RDATN(STR,DIP,RAK,AZ,TH,RDSH,RDSV)` — `hb_high_ref.f:2275`.
+/// SH and SV radiation coefficients for a double couple. (orig. `hb_high_ref.f:2275`)
 ///
-/// SH and SV radiation coefficients for a double couple (Aki & Richards).
-/// All angles in radians: `str` strike, `dip_rad` dip_rad, `rake_rad` rake, `azimuth_rad` azimuth
-/// source to receiver clockwise from north, `takeoff_rad` incidence angle measured from
-/// down. Returns `(rdsh, rdsv)`.
+/// Aki & Richards, *Quantitative Seismology* (2nd ed.), ch. 4. Returns `(rdsh, rdsv)`.
 ///
-/// The expressions below preserve Fortran's left-to-right association exactly.
-/// `SR*(CD**2-SD**2)*(CT**2-ST**2)*SS` is
-/// `((sin_rake * (cos_dip*cos_dip - sin_dip*sin_dip)) * (cos_takeoff*cos_takeoff - sin_takeoff*sin_takeoff)) * sin_az` — regrouping it, even into
-/// something algebraically identical, moves the last bits.
+/// # Do not regroup these expressions
 ///
-/// The commented-out alternative forms in the source are earlier versions using
-/// double-angle identities; they are *not* bit-equivalent to what is compiled
-/// and must not be substituted.
+/// They are written to a specific association order, and regrouping — even into something
+/// algebraically identical — moves the last bits. `SR*(CD²-SD²)*(CT²-ST²)*SS` is
+/// `((sin_rake * (cos_dip² - sin_dip²)) * (cos_takeoff² - sin_takeoff²)) * sin_az`, and the
+/// parenthesisation below says so explicitly.
+///
+/// Double-angle identities would simplify these and are **not** bit-equivalent.
 pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_rad: f32, takeoff_rad: f32) -> (f32, f32) {
     let sin_rake = rake_rad.sin();
     let cos_rake = rake_rad.cos();
@@ -44,9 +44,6 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
     let cos_takeoff = takeoff_rad.cos();
     let sin_az = (azimuth_rad - strike_rad).sin();
     let cos_az = (azimuth_rad - strike_rad).cos();
-
-    // The Fortran also computes RDP, the P radiation coefficient, and never returns or
-    // uses it. §3.5 dropped it along with the rest of the line-comparability scaffolding.
 
     let rdsv = sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * sin_az
         - cos_rake * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * cos_az
@@ -61,43 +58,35 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
     (rdsh, rdsv)
 }
 
-/// `SUBROUTINE RADFRQ_lin(...)` — `hb_high_ref.f:1939`.
+/// Conically averaged radiation pattern for a horizontal component, per frequency bin.
+/// (orig. `hb_high_ref.f:1939`)
 ///
-/// Conically averaged S radiation pattern for one subfault and receiver. The
-/// average is taken over rays whose strike, dip, rake, azimuth and take-off
-/// angle are perturbed within +/-45 degrees of the theoretical values — a cone
-/// around the theoretical ray rather than a full spherical average, on the
-/// reasoning that the parameters are more likely to be near their nominal
-/// values than in an arbitrary orientation.
+/// This is `RP_ij` in Graves & Pitarka (2010) eq. 11: the pattern averaged over rays whose
+/// strike, dip, rake, azimuth and take-off angle are perturbed within **±45°** of their
+/// theoretical values — a cone around the theoretical ray, on the reasoning that the true
+/// parameters are more likely near their nominal values than in an arbitrary orientation.
 ///
-/// Returns the clobbered `fr1` (see below). `radiation` receives the pattern per
-/// frequency bin.
+/// The `9.0 * range * pu` below is 90° in radians, so `(0.5 - u)` scaled by it gives ±45°
+/// exactly as the paper specifies.
 ///
-/// # This is the dominant RNG consumer
+/// # This is the dominant consumer of random numbers
 ///
-/// The averaging loop draws **five** deviates per iteration, in the order
-/// `th, fa, strX, dipX, rakX`, and runs `sample_count = 1000` times — so 5,000 draws per
-/// call, and it is called twice per subfault per ray. Any change to that order
-/// or count desynchronises the whole stream. See `PORTING_RULES.md` §5.
-///
-/// # `fr1` is a dummy argument the Fortran overwrites
-///
-/// The Fortran assigns `fr1 = 0.5` unconditionally at entry, clobbering the
-/// caller's variable — which is `flol`, the Butterworth low-cut read from the
-/// deck. The incoming value is never read, so this does not affect the routine
-/// itself, and the only consumer of the mutated `flol` is `filter3d`, which is
-/// dead under `ift = 0`. So the clobber is real but inert. Returned explicitly
-/// here rather than hidden.
+/// **Five draws per iteration, in the order `th, fa, strX, dipX, rakX`, and `sample_count` is
+/// 1000** — so 5,000 draws per call, twice per subfault per ray. The draw order and count are
+/// the phase spectrum (`PHYSICS.md` §9); changing either desynchronises every waveform that
+/// follows.
 ///
 /// # `radmin = 1.0` makes the frequency blend inert
 ///
-/// `radmin` is set to `0.5` and then immediately to `1.0`, which forces `del`
-/// to exactly 1.0 on all three branches. So the result is the conical average
-/// everywhere and the `fr1`/`fr2` taper never bites. The expression is still
-/// written out in full: `rdx + (radvh-rdx)*1.0` is not bitwise equal to `radvh`.
+/// `radmin` forces `del` to exactly 1.0 on all three branches, so the result is the conical
+/// average at every frequency and the `fr1`/`fr2` taper never bites. The expression is still
+/// written out in full, because `rdx + (radvh - rdx) * 1.0` is not bitwise equal to `radvh`.
 ///
-/// `RNA` and `RNB` are declared in the Fortran signature and never read; they
-/// are omitted here.
+/// # The return value is a discarded output
+///
+/// `fr1` is returned because the original assigned it to the caller's Butterworth low-cut,
+/// clobbering it. The only consumer of that value is a filter that is dead under production
+/// settings, so the clobber is real but inert. Returned explicitly rather than hidden.
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
     angles: &RadiationAngles,
@@ -111,21 +100,18 @@ pub fn horizontal_radiation_spectrum(
 
     let fr1 = 0.5f32;
     let fr2 = 2.0f32;
-    // "Since using a conical average around theoretical ray, don't allow much purely
-    // theoretical rad pattern" -- 2009-02-10, which set this to 1.0 and left the
-    // superseded 0.5 in place above it.
+    // Set to 1.0 in 2009 with the note "since using a conical average around theoretical ray,
+    // don't allow much purely theoretical rad pattern". The superseded 0.5 is the `fr1` above.
     let radmin = 1.0f32;
 
     let (rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
 
-    // The Fortran computes RDX once with a cos(THAA) factor and immediately recomputes it
-    // without; only the second survives.
-
-    // The 2004-03-19 "RADPAT FIX": take abs() after summing SV and SH, not
-    // before, otherwise a negative cos or sin creates asymmetry.
+    // Project SV and SH onto the requested horizontal component. The sum is formed BEFORE the
+    // magnitude is taken (below), because taking it per-term lets a negative cos or sin
+    // introduce an asymmetry that is not physical.
     let mut rdx = rdsva * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
 
-    // 2004-12-21: preserve the sign rather than taking abs().
+    // Sign preserved, not discarded: polarity is carried separately and reapplied at the end.
     let mut polarity = 1.0f32;
     if rdx < 0.0 {
         polarity = -1.0;
@@ -133,13 +119,14 @@ pub fn horizontal_radiation_spectrum(
     }
 
     let range = 10.0f32;
-    // NOT an iterator chain. Each iteration draws five deviates from the shared stream in
-    // the order th, fa, strX, dipX, rakX, and the sum is a left-to-right f32 fold; a
-    // `map(..).sum()` would preserve both today but invites a later `rayon` or a
-    // reordering that would not. See PORTING_RULES.md §5.
+    // NOT an iterator chain, and not a `map(..).sum()`. Two invariants live here: the five
+    // draws happen in a fixed order per iteration, and `radv` is a LEFT-TO-RIGHT f32 fold.
+    // A `sum()` preserves both today but invites a later `rayon` or a reassociation that
+    // would not, and either would move every waveform.
     let mut radv = 0.0f32;
     for _k in 1..=sample_count {
-        // Five draws, in this exact order. 9*range*pu is 90 degrees in radians.
+        // Five draws, in this exact order. `9 * range * pu` is 90 degrees in radians, so each
+        // perturbation spans ±45°.
         let th = takeoff_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
         let fa = azimuth_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
         let strx = strike_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
@@ -148,13 +135,15 @@ pub fn horizontal_radiation_spectrum(
 
         let (rdsha, rdsva) = radiation_pattern(strx, dipx, rakx, fa, th);
         let rads = rdsva * (component_rad - fa).cos() + rdsha * (component_rad - fa).sin();
-        // Squared to remove the sign; polarity is applied at the end, hence
-        // the sqrt below.
+        // Squared to remove the sign, so the average is an RMS; `polarity` restores the sign
+        // after the sqrt below.
         radv += rads * rads;
     }
 
     let radvh = (radv / sample_count as f32).sqrt();
 
+    // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
+    // log-linear blend between. Inert as written -- see `radmin` above.
     azip!((
         gain in ArrayViewMut1::from(radiation),
         &freq in ArrayView1::from(frequency_hz),
@@ -162,7 +151,6 @@ pub fn horizontal_radiation_spectrum(
         let del = if freq <= fr1 {
             radmin
         } else if freq <= fr2 {
-            // The Fortran repeats `freq > fr1` here; the else-if already establishes it.
             let d = (freq / fr1).ln() / (fr2 / fr1).ln();
             if d < radmin { radmin } else { d }
         } else {
@@ -174,23 +162,24 @@ pub fn horizontal_radiation_spectrum(
     fr1
 }
 
-/// `SUBROUTINE RADV_lin(...)` — `hb_high_ref.f:2140`.
+/// Conically averaged radiation pattern for the vertical component, per frequency bin.
+/// (orig. `hb_high_ref.f:2140`)
 ///
-/// Vertical-component radiation coefficient. Unlike [`horizontal_radiation_spectrum`] this takes
-/// its random numbers from the caller-supplied `uniform_a`/`uniform_b` arrays (filled once
-/// per run by `RANU2`), so it consumes **no** draws from the shared stream.
+/// The vertical needs no horizontal projection, so the pattern is just `RDSV * sin(takeoff)`,
+/// and the average is taken over take-off angle and azimuth only.
 ///
-/// There is no `cmp` argument — the vertical component needs no horizontal
-/// projection, and the pattern is `RDSV * sin(th)`.
+/// # This routine draws NOTHING from the shared stream
 ///
-/// Returns the clobbered `fr1`, which the Fortran overwrites with `0.001`. As
-/// with [`horizontal_radiation_spectrum`] this mutates the caller's `flol`, and since `RADV_lin` is
-/// called *after* both `RADFRQ_lin` calls, `flol` ends the subfault at 0.001
-/// rather than the deck's 0.02. Inert only because `filter3d` is dead.
+/// It reads `uniform_a`/`uniform_b`, filled once per run, where
+/// [`horizontal_radiation_spectrum`] draws 5,000 numbers per call. **That asymmetry between the
+/// horizontals and the vertical is load-bearing** — it is why component order is fixed
+/// (`PHYSICS.md` §9), and why iterating the three components in any other order changes every
+/// waveform.
 ///
-/// The Fortran writes `fr2 = 1.5` before `fr2 = 0.01`, and `radvh = 0.7` before the
-/// computed average; only the second of each survives, and §3.5 dropped the dead ones.
-/// The take-off range is clamped to `[90, 180]` degrees.
+/// The take-off range is clamped to `[90°, 180°]`: only downgoing directions contribute.
+///
+/// Like [`horizontal_radiation_spectrum`], the returned `fr1` is a value the original wrote
+/// back into the caller's low-cut, and is inert for the same reason.
 pub fn vertical_radiation_spectrum(
     angles: &RadiationAngles,
     frequency_hz: &[f32],
@@ -218,17 +207,17 @@ pub fn vertical_radiation_spectrum(
         tha2 = 180.0 * pu;
     }
 
-    // The two uniform arrays are consumed in lockstep, one pair per sample. They are
-    // FILLED by two separate sequential passes -- draws 1..nr into `a`, then nr+1..2nr
-    // into `b` -- and that must not become one interleaved pass, or every vertical
-    // component moves. Zipping the consumption is free; zipping the fill is not.
-    // The two limits are fixed above, so their cosines are loop invariants -- they were
-    // being recomputed on every one of `sample_count` iterations, 224,000 wasted `cos`
-    // per medium-fault run.
+    // The two uniform arrays are consumed in lockstep, one pair per sample. They are FILLED by
+    // two separate sequential passes -- the first `nr` draws into `a`, the next `nr` into `b` --
+    // and THAT MUST NOT BECOME ONE INTERLEAVED PASS, or every vertical component moves.
+    // Zipping the consumption is free; zipping the fill is not.
+    //
+    // The two limits are fixed above, so their cosines are loop invariants.
     let (cos_tha1, cos_tha2) = (tha1.cos(), tha2.cos());
     let mut radv = 0.0f32;
     for (&ua, &ub) in uniform_a[..sample_count].iter().zip(uniform_b) {
-        // Uniform in cos(th) between the clamped limits.
+        // Uniform in cos(takeoff) between the clamped limits, which samples solid angle
+        // evenly rather than angle evenly.
         let th = ((1.0 - ua) * cos_tha1 + ua * cos_tha2).acos();
         let fa = 360.0 * pu * ub;
         let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
@@ -238,10 +227,9 @@ pub fn vertical_radiation_spectrum(
 
     let radvh = radv / sample_count as f32 / 2.0;
 
-    // Below `fr1` the theoretical pattern, above `fr2` the conical average, and a linear
-    // blend between. The Fortran writes `rdx` first and then overwrites or adds to it,
-    // which reads as three branches only once you notice the fall-through; written as
-    // one expression per bin it is visibly a piecewise function.
+    // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
+    // linear blend between. Written as one expression per bin so the piecewise structure is
+    // visible rather than emerging from a fall-through.
     azip!((
         gain in ArrayViewMut1::from(radiation),
         &freq in ArrayView1::from(frequency_hz),
