@@ -1,16 +1,30 @@
 //! Rust port of EMOD3D `hb_high_v6.0.3` — stochastic high-frequency seismogram
 //! generator, `BINMOD` + `VERSION1` configuration only.
 //!
-//! # Porting contract
+//! # What this crate is, as of Stage 3
 //!
-//! This crate is a *transliteration*, not a rewrite. Until the whole-program
-//! parity gate is green, every module here is expected to look like Fortran:
-//! 1-based indexing, column-major 2-D arrays, `goto`s rendered as labelled
-//! loops, and literal constants copied character-for-character from the source.
-//! See `PORTING_RULES.md` at the repo root before changing anything.
+//! It began as a *transliteration* of `reference/hb_high_ref.f`, gated on byte-identical
+//! output. **That contract has expired**, deliberately and in stages: §2.1 replaced the
+//! FFT, §2.2b the gamma function, §2.5 turned `DELAZ5` into a WGS84 geodesic, §2.6 fixed
+//! two reproduced defects, §2.8 corrected the truncated pi literals. The Fortran-shaped
+//! code went with it — storage is 0-based, the 2-D array wrappers are gone, magic
+//! integers are enums.
 //!
-//! The single hard rule: **output must be byte-identical to
-//! `reference/hb_high_ref.f`** on every deck in `harness/decks/`.
+//! What the port is gated on now is **scientific equivalence, not identity**: the
+//! distributions of intensity measures must match production Fortran within ±2%, which
+//! is roughly 0.04 of a typical ground-motion-model aleatory sigma. See `REFACTOR.md`
+//! for the tier structure and `ENGINEERING_RULES.md` for what may and may not change.
+//!
+//! `PORTING_RULES.md` is retained as **archaeology**. It explains why the Fortran does
+//! what it does, which is still needed when reading the oracle — but most of its rules
+//! are marked expired, and it is no longer a description of this crate.
+//!
+//! Three things genuinely cannot move, and none of them is fidelity:
+//!
+//! * the **output format** — raw little-endian `f32`, component index fastest, plus the
+//!   `(1x,f10.4)` distance on stderr that `hf_sim.py` parses;
+//! * **same-version determinism** — one seed, one build, one answer;
+//! * `next_f32`'s **24-bit** conversion, which keeps deviates inside `[0, 1)`.
 
 pub mod config;
 pub mod deck;
