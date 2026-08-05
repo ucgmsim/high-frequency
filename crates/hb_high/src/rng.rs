@@ -334,6 +334,37 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
     }
 }
 
+/// One standard normal deviate.
+///
+/// Box-Muller, taking the cosine component and discarding the sine partner — two uniform
+/// draws per call.
+///
+/// # Why this is not `fill_normal_deviates` with `count = 1`
+///
+/// That routine renormalises its whole output so the sum of squares equals the count,
+/// which for a single value would force it to exactly ±1 and destroy the distribution.
+/// The renormalisation only makes sense over a block, and the block it used to be applied
+/// over — 262,144 deviates supplying a few thousand reads — was an artifact of a buffer
+/// size rather than anything physical. See §3.2.
+///
+/// The practical difference is small and in the right direction: the block form pinned
+/// the RMS to exactly 1 where an un-normalised generator lands within `1/sqrt(2N)` of it,
+/// about 0.14%. This returns a true N(0,1) sample.
+pub fn normal_deviate<R: Draws>(rng: &mut R) -> f32 {
+    // Zero rejection, as in `fill_normal_deviates`: `ln(0)` is not a number, and the
+    // `[0, 1)` contract makes zero reachable.
+    let mut u1 = rng.next_f32();
+    while u1 == 0.0 {
+        u1 = rng.next_f32();
+    }
+    let mut u2 = rng.next_f32();
+    while u2 == 0.0 {
+        u2 = rng.next_f32();
+    }
+    let r = (-u1.ln() * 2.0).sqrt();
+    r * (std::f32::consts::TAU * u2).cos()
+}
+
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
 pub fn fill_uniform_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]) {
     // Explicit `count` for the same reason as `fill_normal_deviates`.

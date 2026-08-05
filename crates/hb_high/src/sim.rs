@@ -34,18 +34,10 @@ use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use crate::ray::green_function;
-use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Draws, DrawSource};
+use crate::rng::{fill_uniform_deviates, normal_deviate, Draws, DrawSource};
 use crate::site::{site_amplification_factors, apply_site_amplification};
-use crate::state::{params, RayState, VelocityModel, VelocityModelInput, WaveMode};
+use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::stochastic_spectrum;
-
-/// `mm` and `mmv` as the **main program** sees them.
-///
-/// Under `VERSION1` the main program includes `params_no_window.h`, so both are
-/// 262144 — not the 32769/180000 that every subroutine gets from `params.h`.
-/// This matters here because `ndata` is clamped to `mmv` and
-/// `fill_normal_deviates(mmv, ...)` draws exactly this many deviates.
-const MMV: usize = params::MMV;
 
 /// The three output components, in the order the Fortran computes them.
 ///
@@ -438,8 +430,7 @@ struct Deviates {
     /// does; legacy reproduces the Fortran's `irand + 8 > 0` sign test, which is an
     /// artifact of `init_random_seed` mutating its argument in place.
     jitter_enabled: bool,
-    /// `fgrand` — one block of `MMV`, indexed by `irandcnt`.
-    normal: Vec<f32>,
+
     /// `rna` / `rnb` — the vertical component's uniforms.
     radv_uniform_a: Vec<f32>,
     radv_uniform_b: Vec<f32>,
@@ -448,9 +439,9 @@ struct Deviates {
 /// Seed, then make the three pre-draws.
 ///
 /// **The order and the counts are the contract, not an implementation detail.** Seed,
-/// then `nr` uniforms into `a`, then `nr` uniforms into `b`, then `MMV` normals. Changing
-/// any of the three moves every sample downstream, which is why this is one function
-/// rather than three calls spread through the setup. See `REFACTOR.md` §2.6b.
+/// then `nr` uniforms into `a`, then `nr` uniforms into `b`. Changing either moves every
+/// sample downstream, which is why this is one function rather than two calls spread
+/// through the setup.
 ///
 /// The two uniform blocks must stay two sequential fills. Interleaving them into one pass
 /// would put different deviates in different slots and change every vertical component.
@@ -469,16 +460,22 @@ fn seed_and_predraw(
     fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_a);
     fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_b);
 
-    // This one STAYS at `MMV`, and not from laziness: the number drawn is part of the
-    // stream. Shrinking the allocation without shrinking the draw is a buffer overrun;
-    // shrinking the draw changes every waveform. See REFACTOR.md §2.6b.
-    let mut normal = vec![0.0f32; MMV];
-    if draw_normals {
-        fill_normal_deviates(&mut rng, MMV, &mut normal);
-    }
-    let _ = config;
+    // The `MMV` block is GONE. It drew 262,144 normal deviates per station into a buffer
+    // with exactly ONE read site, and `irandcnt` advanced once per surviving subfault:
+    // 4 reads on the mini fault, 2,827 on the alpine -- 0.0015% and 1.1% of what was
+    // drawn. It cost 3.0 ms and 1.0 MiB resident per process, which is 27% of total
+    // runtime on the mini fault, and the mini fault is the common case when a 1000-station
+    // run gives every station its own process.
+    //
+    // It also carried a subtler defect. `fill_normal_deviates` renormalises the whole
+    // block so its sum of squares equals its length, so the handful of values actually
+    // used were scaled by a factor derived from ~262,140 values that were never read.
+    // That factor is not physics; it is an artifact of a buffer size.
+    //
+    // The perturbation now draws on demand, at its point of use. See `subfault_pass`.
+    let _ = (draw_normals, config);
 
-    (rng, Deviates { jitter_enabled, normal, radv_uniform_a, radv_uniform_b })
+    (rng, Deviates { jitter_enabled, radv_uniform_a, radv_uniform_b })
 }
 
 /// What the time-window pass produces for one segment.
@@ -617,11 +614,6 @@ fn subfault_pass(
     let mut siteamp_factors = vec![0.0f32; run.site_table_len];
     let mut ray = RayState::default();
 
-    // 0-based. The Fortran starts this at 1 and PRE-increments, so its first read is
-    // index 2, i.e. storage element 1 -- element 0 is never read. Starting at 0 and
-    // pre-incrementing lands on that same element.
-    let mut irandcnt = 0usize;
-
     for (i, j) in seg.strike_major() {
         let subfault = seg.at(i, j);
         if subfault.slip < 0.001 {
@@ -659,8 +651,10 @@ fn subfault_pass(
         let base_rvf = rupture.factor(ray_geometry.depth_km);
         let mut rvf = base_rvf;
         if run.rv_sig1 > 0.0 {
-            irandcnt += 1;
-            rvf = base_rvf * (deviates.normal[irandcnt] * run.rv_sig1).exp();
+            // Drawn here rather than read from a pre-filled block. One deviate per
+            // surviving subfault is what was ever used; `irandcnt` existed only to index
+            // into 262,144 of them.
+            rvf = base_rvf * (normal_deviate(rng) * run.rv_sig1).exp();
             if rvf > run.rvfmax {
                 rvf = run.rvfmax;
             }
