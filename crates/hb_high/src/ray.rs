@@ -423,76 +423,6 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
     (p0, t.re)
 }
 
-/// `subroutine travel_time(ir,ray_parameter,t0,p1,t1,range_km)` — `hb_high_ref.f:3610`.
-///
-/// Clamps the ray parameter to the smallest `1/v` over every segment and both
-/// sides of each reflecting interface, then evaluates the travel time there.
-/// Returns `(p1, t1)`.
-///
-/// # Both outputs are discarded by the only caller
-///
-/// `green_function` passes `p1`/`t1` at `:3313` and never reads them. The call is
-/// side-effect-free — `travel_time` writes no common block — so it could be elided
-/// entirely. It is kept so the two sources stay line-comparable, and because
-/// removing it would be a behaviour-neutral change that still deserves to be
-/// recorded rather than assumed. See `PORTING_RULES.md` §7.
-///
-/// The `t0` argument is likewise never read by the Fortran.
-///
-/// # Mostly inert under the production ray
-///
-/// The interface clamp only runs where `it(i) == 1`, i.e. a reflection, which
-/// `build_ray_path` sets only when consecutive segments share a layer. The production ray
-/// is strictly descending (`nh` running `ksrc` down to 2), so `it` is 0
-/// throughout and only the first clamp applies. The branch matters for the
-/// Moho-multiple ray shapes.
-///
-/// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
-/// velocities are considered, for every segment.
-pub fn travel_time(
-    state: &RayState,
-    vmod: &VelocityModel,
-    ray_parameter: f64,
-    _time_guess: f64,
-    range_km: f64,
-) -> (f64, f64) {
-    let n = state.rays.nd as usize;
-    let mut p1 = ray_parameter;
-
-    for i in 0..n {
-        let nup = state.coff.nup1[i];
-        let nhi = state.rays.nh[i] as usize;
-
-        let mut vb = vmod[nhi].vsh_km_s;
-        let mut va = vb;
-        if state.rays.nm[0] != WaveMode::Sh {
-            va = vmod[nhi].vp_km_s;
-        }
-        p1 = p1.min(1.0 / va).min(1.0 / vb);
-
-        // The last segment has no interface below it.
-        if i == n - 1 {
-            continue;
-        }
-        // Transmission needs no second clamp; only reflections do.
-        if state.coff.it[i] == Interaction::Transmission {
-            continue;
-        }
-
-        // Label 10 for upgoing, otherwise the layer below.
-        let k = nup.step_from(nhi);
-        vb = vmod[k].vsh_km_s;
-        va = vb;
-        if state.rays.nm[0] != WaveMode::Sh {
-            va = vmod[k].vp_km_s;
-        }
-        p1 = p1.min(1.0 / va).min(1.0 / vb);
-    }
-
-    let p = Complex64::from(p1);
-    let t = cagniard_time(state, vmod, p, range_km);
-    (p1, t.re)
-}
 
 /// Take-off direction from the source — the parity of the Fortran's `itype`.
 ///
@@ -742,4 +672,76 @@ pub fn green_function(
         rpath: rpd as f32,
         qbar,
     }
+}
+
+
+/// `subroutine travel_time(ir,ray_parameter,t0,p1,t1,range_km)` — `hb_high_ref.f:3610`.
+///
+/// Clamps the ray parameter to the smallest `1/v` over every segment and both
+/// sides of each reflecting interface, then evaluates the travel time there.
+/// Returns `(p1, t1)`.
+///
+/// # Both outputs are discarded by the only caller
+///
+/// `green_function` passes `p1`/`t1` at `:3313` and never reads them. The call is
+/// side-effect-free — `travel_time` writes no common block — so it could be elided
+/// entirely. It is kept so the two sources stay line-comparable, and because
+/// removing it would be a behaviour-neutral change that still deserves to be
+/// recorded rather than assumed. See `PORTING_RULES.md` §7.
+///
+/// The `t0` argument is likewise never read by the Fortran.
+///
+/// # Mostly inert under the production ray
+///
+/// The interface clamp only runs where `it(i) == 1`, i.e. a reflection, which
+/// `build_ray_path` sets only when consecutive segments share a layer. The production ray
+/// is strictly descending (`nh` running `ksrc` down to 2), so `it` is 0
+/// throughout and only the first clamp applies. The branch matters for the
+/// Moho-multiple ray shapes.
+///
+/// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
+/// velocities are considered, for every segment.
+pub fn travel_time(
+    state: &RayState,
+    vmod: &VelocityModel,
+    ray_parameter: f64,
+    _time_guess: f64,
+    range_km: f64,
+) -> (f64, f64) {
+    let n = state.rays.nd as usize;
+    let mut p1 = ray_parameter;
+
+    for i in 0..n {
+        let nup = state.coff.nup1[i];
+        let nhi = state.rays.nh[i] as usize;
+
+        let mut vb = vmod[nhi].vsh_km_s;
+        let mut va = vb;
+        if state.rays.nm[0] != WaveMode::Sh {
+            va = vmod[nhi].vp_km_s;
+        }
+        p1 = p1.min(1.0 / va).min(1.0 / vb);
+
+        // The last segment has no interface below it.
+        if i == n - 1 {
+            continue;
+        }
+        // Transmission needs no second clamp; only reflections do.
+        if state.coff.it[i] == Interaction::Transmission {
+            continue;
+        }
+
+        // Label 10 for upgoing, otherwise the layer below.
+        let k = nup.step_from(nhi);
+        vb = vmod[k].vsh_km_s;
+        va = vb;
+        if state.rays.nm[0] != WaveMode::Sh {
+            va = vmod[k].vp_km_s;
+        }
+        p1 = p1.min(1.0 / va).min(1.0 / vb);
+    }
+
+    let p = Complex64::from(p1);
+    let t = cagniard_time(state, vmod, p, range_km);
+    (p1, t.re)
 }

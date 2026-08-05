@@ -27,7 +27,6 @@
 //! * `next_f32`'s **24-bit** conversion, which keeps deviates inside `[0, 1)`.
 
 pub mod config;
-pub mod deck;
 pub mod fft;
 pub mod fort;
 pub mod geom;

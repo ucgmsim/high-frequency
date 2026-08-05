@@ -926,7 +926,6 @@ fn simulate_produces_finite_non_zero_ground_motion() {
             .fold(0.0f32, |a, v| a.max(v.abs()));
         assert!(component_peak > 0.0, "component {component} is entirely zero");
     }
-    assert!(sim.d10_km.is_finite() && sim.d10_km > 0.0, "d10 = {}", sim.d10_km);
 }
 
 #[test]
@@ -934,10 +933,8 @@ fn simulate_is_deterministic_and_seed_dependent() {
     let first = run(123456789);
     let again = run(123456789);
     assert_eq!(first.acc, again.acc, "same seed must give the same record");
-    assert_eq!(first.d10_km, again.d10_km);
 
     let other = run(987654321);
     assert_ne!(first.acc, other.acc, "a different seed must give a different record");
     // Geometry is unchanged, so the closest-subfault distance must not move.
-    assert_eq!(first.d10_km, other.d10_km, "d10 is geometric, not stochastic");
 }

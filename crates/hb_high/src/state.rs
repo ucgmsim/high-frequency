@@ -264,14 +264,6 @@ pub enum Interaction {
 }
 
 impl Interaction {
-    pub fn from_fortran(v: i32) -> Self {
-        match v {
-            0 => Self::Transmission,
-            1 => Self::Reflection,
-            2 => Self::Direct,
-            _ => panic!("interface type {v} is not one of 0, 1 or 2"),
-        }
-    }
 
     pub fn as_fortran(self) -> i32 {
         match self {
@@ -324,13 +316,6 @@ impl Direction {
         }
     }
 
-    pub fn from_fortran(v: i32) -> Self {
-        match v {
-            1 => Self::Up,
-            -1 => Self::Down,
-            _ => panic!("segment direction {v} is not +1 or -1"),
-        }
-    }
 
     pub fn as_fortran(self) -> i32 {
         match self {

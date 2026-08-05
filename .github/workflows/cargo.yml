@@ -29,12 +29,10 @@ jobs:
       # Locally a lint must not block a numerics experiment mid-flight; on a pull request it
       # must. A crate-root `#![allow]` is how 28 warnings once accumulated invisibly.
       #
-      # Scoped to the crates that survive Stage 4. `im` and `validate` carry 7 warnings
-      # between them -- index loops, a complex type, a negated float comparison -- and §4.3
-      # deletes both, so fixing them is work with a known expiry date. DELETE THE -p FLAGS
-      # when those crates go; at that point `--workspace` is the whole gate.
+      # `--workspace` since §4.3: the 7 warnings that forced a scoped gate lived in `im` and
+      # `validate`, and both are deleted.
       - name: Clippy
-        run: cargo clippy -p hb_high -p hf_simulation_ffi --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # No `cargo fmt --check` here, and that is a choice rather than an oversight. This
       # crate has never been rustfmt'd: its formatting is hand-set, dense, and in places

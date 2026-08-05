@@ -1,3 +1,0 @@
-# The commit the cheap gate compares against. Re-freeze when a commit
-# deliberately changes the draw structure and the long tier has adjudicated it.
-bb904585089d5aa2a2bf50a602a453bf22cd72f4

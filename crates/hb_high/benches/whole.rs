@@ -1,97 +1,142 @@
-//! End-to-end benchmarks: the whole program, per fault.
+//! End-to-end benchmarks: one station, whole pipeline, per fault size.
 //!
-//! These drive the built binary through `std::process::Command` rather than
-//! calling into the library. `run()` in `main.rs` reads stdin and writes files, so
-//! benching it in-process would require restructuring it — which is Phase 3 work,
-//! not a prerequisite for a baseline. Process startup is well under a millisecond
-//! against runs of tens of milliseconds upward, so the measurement is honest.
+//! # What changed in §4.3, and why it is an improvement
 //!
-//! `CARGO_BIN_EXE_hb_high` is set by Cargo for benches, so the binary is located
-//! without guessing at target paths or profiles.
+//! These used to drive the built binary through `std::process::Command`, feeding it a deck on
+//! stdin — because `run()` in `main.rs` read stdin and wrote files, so there was nothing else
+//! to call. The note here used to say that benching in-process "would require restructuring
+//! it, which is Phase 3 work".
+//!
+//! That restructuring is done: `main.rs` and the deck reader are gone and `simulate` takes
+//! typed values. So these now call the library directly, which removes process startup, deck
+//! generation via `python3 harness/mkdeck.py`, text parsing and a file write from the
+//! measurement. What is left is the simulation, which is the thing worth timing — so these
+//! numbers are NOT comparable with `harness/bench_baseline.csv`, which timed all of it.
+//!
+//! The faults are built in code rather than read from fixtures, for the same reason the
+//! snapshot test builds its own: a benchmark wants *fixed* inputs of a known size, and
+//! `subfault_count` is what runtime scales with.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::hint::black_box;
 
-/// Faults spanning three orders of magnitude in subfault count. The alpine case
-/// is minutes per run, so it is opt-in via `HB_BENCH_SLOW=1` rather than part of
-/// the default set.
-const FAULTS: &[(&str, &str, usize)] = &[
-    ("mini", "2012p578973", 4),
-    ("medium", "2013p543824", 112),
-    ("alpine", "alpine_base_r1", 2827),
-];
+use hb_high::config::{
+    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
+};
+use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
+use hb_high::state::{InputLayer, VelocityModelInput};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// Grid shapes spanning three orders of magnitude in subfault count. The alpine-scale case is
+/// seconds per iteration, so it stays opt-in via `HB_BENCH_SLOW=1`.
+const FAULTS: &[(&str, usize, usize)] =
+    &[("mini", 4, 1), ("medium", 14, 8), ("alpine", 257, 11)];
+
+fn uniform_fault(along: usize, down: usize) -> StochModel {
+    let segment = Segment::builder()
+        .fault_lon_deg(173.0)
+        .fault_lat_deg(-43.0)
+        .along_strike_count(along)
+        .down_dip_count(down)
+        .subfault_length_km(1.5)
+        .subfault_width_km(1.5)
+        .strike_deg(220.0)
+        .dip_deg(60.0)
+        .rake_deg(160.0)
+        .top_depth_km(1.0)
+        .hypocentre_along_strike_km(0.0)
+        .hypocentre_down_dip_km(1.5)
+        .subfaults(vec![
+            Subfault { slip: 50.0, rise_time_s: 0.5, rupture_time_s: 0.0 };
+            along * down
+        ])
+        .build();
+    StochModel::new(vec![segment], DEG_TO_RAD)
 }
 
-/// Build a deck via the harness generator, so benches and the parity gate cannot
-/// drift apart in what they consider a production deck.
-fn deck(fault: &str, out_dir: &Path) -> String {
-    let root = repo_root();
-    let station = out_dir.join("station.ll");
-    let output = out_dir.join("bench_out.bin");
-    let o = Command::new("python3")
-        .arg(root.join("harness/mkdeck.py"))
-        .arg("--stoch")
-        .arg(root.join(format!("harness/fixtures/stoch/{fault}.stoch")))
-        .arg("--velmod")
-        .arg(root.join("harness/fixtures/velocity_model"))
-        .arg("--station-file")
-        .arg(&station)
-        .arg("--output-file")
-        .arg(&output)
-        .arg("--write-station")
-        .output()
-        .expect("running harness/mkdeck.py");
-    assert!(
-        o.status.success(),
-        "mkdeck.py failed: {}",
-        String::from_utf8_lossy(&o.stderr)
-    );
-    String::from_utf8(o.stdout).expect("deck is utf8")
+fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
+    let built: Vec<InputLayer> = (0..layers)
+        .map(|k| {
+            let frac = k as f64 / (layers - 1) as f64;
+            let vsh_km_s = 0.5 + 4.1 * frac;
+            let qs = 50.0 + 150.0 * frac;
+            InputLayer {
+                depth_km: 0.0,
+                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                vp_km_s: vsh_km_s * 1.75,
+                vsh_km_s,
+                density_g_cm3: 1.81 + 1.5 * frac,
+                attenuation_p: (2.0 * qs) as f32,
+                attenuation_s: qs as f32,
+            }
+        })
+        .collect();
+    let mut vmod = VelocityModelInput::new();
+    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
+    (vmod, count)
 }
 
-fn run_once(exe: &str, deck: &str) {
-    let mut child = Command::new(exe)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawning hb_high");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(deck.as_bytes())
-        .expect("writing deck");
-    let status = child.wait().expect("waiting for hb_high");
-    assert!(status.success(), "hb_high exited with {status}");
+fn production_config() -> HfConfig {
+    HfConfig {
+        stress_drop: 50.0,
+        rayset: vec![RayType(1)],
+        site_amp: true,
+        seed: 12345,
+        duration: 40.0,
+        dt: 0.005,
+        fmax: 10.0,
+        kappa: 0.045,
+        qfexp: 0.6,
+        rupture_velocity: RuptureVelocity { frac: None, shallow: None, deep: None },
+        czero: None,
+        calpha: None,
+        moment: None,
+        rupture_velocity_override: None,
+        vs_moho: None,
+        nl_skip: -99,
+        fa_sig1: 0.0,
+        fa_sig2: 0.0,
+        rv_sig1: 0.1,
+        path_duration: PathDurationModel::Gp2010,
+        stress_param_adjust: StressParamAdjust::None,
+        target_magnitude: None,
+        fault_area: None,
+    }
 }
 
 fn bench_whole(c: &mut Criterion) {
-    let exe = env!("CARGO_BIN_EXE_hb_high");
-    let out_dir = repo_root().join("harness/out/bench");
-    std::fs::create_dir_all(&out_dir).expect("creating harness/out/bench");
+    let (vmod, layer_count) = crustal_model(20);
+    let config = production_config();
     let slow = std::env::var("HB_BENCH_SLOW").is_ok_and(|v| v == "1");
 
     let mut group = c.benchmark_group("whole_program");
-    // Even the smallest fault is ~50 ms, so criterion's default 100 samples would
-    // take minutes for no extra precision.
+    // Even the smallest fault is milliseconds and the largest is seconds, so criterion's
+    // default 100 samples would take minutes for no extra precision.
     group.sample_size(10);
 
-    for &(name, fault, subfaults) in FAULTS {
+    for &(name, along, down) in FAULTS {
         if name == "alpine" && !slow {
             eprintln!("skipping whole_program/alpine (set HB_BENCH_SLOW=1 to include)");
             continue;
         }
-        let d = deck(fault, &out_dir);
+        let slip = uniform_fault(along, down);
+        let station = Station { stlon: 173.3, stlat: -42.7, cap: "BENCH".to_string() };
         group.bench_with_input(
-            BenchmarkId::new(name, subfaults),
-            &d,
-            |b, d| b.iter(|| run_once(exe, d)),
+            BenchmarkId::new(name, slip.subfault_count),
+            &slip,
+            |b, slip| {
+                b.iter(|| {
+                    black_box(
+                        hb_high::sim::simulate(
+                            &config,
+                            slip,
+                            &vmod,
+                            layer_count,
+                            station.clone(),
+                        )
+                        .expect("simulation succeeds"),
+                    )
+                })
+            },
         );
     }
     group.finish();

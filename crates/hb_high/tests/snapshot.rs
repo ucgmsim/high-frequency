@@ -37,7 +37,7 @@
 use hb_high::config::{
     HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
 };
-use hb_high::input::{read_stoch, read_velocity_model, Station};
+use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::sim::simulate;
 use hb_high::state::VelocityModelInput;
 
@@ -72,6 +72,53 @@ fn summarise(acc: &[f32], ndata: usize) -> String {
         }
     }
     fields.join(" ")
+}
+
+/// A uniform-slip single-segment fault, `along` by `down` subfaults.
+fn uniform_fault(along: usize, down: usize) -> StochModel {
+    let segment = Segment::builder()
+        .fault_lon_deg(173.0)
+        .fault_lat_deg(-43.0)
+        .along_strike_count(along)
+        .down_dip_count(down)
+        .subfault_length_km(1.5)
+        .subfault_width_km(1.5)
+        .strike_deg(220.0)
+        .dip_deg(60.0)
+        .rake_deg(160.0)
+        .top_depth_km(1.0)
+        .hypocentre_along_strike_km(0.0)
+        .hypocentre_down_dip_km(1.5)
+        .subfaults(vec![
+            Subfault { slip: 50.0, rise_time_s: 0.5, rupture_time_s: 0.0 };
+            along * down
+        ])
+        .build();
+    StochModel::new(vec![segment], DEG_TO_RAD)
+}
+
+/// A smoothly graded crustal model with a thin near-surface layer, so `insert_air_layer`
+/// fires as it does on every production model.
+fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
+    let built: Vec<hb_high::state::InputLayer> = (0..layers)
+        .map(|k| {
+            let frac = k as f64 / (layers - 1) as f64;
+            let vsh_km_s = 0.5 + 4.1 * frac;
+            let qs = 50.0 + 150.0 * frac;
+            hb_high::state::InputLayer {
+                depth_km: 0.0,
+                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                vp_km_s: vsh_km_s * 1.75,
+                vsh_km_s,
+                density_g_cm3: 1.81 + 1.5 * frac,
+                attenuation_p: (2.0 * qs) as f32,
+                attenuation_s: qs as f32,
+            }
+        })
+        .collect();
+    let mut vmod = VelocityModelInput::new();
+    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
+    (vmod, count)
 }
 
 fn production_config(seed: u64, duration: f32) -> HfConfig {
@@ -109,18 +156,14 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
     // SAFETY: set before any simulation runs, and this test is the only reader.
     unsafe { std::env::set_var("HB_FIXTURE_RNG", "1") };
 
-    let velocity_text = std::fs::read_to_string("../../harness/fixtures/velocity_model")
-        .expect("fixture velocity model");
-    let mut vmod = VelocityModelInput::new();
-    let layer_count =
-        read_velocity_model(&velocity_text, &mut vmod, 999.9).expect("valid velocity model");
+    // Built in code, not read from a fixture. §4.3 deleted the readers, and a snapshot
+    // needs FIXED inputs rather than realistic ones -- these are chosen to be reproducible
+    // and to span two grid shapes, not to resemble any particular earthquake.
+    let (vmod, layer_count) = crustal_model(20);
 
     let mut lines = Vec::new();
-    for fault in ["2012p578973", "2013p543824"] {
-        let stoch_text =
-            std::fs::read_to_string(format!("../../harness/fixtures/stoch/{fault}.stoch"))
-                .expect("fixture stoch model");
-        let slip = read_stoch(&stoch_text, DEG_TO_RAD).expect("valid stoch");
+    for (label, along, down) in [("small", 4usize, 1usize), ("medium", 14, 8)] {
+        let slip = uniform_fault(along, down);
         let origin = &slip.segments[0];
 
         for (seed, duration) in [(12345u64, 40.0f32), (987654321, 60.0)] {
@@ -137,10 +180,10 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
             let peak = sim.acc.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(
                 peak > 0.0,
-                "{fault} seed {seed} at {duration} s produced silence -- snapshotting \
+                "{label} seed {seed} at {duration} s produced silence -- snapshotting \
                  zeros would pin nothing"
             );
-            lines.push(format!("{fault} {seed} {duration} {}", summarise(&sim.acc, sim.ndata)));
+            lines.push(format!("{label} {seed} {duration} {}", summarise(&sim.acc, sim.ndata)));
         }
     }
     let produced = lines.join("\n") + "\n";

@@ -107,13 +107,6 @@ pub struct Simulation {
     /// Ground motion, **interleaved** 090/000/ver — `ndata * 3` values, component
     /// fastest, which is the order the Fortran streams to disk.
     pub acc: Vec<f32>,
-    /// `d10` — the closest subfault distance, km. The Fortran writes this to stderr
-    /// as `(1x,f10.4)` and `hf_sim.py` parses it back; returning it instead makes
-    /// the text format the driver's problem.
-    ///
-    /// Note it is re-initialised per fault segment in the original, so on a
-    /// multi-segment model this describes the **last** segment only. Reproduced.
-    pub d10_km: f32,
 }
 
 /// Why a simulation could not be produced.
@@ -292,7 +285,6 @@ pub fn simulate(
     // Starts at infinity so the first segment's value wins the `min` below; a
     // zero-segment model falls through to the Fortran's 1000.0 sentinel, which `main`
     // then prints as a distance.
-    let mut d10 = f32::INFINITY;
 
     // A non-negative `nl_skip` would route the model through `grandvel`, the
     // velocity-model perturbation, which is dead under the production deck and not
@@ -319,7 +311,6 @@ pub fn simulate(
         // and it escapes: `hf_sim.py` parses it off stderr. Every fixture is
         // single-segment, which is why it was invisible. Now the minimum over all of them,
         // which is what "closest subfault distance" means.
-        d10 = d10.min(windows.d10_km);
 
         let plan = plan_segment_spectrum(windows.tmax, dt, &run);
 
@@ -349,8 +340,7 @@ pub fn simulate(
         .collect();
     debug_assert_eq!(out.len(), ndata * 3);
 
-    let d10_km = if d10.is_finite() { d10 } else { 1000.0 };
-    Ok(Simulation { ndata, dt, acc: out, d10_km })
+    Ok(Simulation { ndata, dt, acc: out })
 }
 
 
@@ -519,8 +509,6 @@ struct WindowPass {
     window_s: Vec<f32>,
     /// Longest window over the segment; sizes the transform.
     tmax: f32,
-    /// `d10` — closest subfault slant distance, km.
-    d10_km: f32,
 }
 
 /// Time-window pass — `hb_high_ref.f`'s first subfault loop.
@@ -540,7 +528,6 @@ fn time_window_pass(
     run: &RunScalars,
 ) -> WindowPass {
     let mut tmax = 0.0f32;
-    let mut d10_km = 10000.0f32;
     let mut window_s = vec![0.0f32; seg.subfault_total()];
 
     for (i, j) in seg.depth_major() {
@@ -577,10 +564,9 @@ fn time_window_pass(
         if window > tmax {
             tmax = window;
         }
-        d10_km = d10_km.min(ray.slant_km);
     }
 
-    WindowPass { window_s, tmax, d10_km }
+    WindowPass { window_s, tmax }
 }
 
 /// Transform length and frequency axis for one segment.
