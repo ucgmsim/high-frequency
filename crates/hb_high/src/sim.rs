@@ -483,6 +483,36 @@ fn seed_and_predraw(
     (rng, Deviates { jitter_enabled, radv_uniform_a, radv_uniform_b })
 }
 
+/// The velocity-model layer a source at `depth_km` sits in.
+///
+/// # The defect this replaces (§3.4)
+///
+/// The two subfault passes disagreed about what to do when a source is deeper than the
+/// whole model, and **both answers were wrong**:
+///
+/// * the window pass had no fallback at all, so it silently reused the *previous
+///   subfault's* velocity — and on the very first subfault of the first station the
+///   Fortran read uninitialised memory. The port pinned that to 0.0, which is a choice
+///   rather than the original's behaviour, and no more defensible.
+/// * the subfault pass fell back to layer 0 for the velocity — which after
+///   `insert_air_layer` is the **air layer**, `vsh = 0.0005 km/s` — and set `ksrc` to
+///   `layer_count`, one PAST the model. That index then reached
+///   `site_amplification_factors`, which read a zeroed `Layer`, computed
+///   `ln(0 / (bz*pz)) = -inf`, and exponentiated it back to a gain of **zero**. A
+///   subfault below the model contributed nothing at all. The Fortran prints ` wrong!`
+///   at that point, which is a fair summary.
+///
+/// Both now take the deepest real layer, which is the only physically sensible reading:
+/// a source below the model is in the half-space, and the half-space is the bottom layer.
+///
+/// This is reachable — the `vs_moho=4.2` deck truncates the model at the Moho and lands
+/// subfaults beneath it, and it is the one deck of 22 whose output moves.
+fn source_layer_for(vmod: &VelocityModel, run: &RunScalars, depth_km: f32) -> usize {
+    (0..run.layer_count)
+        .find(|&k| vmod[k].depth_km >= depth_km as f64)
+        .unwrap_or(run.layer_count - 1)
+}
+
 /// What the time-window pass produces for one segment.
 struct WindowPass {
     /// One entry per real subfault, indexed by [`Segment::grid_index`].
@@ -513,19 +543,12 @@ fn time_window_pass(
     let mut d10_km = 10000.0f32;
     let mut window_s = vec![0.0f32; seg.subfault_total()];
 
-    // Carried ACROSS subfaults deliberately. Unlike the subfault pass, this one has no
-    // `vsh(1)` default before the lookup: if the subfault depth exceeds every layer,
-    // the previous subfault's velocity is reused. Undefined on the very first subfault
-    // of the first station in the Fortran; zero here.
-    let mut shear_velocity_km_s = 0.0f32;
-
     for (i, j) in seg.depth_major() {
         let ray = geom.at(i, j);
-        if let Some(ksrc) =
-            (0..run.layer_count).find(|&k| vmod[k].depth_km >= ray.depth_km as f64)
-        {
-            shear_velocity_km_s = vmod[ksrc].vsh_km_s as f32;
-        }
+        // A subfault below the whole model takes the DEEPEST layer -- see
+        // `source_layer_for`, and §3.4 for why neither of the original fallbacks was
+        // defensible.
+        let shear_velocity_km_s = vmod[source_layer_for(vmod, run, ray.depth_km)].vsh_km_s as f32;
 
         let rvf = rupture.factor(ray.depth_km);
 
@@ -672,27 +695,9 @@ fn subfault_pass(
         // `accumulate_subfault` reads any of them, so every element is written before it
         // is read. The fill was 192 KB of memset per subfault that nothing could observe.
 
-        // This pass DOES default the velocity and density before the lookup, unlike the
-        // window pass, which carries the previous subfault's value.
-        let mut shear_velocity_km_s = vmod[0].vsh_km_s as f32;
-        let mut density_g_cm3 = vmod[0].density_g_cm3 as f32;
-        let ksrc = match (0..run.layer_count)
-            .find(|&k| vmod[k].depth_km >= ray_geometry.depth_km as f64)
-        {
-            Some(k) => {
-                shear_velocity_km_s = vmod[k].vsh_km_s as f32;
-                density_g_cm3 = vmod[k].density_g_cm3 as f32;
-                k
-            }
-            // Keeps the first layer's defaults, and `layer_count` is one PAST the last
-            // layer -- the Fortran's `j0 + 1`, read as such below and by
-            // `site_amplification_factors`. See PORTING_RULES.md §7.
-            None => run.layer_count,
-        };
-        if ksrc == run.layer_count {
-            // The Fortran prints 'wrong!' and carries on with ksrc = j0+1.
-            println!(" wrong!");
-        }
+        let ksrc = source_layer_for(vmod, run, ray_geometry.depth_km);
+        let shear_velocity_km_s = vmod[ksrc].vsh_km_s as f32;
+        let density_g_cm3 = vmod[ksrc].density_g_cm3 as f32;
 
         let base_rvf = rupture.factor(ray_geometry.depth_km);
         let mut rvf = base_rvf;

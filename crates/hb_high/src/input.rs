@@ -315,9 +315,18 @@ pub fn read_velocity_model(
 /// `depth_km(1) = 0.05` and `vp_km_s(1) = 1.8`, so `layer_count` becomes 35 and `skip_layers` goes
 /// from -99 to -98 (still negative, so `grandvel` stays dead).
 ///
-/// Note the shift copies seven fields down but only **five** are overwritten at
-/// index 1. `attenuation_p(1)` and `attenuation_s(1)` therefore keep the original first layer's Q
-/// values rather than getting air-like ones. Faithful to the Fortran.
+/// # The air layer's Q is never set, and it does not matter
+///
+/// The shift copies seven fields down but only **five** are overwritten at index 0, so
+/// `attenuation_p` and `attenuation_s` there keep the original first layer's values
+/// instead of air-like ones. §3.4 looked at fixing this and found there is nothing to
+/// fix: **neither field is ever read at index 0.** `attenuation_p` has no live reader at
+/// all, and `attenuation_s` is read only at `vmod[nh1]` and `vmod[nhj]` in
+/// `geometric_spreading`, where the layer indices come from `green_function`'s ray
+/// building and are never below `krec = 1`.
+///
+/// So the value is arbitrary and unobservable. Left alone rather than changed, because
+/// changing data nothing reads is risk without benefit.
 pub fn insert_air_layer(vmod_in: &mut VelocityModelInput, layer_count: usize, skip_layers: i32) -> (usize, i32) {
     if !(vmod_in[0].depth_km > 0.001 && vmod_in[0].vp_km_s > 0.01) {
         return (layer_count, skip_layers);
@@ -347,7 +356,8 @@ pub fn insert_air_layer(vmod_in: &mut VelocityModelInput, layer_count: usize, sk
     vmod_in[0].vp_km_s = 0.001f32 as f64;
     vmod_in[0].vsh_km_s = 0.0005f32 as f64;
     vmod_in[0].density_g_cm3 = 0.001f32 as f64;
-    // attenuation_p(1) and attenuation_s(1) are deliberately not set; see the note above.
+    // attenuation_p/attenuation_s at index 0 are deliberately not set. Nothing reads
+    // them -- see the doc comment.
 
     (layer_count, skip_layers)
 }
@@ -513,7 +523,11 @@ mod tests {
         assert_eq!(v[1].thickness_km, 0.05, "the original first layer shifted down");
         // The shift copies seven fields but only five are overwritten, so Q
         // stays put.
-        assert_eq!(v[0].attenuation_p, qp1_before, "attenuation_p(1) is deliberately not air-like");
+        assert_eq!(
+            v[0].attenuation_p, qp1_before,
+            "the air layer's Q is left as-is; nothing reads it, so this pins the shift \
+             rather than a physical choice"
+        );
     }
 
     #[test]
