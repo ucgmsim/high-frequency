@@ -120,6 +120,23 @@ If a future change needs a statistical adjudication again — a new physics opti
 draw structure — the campaign is recoverable from git history at `71d43c3` or earlier, and
 `REFACTOR.md` records the results it produced so a new run has something to compare with.
 
+**It has been done once, so the recipe is known rather than hoped for.** In a worktree, restore
+`crates/im`, `crates/validate`, `reference/` and `harness/{build_ref,bench_vs_fortran,run_long}.sh`
+from `71d43c3`, add the two crates to the workspace members, and build the Fortran with
+`harness/build_ref.sh` plus the `-O2 -DUSE_FFTW` `hb_prod` leg. Four things have drifted since
+and must be patched, none of them deep:
+
+- `crates/im` imports `hb_high::fort`, which §5.3 deleted — it is `hb_high::fft` now;
+- `validate` drives an executable that reads a deck on stdin and writes raw `f32`, so `deck.rs`,
+  `main.rs` and the three text readers come back too (the readers as their own module — the
+  structs they build are unchanged, checked field by field);
+- `Segment::subfaults` is private, so the restored reader needs `pub(crate)`;
+- `Simulation::d10_km` is gone. `validate` parses it from stderr as a CSV **label only** — it
+  feeds no statistic and no verdict — so writing `NaN` costs the campaign nothing.
+
+**Run it without `--baseline`.** That flag overwrites the certified CSVs, and a worktree shim is
+not what should be certifying anything.
+
 Three rules about gates themselves, all learned the hard way:
 
 - **Every gate asserts its own resolution, not only its verdict.** A tier that cannot
