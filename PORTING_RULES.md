@@ -1,7 +1,59 @@
-# Porting rules
+# Porting rules — **ARCHAEOLOGY, not the current rulebook**
 
-The rulebook for transliterating `reference/hb_high_ref.f` into
-`crates/hb_high`. Read this before touching any module.
+> **This document no longer describes `crates/hb_high`.** It was the rulebook for
+> transliterating `reference/hb_high_ref.f`, under a contract of bit-identity that expired
+> in stages across §2.1–§2.8 and was formally retired at Stage 3.
+>
+> **For how the crate is written and gated today, read `ENGINEERING_RULES.md`.**
+>
+> This is kept — rather than deleted — because it explains *why the Fortran does what it
+> does*, and the Fortran is still the oracle the long tier validates against. When you are
+> reading `hb_high_ref.f` and something looks insane, the explanation is probably here.
+>
+> Each section below is marked with its status:
+>
+> * **EXPIRED** — described the transliteration; does not constrain the crate.
+> * **BINDING** — still in force, but on *independent* grounds (a downstream interface
+>   contract, or a genuine numerical requirement), not because the Fortran did it.
+> * **SUPERSEDED** — the concern is real and is now handled differently.
+> * **DECIDE** — a list of reproduced defects, now being worked through one at a time.
+
+---
+
+## Status index
+
+| § | Topic | Status |
+| --- | --- | --- |
+| 1 | Literal constants copied verbatim | **EXPIRED** — §2.8 replaced the nine truncated pi literals with `std::consts`; the *typo* at `highcor` was a genuine slip. The physics calibration constants (`rp`, `prtitn`, `fs`) survive on their own merits |
+| 1b | Unsuffixed literal carries only `f32` | **EXPIRED**, six sites remaining as §3.4 candidates |
+| 2 | Precision is per expression | **BINDING in part** — the narrowings that are genuinely *more* accurate stay. The ones reproducing the original being *worse* (the single-precision `qb` accumulator) are §3.4 candidates |
+| 3 | 1-based, column-major arrays | **EXPIRED** — self-retired at §2.3, with its warning vindicated: three off-by-ones, one of which no gate caught |
+| 4 | Intrinsic shims | **EXPIRED** — `fort.rs` is down to one function |
+| 4b | Constant exponents and `powf` | **EXPIRED** as a spelling rule. The debug/release self-consistency it produced survives on independent grounds |
+| 5 | Control flow and **iteration order** | **SPLIT — read the note below.** The RNG-stream half is being broken deliberately in Stage 3; the float-summation half is real numerics |
+| 6 | Common blocks → one context struct | **BINDING as a naming standard.** The `ir` argument it said to "drop in Phase 3" was dropped in §2.8 |
+| 7 | Known bugs: reproduce, do not fix | **DECIDE** — now being fixed one at a time under `ENGINEERING_RULES.md` §7. **One row is wrong**: the `get_sitefacs` `j0+1` claim was retracted (see `site.rs`), and the loop cannot reach it |
+| 8 | Input parsing | **BINDING** — the deck parser is the only remaining mechanical link to the oracle, and the parity harness drives the binary through it |
+| 9 | Output | **BINDING** — a downstream interface contract. `hf_sim.py` parses both the byte stream and the stderr distance line |
+| 10 | Verification is not optional | **SUPERSEDED in mechanism, retained in spirit.** Bit-identity is gone; "never quietly loosen a tolerance" is not. §2.5 and §2.8 both converted exact goldens into *measured-divergence bounds* with a written argument, rather than regenerating them |
+
+### §5 is two rules under one name
+
+This is the one worth reading carefully, because half of it survives and half does not.
+
+* **Draw order and count** were a reproducibility contract with every golden and CSV in
+  the repo. Stage 3 breaks it deliberately — replacing the generator and removing the
+  `MMV` block — with the long tier adjudicating. Within a version it still holds
+  absolutely: same seed, same build, same answer.
+* **Float summation order** is a genuine numerical property and does not expire with the
+  Fortran. What changes is the *reason*: the rule is no longer "match what the Fortran
+  did" but "choose an order deliberately, measure it, record it". Reassociation is legal
+  and may be more accurate — pairwise summation beats a left-to-right `f32` fold over
+  16384 samples.
+
+---
+
+## Original text follows
 
 **When the same class of error shows up in more than one file, fix it here and
 regenerate the affected files.** Do not accumulate per-file patches — that is how
@@ -268,7 +320,7 @@ one at the call site. **Default disposition: reproduce.**
 | `k2` can be negative, so `DS(l,li)` writes before the array start | `:1371` | reproduce; needs the same offset buffer treatment |
 | `bet` used uninitialised in the `do 893/894` pass | `:974-983` | reproduce: initialise to the same value gfortran leaves, which at `-O0` is whatever the previous iteration left. Pin this with a kernel test before relying on it |
 | `trav` zeroes only `alp(1:100)` of 500, leaking stale multipliers | `:3521` | reproduce (benign at the ~34 layers used, but do not silently widen) |
-| `get_sitefacs` loop can reach `i = j0+1` | `:3020` | reproduce |
+| ~~`get_sitefacs` loop can reach `i = j0+1`~~ | `:3020` | **RETRACTED — this row is wrong.** The index is tested against the source layer at the top of the loop and only ever increments by one, so it cannot step past. See `site.rs`'s doc comment |
 | `ksrc = j0+1` passed as a layer index | `:1145` | reproduce |
 | `d10` reset to `10000.` inside the segment loop, so the stderr distance covers only the last segment | `:973` | reproduce |
 | `ttime`'s `p1`/`t1` discarded by its only caller | `:3313` | keep the call; it is side-effect-free but keeping it preserves line-by-line comparability |

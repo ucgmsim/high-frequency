@@ -28,14 +28,25 @@ const DURATION_NOTE: &str = "dt=0.005 s, duration per stratum";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Tier {
-    /// Paired, matched seeds, against the oracle. Same RNG, so the same
-    /// realisation — near-zero variance and correspondingly sensitive.
-    B,
-    /// Distributional, against production Fortran. Different RNG, so unpaired.
+    /// Distributional, against production Fortran. Unpaired.
     C,
     /// Inter-frequency correlation. Needs the same sample as C.
     D,
 }
+
+/// Band on the ratio of log-space standard deviations.
+///
+/// Deliberately wider than the mean band, because a standard deviation is estimated far
+/// less precisely than a mean: its relative standard error is about `1/sqrt(2n)`, which
+/// at n = 2500 is 1.4%. A ±2% gate on scatter would be testing the estimator, not the
+/// port. ±10% still catches the thing this exists for — a change in *sampling* that moves
+/// the spread while leaving the centre alone.
+const SD_BAND: f64 = 0.10;
+
+/// Quantiles gated alongside the mean. The median catches a shift the mean can absorb
+/// through outliers; the two extremes catch a change in spread or skew that neither the
+/// mean nor the sd ratio need show.
+const GATED_QUANTILES: [f64; 3] = [0.05, 0.50, 0.95];
 
 /// One inter-frequency-correlation test, held until the whole family is known.
 ///
@@ -92,12 +103,11 @@ fn arg(name: &str) -> Option<String> {
 
 fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let tier = match arg("--tier").as_deref() {
-        Some("b") => Tier::B,
         Some("c") => Tier::C,
         Some("d") => Tier::D,
         _ => {
             return Err(
-                "usage: validate --tier b|c|d [--cell a|b|c] [--band 0.02] [--seeds N] \
+                "usage: validate --tier c|d [--cell a|b|c] [--band 0.02] [--seeds N] \
                  [--ref-bin PATH] [--aa] [--baseline]"
                     .into(),
             )
@@ -128,9 +138,13 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
 
     let root = repo_root();
     let rust = root.join("target/release/hb_high");
-    // Tier B compares against the ORACLE, which shares the port's PCG32 stream, so
-    // matched seeds give matched realisations. Tier C/D compare against PRODUCTION,
-    // which uses gfortran's generator -- necessarily unpaired.
+    // Everything compares against PRODUCTION Fortran, which uses gfortran's generator and
+    // is therefore necessarily unpaired.
+    //
+    // Tier B used to compare against the ORACLE, which shared the port's PCG32 stream so
+    // that matched seeds gave matched realisations. Stage 3 retired it: replacing the
+    // generator destroys the pairing, and a desynced paired test does not fail loudly --
+    // it goes Undetermined everywhere and PASSES. See `Tier`.
     //
     // `--ref-bin` overrides both. Stage 3 needs it because the interesting comparison
     // stops being Rust-vs-Fortran and becomes Rust-vs-Rust: an earlier commit's binary,
@@ -139,10 +153,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     // hardcoded here, so there was no way to point the campaign at anything else.
     let reference = match arg("--ref-bin") {
         Some(p) => std::path::PathBuf::from(p),
-        None => match tier {
-            Tier::B => root.join("reference/build/hb_ref"),
-            Tier::C | Tier::D => root.join("reference/build/hb_prod"),
-        },
+        None => root.join("reference/build/hb_prod"),
     };
     for p in [&rust, &reference] {
         if !p.exists() {
@@ -181,6 +192,10 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             .to_string(),
     ];
     let mut ifc: Vec<IfcTest> = Vec::new();
+    /// Endpoints whose *distribution shape* differs, even where the mean agrees.
+    let mut shape_failures: Vec<String> = Vec::new();
+    /// Whether the sample was ever large enough for a shape gate to have an opinion.
+    let mut shape_gated = false;
 
     for st in &strata {
         let a = collect(&rust, st, &seed_list, &fas_edges, &root, "rust")?;
@@ -275,10 +290,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                     .as_ref()
                     .expect("tiers B and C always collect the reference")
                     .endpoint(ci, name);
-                let e = match tier {
-                    Tier::B => stats::equivalence_paired(&xa, &xb, band),
-                    _ => stats::equivalence_unpaired(&xa, &xb, band),
-                };
+                let e = stats::equivalence_unpaired(&xa, &xb, band);
                 // The gate is "nothing REFUTED". An undetermined endpoint means the
                 // sample could not decide, which is a statement about the sample, not
                 // about the port -- see stats::Verdict.
@@ -296,7 +308,53 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                     e.ks,
                     e.verdict.as_str()
                 ));
-                stratum_verdicts.push((format!("{label} {cname} {name}"), e));
+                // THE SHAPE GATES. The mean is the first moment, and a change in
+                // sampling is exactly what moves a distribution's shape while leaving its
+                // centre alone. Two distributions can agree on the mean to 0.1% and
+                // disagree materially in the upper tail -- which, for ground motion, is
+                // the part anyone cares about.
+                let where_ = format!("{label} {cname} {name}");
+                // A ratio of standard deviations has relative standard error about
+                // 1/sqrt(2n) in log space -- 7.1% at n=100 against a 10% band, which
+                // would flag one endpoint in seven by chance. Require the estimator to be
+                // at least three times tighter than the band before letting it refuse.
+                let sd_se = 1.0 / (2.0 * e.n_a.min(e.n_b) as f64).sqrt();
+                let sd_can_decide = sd_se * 3.0 < SD_BAND;
+                shape_gated |= sd_can_decide;
+                if sd_can_decide && e.sd_ratio.is_finite() && (e.sd_ratio - 1.0).abs() > SD_BAND {
+                    all_pass = false;
+                    shape_failures.push(format!(
+                        "{where_:44} scatter ratio {:.4} outside +/-{:.0}%",
+                        e.sd_ratio,
+                        100.0 * SD_BAND
+                    ));
+                }
+                for q in GATED_QUANTILES {
+                    let qe = stats::quantile_equivalence(&xa, &xb, q, band);
+                    // The same rule the mean gate follows: a test that cannot resolve the
+                    // band does not get to refute on it.
+                    //
+                    // `verdict_of` calls an endpoint Refuted when the POINT ESTIMATE is
+                    // outside the band, whatever the interval. That is right for a mean,
+                    // which converges quickly. It is badly wrong for an extreme quantile
+                    // at small n: the 5th percentile of 100 draws is the 5th smallest
+                    // value, and its scatter alone puts it well outside a 10% band. At
+                    // n=100 that produced 220 "failures" of 375, none of them real.
+                    //
+                    // So a quantile only refutes when it had the resolution to say so.
+                    let can_decide = qe.achieved_half_width < (1.0 + band).ln();
+                    if qe.verdict == Verdict::Refuted && can_decide {
+                        all_pass = false;
+                        shape_failures.push(format!(
+                            "{where_:44} q{:.0} ratio {:.4} CI[{:.4},{:.4}]",
+                            100.0 * q,
+                            qe.gm_ratio,
+                            qe.ci_lo,
+                            qe.ci_hi
+                        ));
+                    }
+                }
+                stratum_verdicts.push((where_, e));
             }
         }
         // One line per stratum, not per endpoint: 3 components x 25 endpoints is 75
@@ -377,6 +435,34 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             100.0 * band,
             verdicts.len()
         );
+
+        if !shape_gated {
+            println!(
+                "shape gates: SKIPPED -- n={} cannot resolve them. They need roughly \
+                 n >= {} for scatter; run the full tier.",
+                n_seeds,
+                (4.5 / (SD_BAND * SD_BAND)).ceil() as usize
+            );
+        } else if shape_failures.is_empty() {
+            println!(
+                "shape gates: all endpoints within +/-{:.0}% on scatter and \
+                 +/-{:.1}% at q5/q50/q95",
+                100.0 * SD_BAND,
+                100.0 * band
+            );
+        } else {
+            println!(
+                "\nSHAPE NOT EQUIVALENT -- {} endpoint(s). The mean can agree while the \
+                 distribution does not:",
+                shape_failures.len()
+            );
+            for f in shape_failures.iter().take(20) {
+                println!("  {f}");
+            }
+            if shape_failures.len() > 20 {
+                println!("  ... and {} more", shape_failures.len() - 20);
+            }
+        }
 
         // Pooled bias across endpoints. Individual endpoints are noisy and highly
         // correlated (neighbouring pSA periods especially), but a systematic

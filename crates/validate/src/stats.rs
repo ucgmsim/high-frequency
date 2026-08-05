@@ -189,48 +189,18 @@ fn verdict_of(d: f64, lo: f64, hi: f64, band_lo: f64, band_hi: f64) -> Verdict {
     }
 }
 
-/// Paired equivalence test, for when both codes run the same RNG stream and
-/// matched seeds therefore give matched realisations.
-///
-/// Vastly more sensitive than the unpaired form: the between-realisation variance
-/// cancels, leaving only the difference the change actually made. Detects a 0.01%
-/// bias with n on the order of ten, where the unpaired test needs hundreds for 2%.
-pub fn equivalence_paired(a: &[f64], b: &[f64], band: f64) -> Equivalence {
-    assert_eq!(a.len(), b.len(), "paired test needs equal-length inputs");
-    let d: Vec<f64> = a
-        .iter()
-        .zip(b)
-        .filter(|(x, y)| **x > 0.0 && **y > 0.0)
-        .map(|(x, y)| x.ln() - y.ln())
-        .collect();
-    let n = d.len();
-    if n < 2 {
-        return Equivalence {
-            n_a: n, n_b: n, gm_ratio: f64::NAN, ci_lo: f64::NAN, ci_hi: f64::NAN,
-            band, equivalent: false, verdict: Verdict::Undetermined,
-            sd_ratio: f64::NAN, ks: f64::NAN, achieved_half_width: f64::NAN,
-        };
-    }
-    let m = mean(&d);
-    let se = (var(&d) / n as f64).sqrt();
-    let hw = Z_90 * se;
-    let (lo, hi) = (m - hw, m + hw);
-    let (band_lo, band_hi) = ((1.0 - band).ln(), (1.0 + band).ln());
-
-    Equivalence {
-        n_a: n,
-        n_b: n,
-        gm_ratio: m.exp(),
-        ci_lo: lo.exp(),
-        ci_hi: hi.exp(),
-        band,
-        equivalent: lo > band_lo && hi < band_hi,
-        verdict: verdict_of(m, lo, hi, band_lo, band_hi),
-        sd_ratio: f64::NAN, // meaningless for a paired difference
-        ks: f64::NAN,
-        achieved_half_width: hw,
-    }
-}
+// `equivalence_paired` lived here until Stage 3.
+//
+// It compared the port against the ORACLE, which shared the port's PCG32 stream, so
+// matched seeds gave matched realisations and the between-realisation variance cancelled
+// -- sensitive enough to see a 0.01% bias with n on the order of ten.
+//
+// Stage 3 replaces the generator, which destroys the pairing. The failure mode is what
+// made it worth deleting rather than leaving to rot: a desynced paired test does not
+// error. It silently compares unrelated realisations, every endpoint goes Undetermined,
+// and the tier PASSES. A gate that cannot fail is worse than no gate. Its role --
+// localisation -- is taken over by the cheap tier's replay-parity, which is
+// engine-independent by construction.
 
 /// Two-sample Kolmogorov-Smirnov statistic: the largest gap between the two
 /// empirical CDFs.
@@ -470,6 +440,91 @@ pub fn bootstrap_gm_ci(x: &[f64], iterations: usize, seed: u64) -> (f64, f64) {
     (lo.exp(), hi.exp())
 }
 
+/// The `q`-th quantile of a sorted slice, linearly interpolated.
+fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let pos = q * (sorted.len() - 1) as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    if lo == hi { sorted[lo] } else { sorted[lo] + (pos - lo as f64) * (sorted[hi] - sorted[lo]) }
+}
+
+/// Equivalence of a **quantile** of the two log-IM distributions.
+///
+/// # Why the mean is not enough
+///
+/// [`equivalence_unpaired`] tests the geometric mean, which is the first moment. A change
+/// in *sampling* — a different generator, a different number of draws, deviates taken
+/// from a different part of a block — is exactly the kind of change that moves the shape
+/// of a distribution while leaving its centre alone. Two distributions can agree on the
+/// mean to 0.1% and disagree materially in the upper tail, and for ground motion the
+/// upper tail is the part anyone cares about.
+///
+/// `quantile_catches_a_tail_change_the_mean_misses` pins that: a 50% widening of the
+/// distribution is invisible to the mean test and refuted by the 95th percentile.
+///
+/// # Method: order statistics, not a bootstrap
+///
+/// The natural implementation is a percentile bootstrap, and the first version here was
+/// one. It is too slow to run: 375 endpoints x 3 quantiles x 400 resamples, each sorting
+/// two 5100-element vectors, adds about half an hour to a campaign that already takes an
+/// hour.
+///
+/// The distribution-free order-statistic interval gives the same thing for one sort per
+/// sample. The rank of the `q`-th quantile among `n` draws is Binomial(n, q), whose
+/// normal approximation has standard deviation `sqrt(n*q*(1-q))`, so reading the sample
+/// at `n*q +- Z_90*sqrt(n*q*(1-q))` brackets it at the same confidence used everywhere
+/// else here. The two samples are independent, so their standard errors combine in
+/// quadrature.
+///
+/// Being distribution-free matters more than the speed: it assumes nothing about the
+/// shape of the log-IM distribution, and the tails are exactly where the normal
+/// approximation underlying [`equivalence_unpaired`] is weakest.
+pub fn quantile_equivalence(a: &[f64], b: &[f64], q: f64, band: f64) -> Equivalence {
+    fn sorted_logs(x: &[f64]) -> Vec<f64> {
+        let mut l: Vec<f64> = x.iter().filter(|v| **v > 0.0).map(|v| v.ln()).collect();
+        l.sort_by(|p, r| p.partial_cmp(r).unwrap());
+        l
+    }
+    fn quantile_se(sorted: &[f64], q: f64) -> f64 {
+        let n = sorted.len() as f64;
+        let spread = Z_90 * (n * q * (1.0 - q)).sqrt();
+        let lo = (n * q - spread).floor().max(0.0) as usize;
+        let hi = ((n * q + spread).ceil() as usize).min(sorted.len() - 1);
+        (sorted[hi] - sorted[lo]) / (2.0 * Z_90)
+    }
+
+    let (la, lb) = (sorted_logs(a), sorted_logs(b));
+    let (na, nb) = (la.len(), lb.len());
+    if na < 2 || nb < 2 {
+        return Equivalence {
+            n_a: na, n_b: nb, gm_ratio: f64::NAN, ci_lo: f64::NAN, ci_hi: f64::NAN,
+            band, equivalent: false, verdict: Verdict::Undetermined,
+            sd_ratio: f64::NAN, ks: f64::NAN, achieved_half_width: f64::NAN,
+        };
+    }
+
+    let d = quantile_sorted(&la, q) - quantile_sorted(&lb, q);
+    let (se_a, se_b) = (quantile_se(&la, q), quantile_se(&lb, q));
+    let hw = Z_90 * (se_a * se_a + se_b * se_b).sqrt();
+    let (lo, hi) = (d - hw, d + hw);
+    let (band_lo, band_hi) = ((1.0 - band).ln(), (1.0 + band).ln());
+
+    Equivalence {
+        n_a: na, n_b: nb,
+        gm_ratio: d.exp(),
+        ci_lo: lo.exp(),
+        ci_hi: hi.exp(),
+        band,
+        equivalent: lo > band_lo && hi < band_hi,
+        verdict: verdict_of(d, lo, hi, band_lo, band_hi),
+        sd_ratio: f64::NAN,
+        ks: f64::NAN,
+        achieved_half_width: hw,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,21 +686,46 @@ mod tests {
         );
     }
 
+    /// The quantile gate must see a change in distribution SHAPE that the mean gate
+    /// cannot. This is the whole justification for adding it.
     #[test]
-    fn paired_is_far_more_sensitive_than_unpaired() {
-        // Same realisations with a 0.5% multiplicative offset. Unpaired at n=20
-        // cannot resolve it; paired at n=20 detects it easily.
-        let a = lognormal(20, 0.0, 0.2, 7);
-        let b: Vec<f64> = a.iter().map(|v| v * 1.005).collect();
-        let unpaired = equivalence_unpaired(&a, &b, 0.002);
-        let paired = equivalence_paired(&a, &b, 0.002);
-        assert!(
-            paired.achieved_half_width < unpaired.achieved_half_width / 10.0,
-            "paired hw {} should be far below unpaired hw {}",
-            paired.achieved_half_width,
-            unpaired.achieved_half_width
+    fn quantile_catches_a_tail_change_the_mean_misses() {
+        // Same centre, different spread: sigma 0.20 against 0.30. That is what a change
+        // in sampling can produce, and what a mean test is blind to.
+        let a = lognormal(4000, 0.0, 0.20, 77);
+        let b = lognormal(4000, 0.0, 0.30, 78);
+
+        let mean = equivalence_unpaired(&a, &b, 0.02);
+        assert_ne!(
+            mean.verdict,
+            Verdict::Refuted,
+            "the mean test should NOT see this -- if it does, the fixture is wrong and \
+             this test proves nothing (gm_ratio {:.4})",
+            mean.gm_ratio
         );
-        assert!(!paired.equivalent, "paired must catch a 0.5% offset at a 0.2% band");
+
+        let upper = quantile_equivalence(&a, &b, 0.95, 0.02);
+        assert_eq!(
+            upper.verdict,
+            Verdict::Refuted,
+            "the 95th percentile must catch a 50% widening (ratio {:.4}, CI[{:.4},{:.4}])",
+            upper.gm_ratio, upper.ci_lo, upper.ci_hi
+        );
+    }
+
+    #[test]
+    fn quantile_does_not_refute_two_draws_from_one_distribution() {
+        let a = lognormal(3000, 0.0, 0.2, 11);
+        let b = lognormal(3000, 0.0, 0.2, 12);
+        for q in [0.05, 0.5, 0.95] {
+            let e = quantile_equivalence(&a, &b, q, 0.10);
+            assert_ne!(
+                e.verdict,
+                Verdict::Refuted,
+                "q={q} refuted for two samples from one distribution (ratio {:.4})",
+                e.gm_ratio
+            );
+        }
     }
 
     #[test]

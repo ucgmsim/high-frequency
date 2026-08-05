@@ -21,7 +21,8 @@ does. The latter describes the *original*, not this crate.
 ```
 cargo test                        kernel + reader goldens, property tests
 harness/run_selfparity.sh REF     compare against an earlier commit
-harness/run_science.sh            the statistical equivalence campaign
+harness/run_cheap.sh              per-commit gate (~25 s)
+harness/run_long.sh               the statistical equivalence campaign
 harness/build_ref.sh              build the Fortran oracle + A/B binaries
 harness/cov.sh                    coverage of the reference under the deck ladder
 ```

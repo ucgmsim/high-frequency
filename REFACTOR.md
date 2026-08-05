@@ -1003,7 +1003,7 @@ golden.** Measured: `cr` 2.051e-10 of |eta| against an analytic bound of 2.05e-1
 agreement to three digits, and 1050 of 1500 cases still bit-exact; `cagcon` 1.082e-10;
 `dtdp` 7.012e-10, which amplifies eta's error ~3.4x because it divides *by* eta.
 
-**The campaign, run once at the end of the pass** (`run_science.sh`, all three tiers):
+**The campaign, run once at the end of the pass** (`run_science.sh`, all three tiers; now `run_long.sh`):
 
 | tier | result | vs. the last recorded run |
 | --- | --- | --- |
