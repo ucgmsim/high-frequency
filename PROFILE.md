@@ -68,14 +68,48 @@ proof of one.
 Box-Muller's two transcendentals against a shift and a multiply. That ratio is why §3.3's
 hoists paid: the expensive per-sample work in this program is transcendental, not arithmetic.
 
+## The LTO experiment was two experiments
+
+Stage 2 tested `lto = "fat"` and `codegen-units = 1` as a single change, found it 1.2%
+slower, and rejected both. **They do not behave the same way**, and bundling them threw out
+the good half. Re-run at §5.7, six interleaved rounds per build, whole pipeline through the
+release snapshot binary:
+
+| | instructions | cycles | IPC | rebuild |
+| --- | ---: | ---: | ---: | ---: |
+| baseline, `codegen-units = 16` | 3,489,660,418 | 1,699,821,294 | 2.053 | ~10 s |
+| **`codegen-units = 1`** | 3,434,677,223 (−1.58%) | **1,575,930,648 (−7.29%)** | **2.180** | 50 s |
+| `+ lto = "fat"` | **3,378,573,086 (−3.18%)** | 1,658,985,055 (−2.40%) | 2.037 | 67 s |
+
+LTO removes the **most** instructions and is still the worse option: it hands back most of
+the cycle win by dropping IPC from 2.18 to 2.04. That is exactly the mechanism the old note
+guessed at — `rustfft`'s AVX kernels are hand-tuned and cross-crate inlining disturbs their
+register allocation — so the reasoning was right and only the packaging was wrong.
+
+**The lesson is about the instrument, not about LTO.** Every other entry in this file is
+settled on instructions retired, and on instructions alone LTO wins and is wrong. A change
+that alters how well code schedules needs cycles too.
+
+`codegen-units = 1` is now on, at ~40 s per release rebuild.
+
+Measured on a box that was **not idle** — six other agent processes, load ~1.3 of 8 cores.
+That is fine for these counters and would not have been for wall clock: instructions retired
+reproduced to 1.7 parts in 10⁷ *under that load*, and the cycle spread within a build was
+~0.5% against gaps of 7.3% and 2.4%. Wall-clock numbers elsewhere in this file were taken on
+a quiet machine and were **not** re-measured at §5.7.
+
+**Not isolated:** whether ndarray's arrival in Stage 5 caused this, or whether
+`codegen-units = 1` was always worth 7%. That needs a build of the pre-Stage-5 tree, which
+has not been done. Do not assume either way.
+
 ## Measured and rejected
 
 Do not retry these without re-measuring. Each was tried, measured, and found to make things
 worse or to be wrong:
 
-- `lto = "fat"` + `codegen-units = 1` — **1.2% slower** on the medium fault, plus 29 s per
-  rebuild. Plausibly because `rustfft`'s AVX kernels are hand-tuned and cross-crate inlining
-  disturbs their register allocation.
+- `lto = "fat"` — **rejected again at §5.7, but for a sharper reason.** See "The LTO
+  experiment was two experiments" below; the short version is that it removes the most
+  instructions of any option here and is still the wrong choice.
 - `overflow-checks = false` — **1.87% more** instructions retired. Genuinely
   counterintuitive; removing the checks perturbs codegen elsewhere by more than it saves.
 - `sin` from `sqrt(1 - cos²)` — saved 2.46% and was **wrong in `f32` by 2.4e-4**.
