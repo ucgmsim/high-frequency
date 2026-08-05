@@ -1,6 +1,6 @@
 //! Site amplification.
 
-use ndarray::{azip, ArrayView1, ArrayViewMut1};
+use ndarray::{azip, s, ArrayView1, ArrayViewMut1, Axis};
 
 use crate::fft::Complex32;
 use crate::state::VelocityModel;
@@ -151,13 +151,19 @@ pub fn apply_site_amplification(
         spectrum[i] *= fac;
     }
 
-    // Re-impose Hermitian symmetry over the negative-frequency half. The Fortran
-    // writes spectrum(np2 - i + 1) = conjg(spectrum(i + 1)) from a 1-based i; with
-    // j = i - 1 the destination is np2 - j - 1 and the source is j + 1. Checked on
-    // np2 = 16: Fortran i = 1 writes spectrum(16) from spectrum(2), storage 15 from
-    // storage 1; j = 0 gives 16 - 0 - 1 = 15 from 0 + 1 = 1.
-    for j in 0..np - 1 {
-        spectrum[np2 - j - 1] = spectrum[j + 1].conj();
+    // Re-impose Hermitian symmetry over the negative-frequency half: bin `np2 - k` takes
+    // `conj(bin k)` for k in `1..np`. The two halves are disjoint, so this is a reversed
+    // view of the head assigned into the tail -- the same shape as the mirror in
+    // `stoc::stochastic_spectrum`, and spelled the same way on purpose.
+    //
+    // The Fortran wrote `spectrum(np2 - i + 1) = conjg(spectrum(i + 1))` from a 1-based i.
+    // Checked on np2 = 16, where np = 8: dest runs 9..15 while src runs 7 down to 1, so
+    // dest 9 takes src 7 and dest 15 takes src 1. Bin `np` is its own mirror and is not
+    // written here; the Nyquist line below is what touches it.
+    {
+        let mut view = ArrayViewMut1::from(&mut *spectrum);
+        let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
+        azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
     }
 
     // Nyquist takes the top of the table, exponentiated for the same reason as DC.

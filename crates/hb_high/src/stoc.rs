@@ -1,6 +1,6 @@
 //! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
-use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1};
+use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
@@ -338,39 +338,44 @@ pub fn stochastic_spectrum(
     let fsa: f32 = ac[..fold_count].iter().map(Complex32::norm_sqr).sum();
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
-    // complex*8 * real*8 goes through complex*16; see the note above.
-    let scale = |z: Complex32, s: f64, m: f32| -> Complex32 {
-        let d = Complex64::new(z.re as f64, z.im as f64) * s * m as f64;
-        Complex32::new(d.re as f32, d.im as f32)
-    };
-
-    // 0-based. The Fortran writes spectrum(i) and its conjugate partner
-    // spectrum(np2 - i + 1) from a 1-based i; with j = i - 1 the partner is
-    // np2 - i + 1 - 1 = np2 - j - 1. Checked on np2 = 16: Fortran i = 1 writes
-    // spectrum(16), storage element 15, and j = 0 gives 16 - 0 - 1 = 15.
+    // The mirror is not a second computation. It is the Hermitian symmetry of the first,
+    // and separating the two says so.
     //
-    // Note the partner of the LAST iteration and the Nyquist store below are the same
-    // element -- Fortran i = np writes spectrum(np + 1) = spectrum(fold_count) -- so the
-    // Nyquist assignment overwrites it. That ordering is the original's and is kept.
-    // TEMPORARY second buffer. The mirror below reads `ac` and writes `spectrum`, and an
-    // in-place merge is possible -- every index is read before it is written -- but it
-    // needs the Nyquist value saved before the loop, and that index reasoning is §5.5's
-    // job, isolated so that a red snapshot there means the indices rather than this
-    // plumbing. §5.5 folds the two together and this allocation goes.
+    // The old loop scaled `ac[j]` into `spectrum[j]` and, in the same iteration, built
+    // `conj(ac[j+1] * as_[j+1]) * amp` into `spectrum[np2-j-1]`. That second quantity IS
+    // the first at index `j+1`, conjugated: `as_` and `amp` are real, so conjugation
+    // commutes with both, and negating an imaginary part is exact in `f32` and `f64`
+    // alike. So `conj` before narrowing and `conj` after give the same bits, and the two
+    // halves separate. Tier 4 is the check on that claim, not this comment.
     //
-    // The zero fill is not waste that survives: the loop writes `0..np`, `np..np2` and
-    // the Nyquist, which is every element.
-    let mut spectrum = Array1::from_elem(np2, Complex32::ZERO);
-
+    // In place on `ac`, which the returned array now IS. §5.2's second buffer and its zero
+    // fill are both gone, and with them the extra allocation §5.2 flagged as temporary.
+    let mut spectrum = Array1::from(ac);
     let np = np2 / 2;
-    for j in 0..np {
-        spectrum[j] = scale(ac[j], as_[j], amp);
-        // conjg() is applied to the complex*16 product, before narrowing.
-        let d = Complex64::new(ac[j + 1].re as f64, ac[j + 1].im as f64) * as_[j + 1];
-        let d = d.conj() * amp as f64;
-        spectrum[np2 - j - 1] = Complex32::new(d.re as f32, d.im as f32);
-    }
-    spectrum[fold_count - 1] = scale(ac[fold_count - 1], as_[fold_count - 1], amp);
+
+    // Positive frequencies, Nyquist included. complex*8 * real*8 goes through complex*16;
+    // see the note above. Bin 0 comes out zero because `as_[0]` is never written, which is
+    // what the old `j = 0` iteration did too.
+    azip!((
+        bin in spectrum.slice_mut(s![..fold_count]),
+        &shape in ArrayView1::from(&as_[..fold_count]),
+    ) {
+        let d = Complex64::new(bin.re as f64, bin.im as f64) * shape * amp as f64;
+        *bin = Complex32::new(d.re as f32, d.im as f32);
+    });
+
+    // Negative frequencies: bin `np2 - k` is `conj(bin k)` for k in `1..np`. A REVERSED
+    // view of the head against the tail, rather than the index `np2 - j - 1` whose old
+    // comment needed a worked example on np2 = 16 to be believable. Checked the same way:
+    // np2 = 16 gives np = 8, so dest runs 9..15 while src runs 7 down to 1 -- dest 9 takes
+    // src 7, dest 15 takes src 1.
+    //
+    // The old loop's last iteration ALSO wrote `spectrum[np]`, which the Nyquist store
+    // then overwrote. That write was dead. Dropping it is what leaves the two halves
+    // disjoint, which is the only reason this can be a pair of views at all -- and it
+    // removes the separate Nyquist line, since the positive half already covers bin `np`.
+    let (positive, mut negative) = spectrum.view_mut().split_at(Axis(0), np + 1);
+    azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
 
     spectrum
 }
