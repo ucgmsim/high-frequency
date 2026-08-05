@@ -1356,3 +1356,125 @@ Stage 2, each with Tier B then C:
 
 Re-run Tier D at the end of Stage 2 as a release gate, comparing Rust-before vs
 Rust-after rather than against production.
+
+---
+
+# Stage 4 — from a Fortran CLI to a batch Python API
+
+Stage 3 made the crate defensible on its own terms. Stage 4 changed the **shape of the
+interface**, which had not moved since 1996: a 22-line list-directed deck on stdin, three
+files named inside it, and `ndata * 3` raw `f32` written at a byte offset.
+
+Everything downstream was bent around that shape. `workflow/scripts/hf_sim.py` spent 458
+lines paying for it — a deck assembled by `str.format`, two temp files and a process **per
+station**, the epicentral distance parsed back off stderr and then overwritten with `np.nan`,
+and per-station seeds forged as `int32(root) ^ stable_hash(name)` because a deck could carry
+one `i32`.
+
+## §4.0 — the shape gate had no null, and that nearly cost a stage
+
+Stage 3's LONG returned one red: the new quantile gate flagged 14 of 375 endpoints. The mean
+gate was emphatic (373/375 certified, 0 refuted, ±0.655% resolution) and Tier D passed
+Holm-corrected at 0 of 15 beside an A/A control — but `main.rs:132` **refused `--aa` for
+anything but Tier D**, so there was no way to ask how often the quantile gate fires when both
+sides are the same program.
+
+Lifting that restriction answered it:
+
+| | A/B (Rust vs Fortran) | A/A (Fortran vs itself) |
+| --- | --- | --- |
+| mean certified | 373/375, 0 refuted | 374/375, 0 refuted |
+| pooled bias | −0.055% (sd 0.394%) | +0.080% (sd 0.396%) |
+| shape flags at ±2% | 14 (3.73%) | **11 (2.93%)** |
+| worst excursion | 2.2% | **3.03%** |
+
+14 against 11 of 375 is 0.9σ. The null comparison's *worst* excursion is larger than the real
+one. At ±4% the null flags **0 of 375**, which is where `SHAPE_BAND = 0.04` comes from —
+measured, not chosen.
+
+**I got the analysis wrong before measuring**, and that is the part worth keeping. I argued
+the 14 were "more than scatter explains — the CIs predict 1 to 2", treating 375 endpoints as
+independent and reading the CI half-width as though the gate were an interval test, when it
+refutes on the point estimate and neighbouring pSA periods are strongly correlated.
+
+`ENGINEERING_RULES` §6 gained rule three: **every gate reports its own false-alarm rate,
+measured against a null run. A gate with no null is not a gate, it is an opinion.** Plus two
+corollaries — a band derived for one statistic does not transfer to another, and a family of
+375 needs the multiplicity correction Tier D already applies to its 15.
+
+## §4.1–§4.2 — the boundary, and certification done exactly
+
+Seeds became per-station `u64`. The widening is **bit-exact for deck-sourced seeds**
+(replay-parity: 22/22 decks), which mattered: §4.2 as planned would have spent 1.5 h
+re-certifying a byte-identical stream, and the thing that *is* new — per-station independence
+— cannot be exercised through a deck at all, because `nsite != 1` was refused precisely
+because the Fortran's station loop shared one generator.
+
+So `tests/path_equivalence.rs` asked the question exactly instead: build each fixture through
+both paths, run both, compare every sample. Identical on 4, 112 and 2,827 subfaults.
+Certification transfers — deck ≡ Fortran (statistically), array ≡ deck (exactly).
+
+Three properties the Fortran could not offer are now tested: station order changes no
+waveform, subsetting equals slicing, a batch of one equals that station in a batch.
+
+## §4.3–§4.5 — the jettison, audited
+
+Deleted: `crates/validate` (1,799), `crates/im` (693), `deck.rs` (539), `main.rs` (314), the
+`input.rs` readers (~330), `reference/` (8,375), `harness/kernels/` (560), `d10_km`, and the
+oracle harness scripts.
+
+| coverage | |
+| --- | ---: |
+| baseline at `400e7a1` | 86.68% |
+| after deleting 990 test lines | 84.04% |
+| after §4.3 | **91.49%** |
+
+The dip was 67 lines in three files, and the audit said which: tier1/tier3 goldens were the
+only things exercising parts of `ray.rs` and `state.rs`. The recovery is mostly `main.rs`
+leaving — **177 lines at 0.00%**, which had been dragging the crate figure down for the whole
+project.
+
+**The audit caught two errors in my own dead-code analysis.** I deleted `travel_time` and all
+three `from_fortran` conversions as having zero callers. Two of those claims were false:
+`benches/kernels.rs` calls `travel_time`, `tier4_golden.rs` calls `WaveMode::from_fortran`.
+My grep covered `src/`, `tests/` and `src-rust/` but **not `benches/`**. Both restored.
+`travel_time` is now exercised by a benchmark and no test, which is a real gap rather than
+dead code, and `ray.rs` at 84.83% is where it shows.
+
+Separately, a `sed` range with an unmatched terminator ran to end-of-file and took
+`input.rs`'s whole test module with it. Rebuilt — and this time the four tests of *surviving*
+behaviour had their **setup** rewritten rather than being deleted along with the reader they
+happened to use. Deleting a test because its fixture changed is how a jettison loses real
+coverage.
+
+## What the interface cost, measured
+
+| | |
+| --- | ---: |
+| mini fault via the CLI (Stage 3) | ~5.8 ms |
+| mini fault via the library | **3.44 ms** |
+
+~2.4 ms per station of process startup, deck generation, parsing and a file write — about 40%
+of the smallest fault's runtime, paid once per station, thousands of times per campaign.
+
+And a correction: I estimated a 4,070-subfault rupture at ~7 s/station by extrapolating
+linearly. Measured, **26.2 s**. The same 112 subfaults cost 8.6× more at 60 s with a
+subduction-like geometry than at 40 s with a crustal one, so subfault count alone does not
+predict runtime.
+
+## Net
+
+| | before | after |
+| --- | ---: | ---: |
+| Rust | 11,599 | **7,926** |
+| Python | 0 | 1,114 |
+| golden data | 4.2 MB | 984 KB |
+| coverage | 86.68% | 91.49% |
+
+CI exists for the first time: six workflows ported from `site_calculation` plus a `cargo` one
+running both profiles, because a disagreement between debug and release means the port depends
+on optimisation-level float behaviour — which has already caught one real bug.
+
+**Still open:** `workflow/scripts/hf_sim.py` has not been slimmed. That edit belongs in the
+`workflow` repo and is the remaining payoff — `build_hf_input`, `hf_simulate_station` and
+`station_seeds` all disappear, and `hf_simulate_chunk` becomes one call.
