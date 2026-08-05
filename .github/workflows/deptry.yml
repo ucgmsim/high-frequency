@@ -1,0 +1,15 @@
+name: Deptry Dependency Check
+
+on: [pull_request]
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - run: uv run --group dev deptry .

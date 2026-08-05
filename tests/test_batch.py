@@ -11,6 +11,8 @@ a multi-station run was not the concatenation of single-station runs. Per-statio
 what buys them, and these tests are what keep them.
 """
 
+from collections.abc import Iterable
+
 import numpy as np
 import pytest
 from hypothesis import given, settings
@@ -87,7 +89,11 @@ def velocity_model() -> VelocityModel1D:
     )
 
 
-def simulate(slip_model, velocity_model, indices) -> np.ndarray:
+def simulate(
+    slip_model: SlipModel,
+    velocity_model: VelocityModel1D,
+    indices: Iterable[int],
+) -> np.ndarray:
     """Simulate the stations named by ``indices``, in that order.
 
     Parameters
@@ -131,7 +137,9 @@ def assert_not_silent(waveform: np.ndarray) -> None:
     assert (peak > 0).all(), f"station(s) produced silence: peak amplitudes {peak}"
 
 
-def test_shape_and_components(slip_model, velocity_model) -> None:
+def test_shape_and_components(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """The result is (component, station, time) with three components."""
     waveform = simulate(slip_model, velocity_model, range(4))
     assert waveform.shape == (
@@ -143,7 +151,9 @@ def test_shape_and_components(slip_model, velocity_model) -> None:
     assert_not_silent(waveform)
 
 
-def test_station_order_does_not_matter(slip_model, velocity_model) -> None:
+def test_station_order_does_not_matter(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """Permuting the stations permutes the rows and changes nothing else.
 
     This is the invariant that makes a dask chunking strategy free: if order mattered,
@@ -156,7 +166,9 @@ def test_station_order_does_not_matter(slip_model, velocity_model) -> None:
     np.testing.assert_array_equal(permuted, reference[:, order, :])
 
 
-def test_subsetting_equals_slicing(slip_model, velocity_model) -> None:
+def test_subsetting_equals_slicing(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """Simulating a subset gives exactly the corresponding slice of the whole batch.
 
     This is what makes a failed run resumable: re-running the stations that are missing
@@ -168,7 +180,9 @@ def test_subsetting_equals_slicing(slip_model, velocity_model) -> None:
     np.testing.assert_array_equal(subset, reference[:, 1:3, :])
 
 
-def test_a_batch_of_one_matches_the_batch(slip_model, velocity_model) -> None:
+def test_a_batch_of_one_matches_the_batch(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """One station alone equals that station inside a batch.
 
     The Fortran could not satisfy this, which is the whole reason ``nsite != 1`` was
@@ -181,7 +195,9 @@ def test_a_batch_of_one_matches_the_batch(slip_model, velocity_model) -> None:
     np.testing.assert_array_equal(alone, reference[:, 3:4, :])
 
 
-def test_different_stations_get_different_waveforms(slip_model, velocity_model) -> None:
+def test_different_stations_get_different_waveforms(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """Independent seeds must actually produce independent realisations.
 
     Guards the failure mode where every station accidentally shares one stream — which
@@ -197,7 +213,9 @@ def test_different_stations_get_different_waveforms(slip_model, velocity_model) 
             )
 
 
-def test_an_empty_batch_is_an_error(slip_model, velocity_model) -> None:
+def test_an_empty_batch_is_an_error(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """Zero stations cannot yield an array of unknown time length."""
     empty32 = np.array([], np.float32)
     with pytest.raises(ValueError, match="nothing to simulate"):
@@ -211,7 +229,9 @@ def test_an_empty_batch_is_an_error(slip_model, velocity_model) -> None:
         )
 
 
-def test_mismatched_station_arrays_are_rejected(slip_model, velocity_model) -> None:
+def test_mismatched_station_arrays_are_rejected(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
     """One entry per station, in every array, or an error naming all three lengths."""
     with pytest.raises(ValueError, match="one entry per station"):
         simulate_stations(

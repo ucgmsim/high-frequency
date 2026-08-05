@@ -1,0 +1,44 @@
+name: Cargo
+
+# The addition to site_calculation's set, because unlike site_calculation this repo is
+# mostly Rust. Clippy has been a gate by convention since §2.8 -- `[workspace.lints]` exists
+# specifically to keep it at zero -- and until now nothing enforced it outside a developer's
+# own terminal.
+on: [pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+
+      # Debug and release must agree with EACH OTHER. Neither is bit-identical to the
+      # Fortran any more, but a disagreement between the two profiles means the port depends
+      # on optimisation-level float behaviour, which has already caught one real bug
+      # (PORTING_RULES.md §4b). Both profiles, therefore, not just one.
+      - name: Test (debug)
+        run: cargo test --workspace --locked
+
+      - name: Test (release)
+        run: cargo test --workspace --locked --release
+
+      # `-D warnings` here and `warn` in [workspace.lints] is deliberate, not inconsistent.
+      # Locally a lint must not block a numerics experiment mid-flight; on a pull request it
+      # must. A crate-root `#![allow]` is how 28 warnings once accumulated invisibly.
+      #
+      # Scoped to the crates that survive Stage 4. `im` and `validate` carry 7 warnings
+      # between them -- index loops, a complex type, a negated float comparison -- and §4.3
+      # deletes both, so fixing them is work with a known expiry date. DELETE THE -p FLAGS
+      # when those crates go; at that point `--workspace` is the whole gate.
+      - name: Clippy
+        run: cargo clippy -p hb_high -p hf_simulation_ffi --all-targets --locked -- -D warnings
+
+      # No `cargo fmt --check` here, and that is a choice rather than an oversight. This
+      # crate has never been rustfmt'd: its formatting is hand-set, dense, and in places
+      # deliberately aligned so that a transliterated expression reads like the Fortran it
+      # came from. Turning the gate on means one mechanical commit touching every file, which
+      # would bury Stage 4 in the blame history. Worth doing on purpose one day, with a
+      # rustfmt.toml that matches the existing style; not worth doing as a side effect.

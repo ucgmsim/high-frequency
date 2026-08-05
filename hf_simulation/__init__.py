@@ -59,11 +59,11 @@ from hf_simulation._hf_simulation import (
 )
 
 __all__ = [
+    "COMPONENTS",
     "FaultSegment",
     "HfConfig",
     "SlipModel",
     "VelocityModel1D",
-    "COMPONENTS",
     "simulate_stations",
     "station_seeds",
 ]
