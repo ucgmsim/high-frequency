@@ -251,7 +251,7 @@ impl PyVelocityModel {
     rupture_velocity_fraction=None, rupture_velocity_shallow=None,
     rupture_velocity_deep=None, rupture_velocity_override=None,
     corner_frequency_constant=None, corner_frequency_alpha=None,
-    moment=None, vs_moho_km_s=None, fault_area_km2=None, target_magnitude=None,
+    moment=None, fault_area_km2=None, target_magnitude=None,
     fourier_amplitude_sigma_1=0.0, fourier_amplitude_sigma_2=0.0,
     rupture_velocity_sigma=0.0, path_duration_model=0, stress_adjust_model=0,
 ))]
@@ -278,7 +278,6 @@ fn _simulate_stations<'py>(
     corner_frequency_constant: Option<f32>,
     corner_frequency_alpha: Option<f32>,
     moment: Option<f32>,
-    vs_moho_km_s: Option<f64>,
     fault_area_km2: Option<f32>,
     target_magnitude: Option<f32>,
     fourier_amplitude_sigma_1: f32,
@@ -328,7 +327,12 @@ fn _simulate_stations<'py>(
         calpha: corner_frequency_alpha,
         moment,
         rupture_velocity_override,
-        vs_moho: vs_moho_km_s,
+        // `vs_moho` belongs to VelocityModel1D, which truncated the model on
+        // construction, and `simulate` never reads this field -- only `main.rs` does, to
+        // feed `read_velocity_model`. Accepting it here as well would let a caller state
+        // the Moho velocity twice and have the two disagree, with the constructor's copy
+        // silently winning. Found by tests/test_stub.py on its first run.
+        vs_moho: None,
         nl_skip: NO_VELOCITY_PERTURBATION,
         fa_sig1: fourier_amplitude_sigma_1,
         fa_sig2: fourier_amplitude_sigma_2,
