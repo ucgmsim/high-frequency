@@ -26,12 +26,12 @@
 //! Python wrapper starts looping over stations.
 
 use crate::config::{
-    HfConfig, PathDurationModel, RayKind, StressParamAdjust,
+    HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
 };
 use crate::fort::{truncate_toward_zero, Complex32};
-use crate::geom::subfault_geometry;
+use crate::geom::{subfault_geometry, SubfaultGeometry};
 use crate::highcor::apply_radiation_and_invert;
-use crate::input::{insert_air_layer, StochModel};
+use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use crate::ray::green_function;
 use crate::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
@@ -268,40 +268,38 @@ pub fn simulate(
     // the buffers are sized from the deck.
     let ndata = truncate_toward_zero(duration / dt) as usize;
 
-    let (mut rng, irand_after) = Pcg32::seed(irand);
+    let (mut rng, deviates) = seed_and_predraw(config, irand, nr, config.draws_normal_deviates());
     // init_random_seed mutates its argument, and the mutated value gates the
     // rupture-time jitter below.
-    irand = irand_after;
-
-    // `nr` = 1000 values, not `mmv` = 262144. `vertical_radiation_spectrum` reads
-    // exactly `nr` of these, and `fill_uniform_deviates` only ever drew that many, so
-    // the other 99.6% of each array was reserved, zeroed and never touched.
-    let mut radv_rand_a = vec![0.0f32; nr];
-    let mut radv_rand_b = vec![0.0f32; nr];
-    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_a);
-    fill_uniform_deviates(&mut rng, nr, &mut radv_rand_b);
+    irand = deviates.seeded_irand;
 
     let mut vmod = VelocityModel::new();
     // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
-    // touches this.
-    // Three component traces, not a 2-D array. The Fortran's `DS(3, mmv)` was a 2-D
-    // block because Fortran had no better option; here it is what it actually is, and it
-    // now matches `spectrum` and `subfault_acc` beside it.
-    //
-    // §2.3 could only do this once §2.6's defect-1 fix landed: the column-major layout of
-    // the `fort::Array2` this used to be was load-bearing for exactly one thing, the
-    // `stdd(0,l)` alias across columns, and that read is gone. `Array2` itself is now gone
-    // too -- this was one of its last two uses.
+    // touches this. Three component traces, not a 2-D array -- the Fortran's `DS(3, mmv)`
+    // was a 2-D block because Fortran had no better option.
     let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
-    // This one STAYS at `mmv`, and the reason is not laziness. `fill_normal_deviates`
-    // is called with `MMV` below, and the number of deviates drawn is part of the RNG
-    // stream -- every subsequent draw depends on where the generator ended up. Shrinking
-    // the allocation without shrinking the draw would be a buffer overrun; shrinking the
-    // draw would change every waveform. See REFACTOR.md §2.6b.
-    let mut normal_deviates = vec![0.0f32; MMV];
-    let mut siteamp_factors = vec![0.0f32; nsfac];
+
+    // Everything the two passes need that is constant for the whole run, gathered once
+    // so the extracted functions take one reference instead of eighteen scalars.
+    let run = RunScalars {
+        dt, fmax_hz: fmx, kappa_s: akapp, q_exponent: qfexp,
+        pi, deg_to_rad,
+        window_eps: tw_eps, window_eta: tw_eta,
+        corner_const: czero * (1.0 + fcfac),
+        calpha,
+        rvfmax, rv_sig1: rvsig1,
+        avg_subfault_km: dlm,
+        subevent_moment, moment_scale,
+        radv_sample_count: nr,
+        site_table_len: nsfac,
+        ndata,
+        layer_count: j0,
+        jitter_enabled: irand > 0,
+    };
 
     // ------------------------------------------------- the single station ---
+    // Only read after the segment loop, and only meaningful if there was one: a
+    // zero-segment model returns this sentinel, which `main` then prints as a distance.
     let mut d10 = 1000.0f32;
 
     // A non-negative `nl_skip` would route the model through `grandvel`, the
@@ -312,15 +310,8 @@ pub fn simulate(
         vmod[k] = vmod_in[k].into();
     }
 
-    if config.draws_normal_deviates() {
-        // mmv deviates, not np2: this is the full 262144 under VERSION1.
-        fill_normal_deviates(&mut rng, MMV, &mut normal_deviates);
-    }
-
     for seg in &stoch.segments {
-        let strike_rad = seg.strike_deg * deg_to_rad;
-        let dip_rad = seg.dip_deg * deg_to_rad;
-        let rake_rad = seg.rake_deg * deg_to_rad;
+        let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const, deg_to_rad);
 
         let geom = subfault_geometry(
             seg.fault_lon_deg, seg.fault_lat_deg, station.stlon, station.stlat,
@@ -329,296 +320,17 @@ pub fn simulate(
             seg.along_strike_count, seg.down_dip_count,
         );
 
-        // --- time-window pass. NOTE: j outer, i inner. --------------------
-        let mut tmax = 0.0f32;
-        // Re-initialised per segment, which is why the stderr distance below
-        // reports only the last segment. Reproduced.
-        d10 = 10000.0;
-        // One entry per real subfault. Was `(NQ, NP)` = 600x100 regardless of the fault,
-        // the last of the compile-time-ceiling allocations §2.6b set out to remove.
-        let mut window_s = vec![0.0f32; seg.subfault_total()];
-        let mut shear_velocity_km_s = 0.0f32;
-        // Depth-major: j slowest. The subfault pass below goes the other way.
-        for (i, j) in seg.depth_major() {
-            let ray = geom.at(i, j);
-            // No `shear_velocity_km_s = vsh_km_s(1)` default here, unlike the subfault pass
-            // below: if zet exceeds every depth, shear_velocity_km_s keeps its previous
-            // value. Undefined on the very first subfault of the first
-            // station in the Fortran; zero here.
-            if let Some(ksrc) = (0..j0).find(|&k| vmod[k].depth_km >= ray.depth_km as f64) {
-                shear_velocity_km_s = vmod[ksrc].vsh_km_s as f32;
-            }
+        let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
+        // Re-initialised per segment, which is why the stderr distance reports only the
+        // LAST segment on a multi-segment model. Reproduced.
+        d10 = windows.d10_km;
 
-            let rvf = rv.factor(ray.depth_km);
-            let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
-            let fc_coeff = czero * (1.0 + fcfac) / alphat;
+        let plan = plan_segment_spectrum(windows.tmax, dt);
 
-            // The last segment this distance is past. The Fortran scans the whole table
-            // letting later matches overwrite earlier ones, which is `.last()` -- NOT
-            // `.find()`, and the difference matters because the table is ascending so the
-            // first match is the wrong end.
-            //
-            // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches
-            // NOTHING and the duration terms stay zero. The Fortran leaves them
-            // undefined there; zero is this port's choice, and `unwrap_or` is where it
-            // now lives rather than three loose initialisers.
-            let bin = path_duration
-                .iter()
-                .take_while(|s| ray.slant_km > s.start_km)
-                .last()
-                .copied()
-                .unwrap_or(DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km: 0.0 });
-
-            let fce = fc_coeff * rvf * shear_velocity_km_s / (dlm * pi);
-            let tw0 = 1.0 / fce;
-            let tw0 = moment_scale.sqrt() * tw0;
-            let dpath = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
-            // VERSION1: no 81.92 s cap.
-            let window = 2.12 * (tw0 + dpath);
-            window_s[seg.grid_index(i, j)] = window;
-
-            if window > tmax {
-                tmax = window;
-            }
-            d10 = d10.min(ray.slant_km);
-        }
-
-        let ntmax = truncate_toward_zero(2.0 * tmax / dt) as usize;
-        let mut np2 = 2usize;
-        while np2 < ntmax {
-            np2 *= 2;
-        }
-        let nfold = np2 / 2 + 1;
-        let mfold = np2 / 2 - 1;
-        // Sized from `np2` and allocated here rather than at `mm` before the loop:
-        // `np2` is not known until the time-window pass above has produced `tmax`, and
-        // both of these are per-segment quantities that are fully rewritten each time
-        // round, so nothing carries across segments.
-        let mut freq = vec![0.0f32; nfold];
-        let mut radiation = vec![0.0f32; nfold];
-        let df = 1.0 / (np2 as f32 * dt);
-        // 0-based, which also removes the `- 1`: the axis is `df * bin`.
-        for (bin, f) in freq.iter_mut().enumerate() {
-            *f = df * bin as f32;
-        }
-
-        let mut spectrum: [Vec<Complex32>; 3] =
-            std::array::from_fn(|_| vec![Complex32::ZERO; np2]);
-        let mut subfault_acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; np2]);
-        let mut ray = RayState::default();
-
-        // 0-based. The Fortran starts this at 1 and PRE-increments, so its first read
-        // is index 2, i.e. storage element 1 -- element 0 is never read. Starting at 0
-        // and pre-incrementing lands on that same element.
-        let mut irandcnt = 0usize;
-
-        // --- subfault pass. NOTE: i outer, j inner -- the OPPOSITE order to
-        // the window pass above. irandcnt is consumed in THIS order. -------
-        for (i, j) in seg.strike_major() {
-            let subfault = seg.at(i, j);
-            if subfault.slip < 0.001 {
-                continue; // goto 4 lands on the inner loop's terminator
-            }
-            let ray_geometry = geom.at(i, j);
-            let subfault_window_s = window_s[seg.grid_index(i, j)];
-
-            for component in &mut subfault_acc {
-                component.fill(0.0);
-            }
-
-            // This pass DOES default shear_velocity_km_s/density_g_cm3 before the lookup.
-            let mut shear_velocity_km_s = vmod[0].vsh_km_s as f32;
-            let mut density_g_cm3 = vmod[0].density_g_cm3 as f32;
-            let ksrc = match (0..j0).find(|&k| vmod[k].depth_km >= ray_geometry.depth_km as f64) {
-                Some(k) => {
-                    shear_velocity_km_s = vmod[k].vsh_km_s as f32;
-                    density_g_cm3 = vmod[k].density_g_cm3 as f32;
-                    k
-                }
-                // shear_velocity_km_s and density_g_cm3 keep the first layer's defaults.
-                // `j0` is one PAST the last layer once 0-based, which is the Fortran's
-                // `j0 + 1` and is read as such below and by site_amplification_factors.
-                None => j0,
-            };
-            if ksrc == j0 {
-                // The Fortran prints 'wrong!' and carries on with
-                // ksrc = j0+1, which it then passes to site_amplification_factors.
-                println!(" wrong!");
-            }
-
-            let base_rvf = rv.factor(ray_geometry.depth_km);
-            let mut rvf = base_rvf;
-            if rvsig1 > 0.0 {
-                irandcnt += 1;
-                rvf = base_rvf * (normal_deviates[irandcnt] * rvsig1).exp();
-                if rvf > rvfmax {
-                    rvf = rvfmax;
-                }
-            }
-
-            let alphat = alpha_t(seg.dip_deg, seg.rake_deg, calpha);
-            let fc_coeff = czero * (1.0 + fcfac) / alphat;
-            let fce = fc_coeff * rvf * shear_velocity_km_s / dlm / pi;
-
-            for &ray_type in &config.rayset {
-                let kind = ray_type.kind();
-
-                // The tracing runs even for a straight ray: the Fortran calls
-                // green_function unconditionally and overwrites the results below,
-                // and type 0 borrows type 1's tracing to do it.
-                let g = green_function(
-                    &mut ray, &vmod, j0, ray_geometry.depth_km, ray_geometry.horiz_km,
-                    ray_type.trace_type(), WaveMode::Sh,
-                );
-                let mut stime = g.stime;
-                let mut rpath = g.rpath;
-                let mut qbar = g.qbar;
-                let mut sub_tstart = stime - tw_eps * subfault_window_s;
-
-                if kind == RayKind::StraightRay {
-                    rpath = ray_geometry.slant_km;
-                    qbar = rpath / (shear_velocity_km_s * 150.0);
-                    stime = rpath / 3.7;
-                    sub_tstart = 0.7 * stime;
-                }
-
-                // 0-based, so the vertical is component 2 rather than the Fortran's
-                // `kf == 3`. The three calls stay in this order: each draws `np2` normal
-                // deviates from the shared stream.
-                for (component, spec) in Component::ALL.into_iter().zip(spectrum.iter_mut()) {
-                    let fmx1 = component.capped_fmax(fmx);
-                    stochastic_spectrum(
-                        &mut rng, np2, rpath, subfault_window_s, tw_eps, tw_eta,
-                        shear_velocity_km_s, density_g_cm3, dt,
-                        subevent_moment, dlm, fce, fmx1, akapp,
-                        spec, &freq, qbar, qfexp,
-                        moment_scale,
-                    );
-                }
-
-                if config.site_amp {
-                    site_amplification_factors(
-                        &vmod, ksrc, nsfac, &siteamp_log_freq,
-                        &mut siteamp_factors,
-                    );
-                    for spec in &mut spectrum {
-                        apply_site_amplification(
-                            spec, &freq, nsfac,
-                            &siteamp_log_freq, &siteamp_factors,
-                        );
-                    }
-                }
-                // famprand is dead: fasig1 = fasig2 = 0.
-
-                // Incidence angle from the ray parameter: sin(i)/vs = p0.
-                // th = i for a downgoing ray, pi - i for upgoing.
-                let p0 = g.rp0;
-                let incidence =
-                    if shear_velocity_km_s * p0 > 1.0 { 0.5 * pi } else { (shear_velocity_km_s * p0).asin() };
-                let th = match kind {
-                    // The straight-ray approximation ignores the traced ray
-                    // parameter and uses the geometric take-off angle.
-                    RayKind::StraightRay => ray_geometry.takeoff_rad,
-                    RayKind::Upgoing => pi - incidence,
-                    RayKind::Downgoing => incidence,
-                };
-                let pa = ray_geometry.azimuth_rad;
-
-                // Three near-identical blocks collapse to one loop over the enum. The
-                // ONLY difference between them is which radiation routine runs, and the
-                // `Option` from `azimuth_offset_deg` is what carries it: `Some` means a
-                // horizontal, which draws 5,000 deviates; `None` means the vertical,
-                // which draws none. Iterating `Component::ALL` preserves the order those
-                // draws happen in, which is the whole constraint.
-                for component in Component::ALL {
-                    match component.azimuth_offset_deg() {
-                        Some(offset_deg) => horizontal_radiation_spectrum(
-                            &mut rng, strike_rad, dip_rad, rake_rad, pa, th, &freq,
-                            nfold, offset_deg * deg_to_rad, nr, &mut radiation,
-                        ),
-                        None => vertical_radiation_spectrum(
-                            strike_rad, dip_rad, rake_rad, pa, th, &freq, nfold,
-                            &radv_rand_a, &radv_rand_b, nr, &mut radiation,
-                        ),
-                    };
-                    let k = component.index();
-                    apply_radiation_and_invert(
-                        nfold, mfold, &mut spectrum[k], &mut subfault_acc[k], &radiation,
-                    );
-                }
-
-                // Rupture time at this subfault.
-                let mut ratim;
-                if let Some(vr) = config.rupture_velocity_override {
-                    let along_strike_centre = 0.5 * (seg.along_strike_count as f32 + 1.0);
-                    let xra = seg.hypocentre_along_strike_km
-                        - (i as f32 - along_strike_centre) * seg.subfault_length_km;
-                    let yra = seg.hypocentre_down_dip_km - (j as f32 - 0.5) * seg.subfault_width_km;
-                    ratim = (xra * xra + yra * yra).sqrt() / vr;
-                    if irand > 0 {
-                        ratim += (rng.next_f32() - 0.5) * 0.1 * ratim;
-                    }
-                } else {
-                    ratim = subfault.rupture_time_s;
-                }
-
-                // Both terms truncate TOWARD ZERO, not toward negative infinity, so a
-                // negative `sub_tstart` makes `kst` smaller and possibly negative. The
-                // named shim is the point: a future edit to `.floor()` here would be
-                // silent, and `kst` is the sample index the whole subfault lands on.
-                let kst = truncate_toward_zero(ratim / dt) + truncate_toward_zero(sub_tstart / dt);
-
-                // ONE DRAW, AND IT MUST STAY. The Fortran loops `k = 1, nsum` here,
-                // draws a uniform, and turns it into a sub-event time offset `k2`. But
-                // `nsum` was frozen at 1 in 2004, so the loop ran once and the very next
-                // statement was `if (nsum.eq.1) k2 = 0` -- the offset was computed and
-                // then unconditionally thrown away, taking the rise time with it.
-                //
-                // So the arithmetic is dead and is gone. The draw is not: it advances
-                // the shared generator once per (subfault, ray), and every sample
-                // produced after it depends on where the stream ends up. Deleting this
-                // line as "obviously dead code" changes every waveform in the program.
-                //
-                // The offset it used to compute is a frozen switch, not a defect -- see
-                // REFACTOR.md "Not defects: frozen switches". Reviving it needs the same
-                // explicit sign-off collapsing it would have needed.
-                let _stream_advance = rng.next_f32();
-
-                // §2.6 defect 1 is fixed here: sample 1 of the subfault's trace lands on
-                // `k2`, not on `k2 + 1`.
-                //
-                // The Fortran read `stdd(li - k2, l)`, so its first iteration read index
-                // 0 -- one element before the column, which nothing ever writes -- and
-                // every subfault's contribution arrived one sample late. See REFACTOR.md
-                // §2.6 for the analysis and PORTING_RULES §7 for the aliasing that made
-                // that read return zero rather than crash.
-                //
-                // The upper bound moves with it: reading `idx + 1` over the old range
-                // would reach `subfault_acc[np2 + 1]`, past the end. The contribution is
-                // `subfault_acc[1..=np2]` placed at `acc[k2 ..= k2 + np2 - 1]`.
-                let k2 = kst;
-                let kend = (k2 + np2 as i32 - 1).min(ndata as i32);
-
-                let sd = subfault.slip;
-                let mut li = k2;
-                while li <= kend {
-                    // `k2` can be negative. Writes below index 1 land before DS in the
-                    // Fortran and are never read back, since the output reads
-                    // DS(1..ndata), so they are discarded rather than reproduced.
-                    if li >= 1 {
-                        let idx = (li - k2) as usize;
-                        // `li` is the Fortran's 1-based sample number, so the 0-based
-                        // slot is one lower. The `fort::Array2` this used to be had a
-                        // 1-based second subscript, which hid this.
-                        let sample = li as usize - 1;
-                        for component in 0..3 {
-                            acc[component][sample] += sd * subfault_acc[component][idx];
-                        }
-                    }
-                    li += 1;
-                }
-            }
-        }
+        subfault_pass(
+            &mut rng, &mut acc, seg, &geom, &windows, &plan, &vmod, &rv, &angles, &run,
+            config, &deviates, &siteamp_log_freq,
+        );
     }
 
     // filter3d is not reachable from here at all: the switch that would enable it
@@ -642,6 +354,493 @@ pub fn simulate(
     debug_assert_eq!(out.len(), ndata * 3);
 
     Ok(Simulation { ndata, dt, acc: out, d10_km: d10 })
+}
+
+
+// ---------------------------------------------------------------------------
+// The pieces `simulate` is made of
+// ---------------------------------------------------------------------------
+
+/// Everything derived from the deck and the slip model that is constant for the whole
+/// run.
+///
+/// This exists because the alternative is an eighteen-argument function. Grouping does
+/// not make the coupling smaller, but it does put every one of these under a name with a
+/// unit, in one place, instead of spread across a 500-line body.
+struct RunScalars {
+    dt: f32,
+    fmax_hz: f32,
+    kappa_s: f32,
+    q_exponent: f32,
+    /// The source's own pi, and degrees-to-radians derived from it.
+    pi: f32,
+    deg_to_rad: f32,
+    /// `tw_eps` / `tw_eta` — the Saragoni-Hart window shape.
+    window_eps: f32,
+    window_eta: f32,
+    /// `czero * (1 + fcfac)` — the numerator of the corner-frequency coefficient.
+    corner_const: f32,
+    calpha: f32,
+    /// Ceiling on the perturbed rupture-velocity factor.
+    rvfmax: f32,
+    /// Rupture-velocity randomisation sigma. Zero disables the perturbation *and* its
+    /// deviate consumption.
+    rv_sig1: f32,
+    /// `dlm` — average subfault dimension, km.
+    avg_subfault_km: f32,
+    subevent_moment: f32,
+    moment_scale: f32,
+    /// `nr` — sample count for the conical radiation average, and a DRAW COUNT.
+    radv_sample_count: usize,
+    /// `nsfac` — length of the site-amplification frequency table.
+    site_table_len: usize,
+    ndata: usize,
+    /// `j0` — layer count. Read as an INDEX where a source is below the model; see
+    /// `PORTING_RULES.md` §7.
+    layer_count: usize,
+    /// Whether the rupture-time jitter draw happens.
+    ///
+    /// The Fortran tests `irand > 0` on the seed AFTER `init_random_seed` advanced it by
+    /// `SEED_WORDS = 8`, so this is really `config.seed > -8`. Deciding it once, at the
+    /// seeding site, keeps that eight-off comparison from looking like a seed test at the
+    /// point of use.
+    jitter_enabled: bool,
+}
+
+/// Per-segment angles, plus the one quantity the Fortran recomputes per subfault and
+/// needn't.
+struct SegmentAngles {
+    strike_rad: f32,
+    dip_rad: f32,
+    rake_rad: f32,
+    /// `czero * (1 + fcfac) / alphaT`.
+    ///
+    /// **Hoisted.** The Fortran evaluates `alphaT` inside BOTH subfault loops, from three
+    /// per-segment constants — a sine, a square root and four arithmetic ops per subfault,
+    /// producing the same value every time. Bit-identical to compute it once.
+    corner_coeff: f32,
+}
+
+impl SegmentAngles {
+    fn for_segment(seg: &Segment, calpha: f32, corner_const: f32, deg_to_rad: f32) -> Self {
+        Self {
+            strike_rad: seg.strike_deg * deg_to_rad,
+            dip_rad: seg.dip_deg * deg_to_rad,
+            rake_rad: seg.rake_deg * deg_to_rad,
+            corner_coeff: corner_const / alpha_t(seg.dip_deg, seg.rake_deg, calpha),
+        }
+    }
+}
+
+/// The generator and the three pre-drawn blocks, in the order the Fortran draws them.
+struct Deviates {
+    /// `irand` after `init_random_seed` mutated it.
+    seeded_irand: i32,
+    /// `fgrand` — one block of `MMV`, indexed by `irandcnt`.
+    normal: Vec<f32>,
+    /// `rna` / `rnb` — the vertical component's uniforms.
+    radv_uniform_a: Vec<f32>,
+    radv_uniform_b: Vec<f32>,
+}
+
+/// Seed, then make the three pre-draws.
+///
+/// **The order and the counts are the contract, not an implementation detail.** Seed,
+/// then `nr` uniforms into `a`, then `nr` uniforms into `b`, then `MMV` normals. Changing
+/// any of the three moves every sample downstream, which is why this is one function
+/// rather than three calls spread through the setup. See `REFACTOR.md` §2.6b.
+///
+/// The two uniform blocks must stay two sequential fills. Interleaving them into one pass
+/// would put different deviates in different slots and change every vertical component.
+fn seed_and_predraw(
+    config: &HfConfig,
+    irand: i32,
+    radv_sample_count: usize,
+    draw_normals: bool,
+) -> (Pcg32, Deviates) {
+    let (mut rng, seeded_irand) = Pcg32::seed(irand);
+
+    // `nr` values, not `mmv`. `vertical_radiation_spectrum` reads exactly this many, and
+    // the Fortran reserved and zeroed 262144 to use 1000 of them.
+    let mut radv_uniform_a = vec![0.0f32; radv_sample_count];
+    let mut radv_uniform_b = vec![0.0f32; radv_sample_count];
+    fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_a);
+    fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_b);
+
+    // This one STAYS at `MMV`, and not from laziness: the number drawn is part of the
+    // stream. Shrinking the allocation without shrinking the draw is a buffer overrun;
+    // shrinking the draw changes every waveform. See REFACTOR.md §2.6b.
+    let mut normal = vec![0.0f32; MMV];
+    if draw_normals {
+        fill_normal_deviates(&mut rng, MMV, &mut normal);
+    }
+    let _ = config;
+
+    (rng, Deviates { seeded_irand, normal, radv_uniform_a, radv_uniform_b })
+}
+
+/// What the time-window pass produces for one segment.
+struct WindowPass {
+    /// One entry per real subfault, indexed by [`Segment::grid_index`].
+    window_s: Vec<f32>,
+    /// Longest window over the segment; sizes the transform.
+    tmax: f32,
+    /// `d10` — closest subfault slant distance, km.
+    d10_km: f32,
+}
+
+/// Time-window pass — `hb_high_ref.f`'s first subfault loop.
+///
+/// **Depth-major: `j` outer, `i` inner.** That is the OPPOSITE order to
+/// [`subfault_pass`], and the difference is load-bearing there, not here: this pass draws
+/// nothing from the generator, so its order affects only the `tmax` max-reduction and the
+/// `d10` min-reduction, both of which are order-independent in exact arithmetic and
+/// preserved here anyway.
+fn time_window_pass(
+    seg: &Segment,
+    geom: &SubfaultGeometry,
+    vmod: &VelocityModel,
+    rupture: &RuptureVelocityTaper,
+    path_duration: &PathDuration,
+    angles: &SegmentAngles,
+    run: &RunScalars,
+) -> WindowPass {
+    let mut tmax = 0.0f32;
+    let mut d10_km = 10000.0f32;
+    let mut window_s = vec![0.0f32; seg.subfault_total()];
+
+    // Carried ACROSS subfaults deliberately. Unlike the subfault pass, this one has no
+    // `vsh(1)` default before the lookup: if the subfault depth exceeds every layer,
+    // the previous subfault's velocity is reused. Undefined on the very first subfault
+    // of the first station in the Fortran; zero here.
+    let mut shear_velocity_km_s = 0.0f32;
+
+    for (i, j) in seg.depth_major() {
+        let ray = geom.at(i, j);
+        if let Some(ksrc) =
+            (0..run.layer_count).find(|&k| vmod[k].depth_km >= ray.depth_km as f64)
+        {
+            shear_velocity_km_s = vmod[ksrc].vsh_km_s as f32;
+        }
+
+        let rvf = rupture.factor(ray.depth_km);
+
+        // The last table segment this distance is past. The Fortran scans the whole
+        // table letting later matches overwrite earlier ones, which is `.last()` -- NOT
+        // `.find()`, since the table ascends and the first match is the wrong end.
+        //
+        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches
+        // NOTHING and the duration terms stay zero. The Fortran leaves them undefined
+        // there; zero is this port's choice, and `unwrap_or` is where it lives.
+        let bin = path_duration
+            .iter()
+            .take_while(|s| ray.slant_km > s.start_km)
+            .last()
+            .copied()
+            .unwrap_or(DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km: 0.0 });
+
+        let fce = angles.corner_coeff * rvf * shear_velocity_km_s
+            / (run.avg_subfault_km * run.pi);
+        let tw0 = run.moment_scale.sqrt() * (1.0 / fce);
+        let dpath = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
+        // VERSION1: no 81.92 s cap.
+        let window = 2.12 * (tw0 + dpath);
+        window_s[seg.grid_index(i, j)] = window;
+
+        if window > tmax {
+            tmax = window;
+        }
+        d10_km = d10_km.min(ray.slant_km);
+    }
+
+    WindowPass { window_s, tmax, d10_km }
+}
+
+/// Transform length and frequency axis for one segment.
+struct SpectrumPlan {
+    np2: usize,
+    /// `nfold` — positive-frequency bin count, `np2/2 + 1`.
+    fold_count: usize,
+    /// `mfold` — mirrored bin count, `np2/2 - 1`.
+    mirror_count: usize,
+    frequency_hz: Vec<f32>,
+}
+
+/// Smallest power of two at or above `2 * tmax / dt`, and the axis that goes with it.
+fn plan_segment_spectrum(tmax: f32, dt: f32) -> SpectrumPlan {
+    let ntmax = truncate_toward_zero(2.0 * tmax / dt) as usize;
+    let mut np2 = 2usize;
+    while np2 < ntmax {
+        np2 *= 2;
+    }
+    let fold_count = np2 / 2 + 1;
+    let mirror_count = np2 / 2 - 1;
+
+    let df = 1.0 / (np2 as f32 * dt);
+    // 0-based, which also removes the `- 1`: the axis is `df * bin`.
+    let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
+
+    SpectrumPlan { np2, fold_count, mirror_count, frequency_hz }
+}
+
+/// Subfault pass — `hb_high_ref.f`'s second subfault loop.
+///
+/// **Strike-major: `i` outer, `j` inner, the OPPOSITE of [`time_window_pass`], and here
+/// the order IS the contract.** `irandcnt` advances once per surviving subfault and
+/// indexes the pre-drawn normals, and every `stochastic_spectrum` and
+/// `horizontal_radiation_spectrum` call draws from the live stream. Walking the grid the
+/// other way pairs a different deviate with every subfault and changes every waveform.
+/// See `PORTING_RULES.md` §5.
+#[allow(clippy::too_many_arguments)]
+fn subfault_pass(
+    rng: &mut Pcg32,
+    acc: &mut [Vec<f32>; 3],
+    seg: &Segment,
+    geom: &SubfaultGeometry,
+    windows: &WindowPass,
+    plan: &SpectrumPlan,
+    vmod: &VelocityModel,
+    rupture: &RuptureVelocityTaper,
+    angles: &SegmentAngles,
+    run: &RunScalars,
+    config: &HfConfig,
+    deviates: &Deviates,
+    siteamp_log_freq: &[f32],
+) {
+    let np2 = plan.np2;
+    let mut spectrum: [Vec<Complex32>; 3] =
+        std::array::from_fn(|_| vec![Complex32::ZERO; np2]);
+    let mut subfault_acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; np2]);
+    let mut radiation = vec![0.0f32; plan.fold_count];
+    let mut siteamp_factors = vec![0.0f32; run.site_table_len];
+    let mut ray = RayState::default();
+
+    // 0-based. The Fortran starts this at 1 and PRE-increments, so its first read is
+    // index 2, i.e. storage element 1 -- element 0 is never read. Starting at 0 and
+    // pre-incrementing lands on that same element.
+    let mut irandcnt = 0usize;
+
+    for (i, j) in seg.strike_major() {
+        let subfault = seg.at(i, j);
+        if subfault.slip < 0.001 {
+            continue; // goto 4 lands on the inner loop's terminator
+        }
+        let ray_geometry = geom.at(i, j);
+        let subfault_window_s = windows.window_s[seg.grid_index(i, j)];
+
+        for component in &mut subfault_acc {
+            component.fill(0.0);
+        }
+
+        // This pass DOES default the velocity and density before the lookup, unlike the
+        // window pass, which carries the previous subfault's value.
+        let mut shear_velocity_km_s = vmod[0].vsh_km_s as f32;
+        let mut density_g_cm3 = vmod[0].density_g_cm3 as f32;
+        let ksrc = match (0..run.layer_count)
+            .find(|&k| vmod[k].depth_km >= ray_geometry.depth_km as f64)
+        {
+            Some(k) => {
+                shear_velocity_km_s = vmod[k].vsh_km_s as f32;
+                density_g_cm3 = vmod[k].density_g_cm3 as f32;
+                k
+            }
+            // Keeps the first layer's defaults, and `layer_count` is one PAST the last
+            // layer -- the Fortran's `j0 + 1`, read as such below and by
+            // `site_amplification_factors`. See PORTING_RULES.md §7.
+            None => run.layer_count,
+        };
+        if ksrc == run.layer_count {
+            // The Fortran prints 'wrong!' and carries on with ksrc = j0+1.
+            println!(" wrong!");
+        }
+
+        let base_rvf = rupture.factor(ray_geometry.depth_km);
+        let mut rvf = base_rvf;
+        if run.rv_sig1 > 0.0 {
+            irandcnt += 1;
+            rvf = base_rvf * (deviates.normal[irandcnt] * run.rv_sig1).exp();
+            if rvf > run.rvfmax {
+                rvf = run.rvfmax;
+            }
+        }
+
+        let fce = angles.corner_coeff * rvf * shear_velocity_km_s / run.avg_subfault_km / run.pi;
+
+        for &ray_type in &config.rayset {
+            let kind = ray_type.kind();
+
+            // The tracing runs even for a straight ray: the Fortran calls
+            // green_function unconditionally and overwrites the results below, and
+            // type 0 borrows type 1's tracing to do it.
+            let g = green_function(
+                &mut ray, vmod, run.layer_count, ray_geometry.depth_km,
+                ray_geometry.horiz_km, ray_type.trace_type(), WaveMode::Sh,
+            );
+            let mut stime = g.stime;
+            let mut rpath = g.rpath;
+            let mut qbar = g.qbar;
+            let mut sub_tstart = stime - run.window_eps * subfault_window_s;
+
+            if kind == RayKind::StraightRay {
+                rpath = ray_geometry.slant_km;
+                qbar = rpath / (shear_velocity_km_s * 150.0);
+                stime = rpath / 3.7;
+                sub_tstart = 0.7 * stime;
+            }
+
+            // Three calls in component order: each draws `np2` normal deviates.
+            for (component, spec) in Component::ALL.into_iter().zip(spectrum.iter_mut()) {
+                stochastic_spectrum(
+                    rng, np2, rpath, subfault_window_s, run.window_eps, run.window_eta,
+                    shear_velocity_km_s, density_g_cm3, run.dt,
+                    run.subevent_moment, run.avg_subfault_km, fce,
+                    component.capped_fmax(run.fmax_hz), run.kappa_s,
+                    spec, &plan.frequency_hz, qbar, run.q_exponent,
+                    run.moment_scale,
+                );
+            }
+
+            if config.site_amp {
+                site_amplification_factors(
+                    vmod, ksrc, run.site_table_len, siteamp_log_freq, &mut siteamp_factors,
+                );
+                for spec in &mut spectrum {
+                    apply_site_amplification(
+                        spec, &plan.frequency_hz, run.site_table_len,
+                        siteamp_log_freq, &siteamp_factors,
+                    );
+                }
+            }
+            // famprand is dead: fasig1 = fasig2 = 0.
+
+            // Incidence angle from the ray parameter: sin(i)/vs = p0.
+            let p0 = g.rp0;
+            let incidence = if shear_velocity_km_s * p0 > 1.0 {
+                0.5 * run.pi
+            } else {
+                (shear_velocity_km_s * p0).asin()
+            };
+            let th = match kind {
+                // The straight-ray approximation ignores the traced ray parameter and
+                // uses the geometric take-off angle.
+                RayKind::StraightRay => ray_geometry.takeoff_rad,
+                RayKind::Upgoing => run.pi - incidence,
+                RayKind::Downgoing => incidence,
+            };
+            let pa = ray_geometry.azimuth_rad;
+
+            // The ONLY difference between the three components is which radiation
+            // routine runs, and the `Option` carries it: `Some` is a horizontal, which
+            // draws 5,000 deviates; `None` is the vertical, which draws none.
+            for component in Component::ALL {
+                match component.azimuth_offset_deg() {
+                    Some(offset_deg) => horizontal_radiation_spectrum(
+                        rng, angles.strike_rad, angles.dip_rad, angles.rake_rad, pa, th,
+                        &plan.frequency_hz, plan.fold_count, offset_deg * run.deg_to_rad,
+                        run.radv_sample_count, &mut radiation,
+                    ),
+                    None => vertical_radiation_spectrum(
+                        angles.strike_rad, angles.dip_rad, angles.rake_rad, pa, th,
+                        &plan.frequency_hz, plan.fold_count,
+                        &deviates.radv_uniform_a, &deviates.radv_uniform_b,
+                        run.radv_sample_count, &mut radiation,
+                    ),
+                };
+                let k = component.index();
+                apply_radiation_and_invert(
+                    plan.fold_count, plan.mirror_count,
+                    &mut spectrum[k], &mut subfault_acc[k], &radiation,
+                );
+            }
+
+            // Rupture time at this subfault.
+            let ratim = match config.rupture_velocity_override {
+                Some(vr) => {
+                    let along_strike_centre = 0.5 * (seg.along_strike_count as f32 + 1.0);
+                    let xra = seg.hypocentre_along_strike_km
+                        - (i as f32 - along_strike_centre) * seg.subfault_length_km;
+                    let yra =
+                        seg.hypocentre_down_dip_km - (j as f32 - 0.5) * seg.subfault_width_km;
+                    let mut t = (xra * xra + yra * yra).sqrt() / vr;
+                    if run.jitter_enabled {
+                        t += (rng.next_f32() - 0.5) * 0.1 * t;
+                    }
+                    t
+                }
+                None => subfault.rupture_time_s,
+            };
+
+            // Both terms truncate TOWARD ZERO, not toward negative infinity, so a
+            // negative `sub_tstart` makes `kst` smaller and possibly negative.
+            let kst = truncate_toward_zero(ratim / run.dt)
+                + truncate_toward_zero(sub_tstart / run.dt);
+
+            // ONE DRAW, AND IT MUST STAY. The Fortran loops `k = 1, nsum` here, draws a
+            // uniform, and turns it into a sub-event time offset. But `nsum` was frozen
+            // at 1 in 2004, so the loop ran once and the next statement was
+            // `if (nsum.eq.1) k2 = 0` -- the offset was computed and then thrown away.
+            //
+            // The arithmetic is gone. The draw is not: it advances the shared generator
+            // once per (subfault, ray), and every sample after it depends on where the
+            // stream ends up. Deleting this as "obviously dead code" changes every
+            // waveform in the program.
+            let _stream_advance = rng.next_f32();
+
+            accumulate_subfault(acc, &subfault_acc, subfault.slip, kst, np2, run.ndata);
+        }
+    }
+}
+
+/// Place one subfault's `np2`-sample contribution into the station accumulator.
+///
+/// `start_sample` is the Fortran's 1-based sample number and **can be negative**:
+/// `int()` truncates toward zero and `sub_tstart` can be negative. Samples landing
+/// before sample 1 are discarded rather than written, matching the Fortran, whose output
+/// only ever reads `DS(1..ndata)`.
+///
+/// §2.6 defect 1 lives here: sample 1 of the subfault's trace lands on `start_sample`,
+/// not on `start_sample + 1`. The Fortran read `stdd(li - k2, l)`, so its first iteration
+/// read index 0 -- one element before the column, which nothing writes -- and every
+/// subfault's contribution arrived one sample late. See `REFACTOR.md` §2.6 for the
+/// analysis and `PORTING_RULES.md` §7 for the aliasing that made that read return zero
+/// rather than crash.
+fn accumulate_subfault(
+    acc: &mut [Vec<f32>; 3],
+    subfault_acc: &[Vec<f32>; 3],
+    weight: f32,
+    start_sample: i32,
+    np2: usize,
+    ndata: usize,
+) {
+    // The contribution is `subfault_acc[0..np2]` placed at
+    // `acc[start_sample ..= start_sample + np2 - 1]`, both clipped to the record.
+    let last_sample = (start_sample + np2 as i32 - 1).min(ndata as i32);
+    // Clip the low end to sample 1. `skip` is how many of the subfault's own samples fall
+    // before the record starts.
+    let first_sample = start_sample.max(1);
+
+    // BOTH ends can put the window entirely outside the record, and they are different
+    // cases: `last < 1` is a contribution that ends before the record begins (a large
+    // negative `sub_tstart`), and `last < first` is one that begins after it ends
+    // (`start_sample > ndata`, which a long-path ray at a far station reaches). The
+    // Fortran's `do while (li <= kend)` covers both by simply not iterating. Written as
+    // an explicit range, the second case computes a negative length and must be rejected
+    // before it is cast — this is exactly what the parity gate caught when it was not.
+    if last_sample < first_sample {
+        return;
+    }
+
+    let skip = (first_sample - start_sample) as usize;
+    let count = (last_sample - first_sample + 1) as usize;
+    let dst = first_sample as usize - 1;
+
+    for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
+        for (slot, &value) in
+            out[dst..dst + count].iter_mut().zip(&contribution[skip..skip + count])
+        {
+            *slot += weight * value;
+        }
+    }
 }
 
 /// One segment of the piecewise-linear duration-versus-distance table.
@@ -869,4 +1068,56 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
     }
 
     1.0 / (1.0 + fd * fr * calpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference implementation: the Fortran's own loop, transliterated.
+    fn accumulate_reference(
+        acc: &mut [Vec<f32>; 3],
+        subfault_acc: &[Vec<f32>; 3],
+        weight: f32,
+        start_sample: i32,
+        np2: usize,
+        ndata: usize,
+    ) {
+        let kend = (start_sample + np2 as i32 - 1).min(ndata as i32);
+        let mut li = start_sample;
+        while li <= kend {
+            if li >= 1 {
+                let idx = (li - start_sample) as usize;
+                let sample = li as usize - 1;
+                for component in 0..3 {
+                    acc[component][sample] += weight * subfault_acc[component][idx];
+                }
+            }
+            li += 1;
+        }
+    }
+
+    /// The slice form must agree with the loop form at every alignment, including the
+    /// two that put the window entirely outside the record.
+    ///
+    /// `start_sample > ndata` is the case §2.8 got wrong: it computes a negative length,
+    /// and casting that to `usize` wraps. The parity gate caught it on one deck
+    /// (`rayset=1,3`, where the Moho multiple makes the path long enough to start past
+    /// the end of the record); this pins it without needing a 22-deck run.
+    #[test]
+    fn accumulate_matches_the_fortran_loop_at_every_alignment() {
+        let np2 = 8usize;
+        let ndata = 10usize;
+        let subfault_acc: [Vec<f32>; 3] =
+            std::array::from_fn(|c| (0..np2).map(|i| (c * 100 + i + 1) as f32).collect());
+
+        // Well before the record, straddling both edges, and well past the end.
+        for start in -12i32..=14 {
+            let mut got: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
+            let mut want: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
+            accumulate_subfault(&mut got, &subfault_acc, 2.0, start, np2, ndata);
+            accumulate_reference(&mut want, &subfault_acc, 2.0, start, np2, ndata);
+            assert_eq!(got, want, "start_sample = {start}");
+        }
+    }
 }
