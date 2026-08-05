@@ -1,4 +1,14 @@
-//! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
+//! One subfault's stochastic spectrum, and its inverse transform to a time series.
+//!
+//! This module is **Boore (1983)**, "Stochastic simulation of high-frequency ground motions
+//! based on seismological models of the radiated spectra", *BSSA* 73(6A), 1865–1894 — the
+//! point-source stochastic method, equations 1 through 11. [`crate::sim`] is the finite-fault
+//! layer around it, from Graves & Pitarka (2010).
+//!
+//! The idea, which explains the shape of everything here: high-frequency ground motion looks
+//! like filtered noise, so rather than solving a wave equation you specify the Fourier
+//! *amplitude* spectrum from seismology and pair it with a *random phase* spectrum. See
+//! `PHYSICS.md` §1 and §6; `papers/README.md` records the equation-by-equation verification.
 
 use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
@@ -7,81 +17,56 @@ use crate::rng::{fill_normal_deviates, Draws};
 
 /// `Gamma(x)`.
 ///
-/// Replaces `FUNCTION DGAMM(X)` (`hb_high_ref.f:2745`), which was a 20-term
-/// Chebyshev-like series with hand-rolled argument reduction into `[-0.5, 0.5]`, plus two
-/// error paths that wrote a diagnostic to unit 6 and returned `1.0e75`.
+/// Its one purpose in this crate is the `Γ(2b+1)` in Boore (1983) eq. 11, which normalises the
+/// Saragoni–Hart envelope to unit squared area. That is the whole reason a gamma function
+/// appears in a ground-motion simulator.
 ///
-/// Lived in a `special.rs` of its own until §5.6. A module for one `#[inline]` line was
-/// more structure than the thing deserved, and its only call is [`stochastic_spectrum`]'s
-/// `gamma(2b+1)` below. It stays a named function rather than an inlined `libm::tgamma`
-/// because `tests/properties.rs` pins its recurrence, positivity and factorial agreement —
-/// tests that mean "the gamma this crate uses" and would become tests of a dependency.
+/// A named function rather than an inlined `libm::tgamma` because `tests/properties.rs` pins
+/// its recurrence, positivity and agreement with factorials — tests that mean "the gamma this
+/// crate uses", and would become tests of a dependency if the name went away.
 ///
-/// # Why this was safe to swap
+/// # Behaviour at poles
 ///
-/// `b` comes from the time-window shape `(window_eps, window_eta)`, which production
-/// hardcodes, so the argument is always `3.5062997341156006`, and there:
-///
-/// ```text
-/// DGAMM             3.346549271566832    (0x400ac5bb9fdea847)
-/// libm::tgamma      3.346549271566831    (0x400ac5bb9fdea844)
-/// ```
-///
-/// Three ulps of `f64`. The result is consumed as `aa = sqrt((2c)^(2b+1) / gm) as f32`,
-/// and `f32` keeps 24 mantissa bits against `f64`'s 53, so the difference is annihilated
-/// by the narrowing. It is *not* bit-identical by construction, only in effect — which is
-/// why the parity ladder is evidence here rather than a guarantee.
-///
-/// # What changed in behaviour
-///
-/// The `1.0e75` sentinel is gone. `stochastic_spectrum` never checked for it, so a pole or
-/// an overflow used to propagate a plausible-looking finite number straight into the
-/// spectrum. `libm::tgamma` returns infinity or NaN instead, which is louder and cannot be
-/// mistaken for a value. Neither is reachable from a real deck: the argument is a constant
-/// of the window shape. `DGAMM` also refused any `x > 57`; `tgamma` is happy to about 171
-/// before overflowing, so that artificial ceiling is gone too.
+/// Returns infinity or NaN, which is loud. The routine that calls it never checks, so a
+/// silently finite sentinel would propagate a plausible-looking wrong number into the
+/// spectrum. Unreachable from a real deck in any case: the argument is a constant of the
+/// window shape.
 #[inline]
 pub fn gamma(x: f64) -> f64 {
     libm::tgamma(x)
 }
 
-/// Transform length and frequency axis for one segment.
+/// Transform length, frequency axis, and the transcendentals that depend only on them.
 ///
-/// Lived in `sim.rs` until §5.3. It is *the spectrum plan* — every field exists to serve
-/// [`stochastic_spectrum`] and the two routines that decorate its output — so it belongs
-/// beside them, which is the same argument that moved `highcor.rs` here in §5.1a.
+/// One of these is built per fault segment and reused across every subfault, ray and component
+/// in it. The three precomputed tables were between them the largest single cost in the
+/// program — 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, each computing at
+/// most `np2` or `fold_count` *distinct* values. Hoisting them is exact: `powf` and `ln` are
+/// deterministic, so evaluating a pure function once and reusing it gives the identical `f32`.
 pub struct SpectrumPlan {
     pub np2: usize,
-    /// `nfold` — positive-frequency bin count, `np2/2 + 1`, and the length of every
-    /// positive-frequency table below.
+    /// Positive-frequency bin count, `np2/2 + 1`, and the length of every table below.
     pub fold_count: usize,
     pub frequency_hz: Vec<f32>,
 
-    // ---- precomputed transcendentals -------------------------------------------------
-    //
-    // The three tables below were, between them, the largest single cost in the program:
-    // 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, computing at most
-    // `np2`, `fold_count` and `fold_count` DISTINCT values respectively. Every one was a
-    // pure function of quantities that do not change within a segment, recomputed once
-    // per subfault per ray per component.
-    //
-    // Hoisting them is bit-exact by construction: `powf` and `ln` are deterministic, so
-    // evaluating a pure function once and reusing it gives the identical `f32`.
-    /// `ln(frequency_hz[i])`. Index 0 is `-inf` and is never read — the site-amplification
-    /// interpolation starts at bin 1, because `ln(0)` has no meaning as a frequency.
+    /// `ln(frequency_hz[i])`, for the site-amplification interpolation. Index 0 is `-inf` and
+    /// is never read — `ln(0)` has no meaning as a frequency.
     pub log_frequency_hz: Vec<f32>,
-    /// `frequency_hz[i]^(1 - q_exponent)` — the path-attenuation frequency dependence.
+    /// `frequency_hz[i]^(1 - q_exponent)` — the frequency dependence of path attenuation,
+    /// which arises because `Q(f) = Q₀·f^x`. See `PHYSICS.md` §3.
     pub path_exponent: Vec<f32>,
-    /// `(i * dt)^b` — the power-law factor of the Saragoni-Hart envelope.
+    /// `(i·dt)^b` — the power-law factor of the Saragoni–Hart envelope, Boore (1983) eq. 7.
     ///
-    /// `b` comes from the window shape `(window_eps, window_eta)`, which is fixed for the
-    /// whole run, so this is `np2` values that were being recomputed 336 times on the
-    /// medium fault.
+    /// `b` comes from the window shape, fixed for the whole run, so this is `np2` values that
+    /// were otherwise recomputed for every subfault, ray and component.
     pub envelope_power: Vec<f32>,
 }
 
 impl SpectrumPlan {
-    /// Smallest power of two at or above `2 * tmax_s / dt`, and the axis that goes with it.
+    /// Smallest power of two at or above `2 · tmax_s / dt`, and the frequency axis to match.
+    ///
+    /// The factor of two is Boore (1983, p. 1869): the record is made about twice the duration
+    /// of strong shaking, so that the windowed transient fits inside it with room to decay.
     pub fn new(tmax_s: f32, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
         let ntmax = (2.0 * tmax_s / dt).trunc() as usize;
         let mut np2 = 2usize;
@@ -91,15 +76,14 @@ impl SpectrumPlan {
         let fold_count = np2 / 2 + 1;
 
         let df = 1.0 / (np2 as f32 * dt);
-        // 0-based, which also removes the `- 1`: the axis is `df * bin`.
         let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
 
         let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
         let path_exponent: Vec<f32> =
             frequency_hz.iter().map(|f| f.powf(1.0 - q_exponent)).collect();
 
-        // The Saragoni-Hart shape parameter, from the window shape alone. Identical to the
-        // expression in `stochastic_spectrum`, which is where it used to live.
+        // Boore (1983) eq. 8, the envelope shape parameter, from the window shape alone.
+        // Duplicated in `stochastic_spectrum`, which needs `b` again to form `c`.
         let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
         let envelope_power: Vec<f32> = (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
 
@@ -116,95 +100,94 @@ impl SpectrumPlan {
 
 /// Spectral-model constants that are **fixed for the whole run**.
 ///
-/// The cut between this and [`RayPath`] is the useful one: everything here is the same on
-/// every one of the hundreds of thousands of calls in a run, and everything there changes
-/// on each. Nineteen positional arguments hid that distinction completely.
+/// The cut between this and [`RayPath`] is the useful one: everything here is the same on every
+/// one of the hundreds of thousands of calls in a run, and everything there changes on each.
 pub struct SourceModel {
     pub dt: f32,
-    /// `tw_eps` / `tw_eta` — the Saragoni-Hart window shape.
+    /// Envelope shape: `ε` is where the peak sits as a fraction of the duration, `η` how far
+    /// the envelope has decayed by the end. Boore (1983) uses 0.2 and 0.05, and so does this.
     pub window_eps: f32,
     pub window_eta: f32,
+    /// `σ_p · dl³` — the subfault moment scale, in dyn·cm.
     pub subevent_moment: f32,
+    /// `κ`, the near-surface attenuation operator's decay constant, in seconds. Production
+    /// uses 0.045. Anderson & Hough (1984).
     pub kappa_s: f32,
+    /// `F` in Graves & Pitarka (2010) eq. 12 — Frankel's finite-fault factor. See the note on
+    /// `frank` in [`stochastic_spectrum`], which is where it does its work.
     pub moment_scale: f32,
 }
 
 /// One `(subfault, ray, component)`'s own path, and the medium at its source.
 pub struct RayPath {
+    /// Ray path length, **not** epicentral distance.
     pub distance_km: f32,
+    /// Shaping-window length, Boore (1983) `T_w`.
     pub window_s: f32,
+    /// `β` and `ρ` at the subfault, not at the station.
     pub shear_velocity_km_s: f32,
     pub density_g_cm3: f32,
+    /// `f_ci`, Graves & Pitarka (2010) eq. 13.
     pub corner_frequency_hz: f32,
     /// Capped at 15 Hz for the vertical component, which is why this is per-call rather
     /// than a [`SourceModel`] constant.
     pub fmax_hz: f32,
+    /// `q̄`, the travel-time weighted `Σ t/q` along the ray (Ou & Herrmann 1990). For a
+    /// straight ray this reduces to `R/(βQ)`.
     pub qbar: f32,
 }
 
-/// `subroutine stochastic_spectrum(...)` — `hb_high_ref.f:1670`.
+/// The complex Fourier spectrum of one subfault's stochastic S-wave motion.
+/// (orig. `hb_high_ref.f:1670`)
 ///
-/// Builds the complex Fourier spectrum of one subfault's stochastic S-wave
-/// motion: a Brune omega-squared source, a kappa/fmax high-cut, path Q, and the
-/// Frankel two-corner operator, multiplied by a unit-power random phase
-/// spectrum and mirrored to Hermitian symmetry. Returns `np2` values.
+/// Boore (1983) eq. 1 — a product of source, path and site terms, multiplied by the spectrum of
+/// windowed random noise and mirrored to Hermitian symmetry:
 ///
-/// The spectrum was an out-parameter — a caller-owned scratch buffer refilled once per
-/// subfault per component. Returning it lets the value flow straight into
-/// [`radiate_and_invert`], which consumes it, so the caller no longer clones.
+/// ```text
+/// A(ω) = C · M₀ · S(ω,ω_c) · P(ω,ω_m) · exp(−ωR/2Qβ) / R
+///        └─────────────┘   └──────┘   └────────────┘ └─┘
+///           source          high-cut    path Q        spreading
+/// ```
 ///
-/// `dlm` — the average subfault dimension — was declared and never used, and was kept in
-/// the signature for parity with the Fortran call site. That reason expired with Stage 5,
-/// and it is gone.
+/// with the finite-fault correction of Graves & Pitarka (2010) eq. 12 folded in. Returns `np2`
+/// values; the spectrum is returned rather than written through an out-parameter so the value
+/// can move straight into [`radiate_and_invert`], which consumes it.
 ///
-/// # Precision layout
+/// See `PHYSICS.md` §2–§3 and §6 for the physics, and `papers/README.md` for the verification.
 ///
-/// `a1`, `a2`, `a3`, `gsa`, `gm` and the `as` array are `real*8`; everything
-/// else is `real*4`. So each `as(i)` term is *computed* in single precision and
-/// then widened, and only the final product `a1*a2*a3*frank` accumulates in
-/// double. The `as f64` casts below are exactly those widening points.
+/// # Precision layout is load-bearing
 ///
-/// Two subtleties verified against gfortran 16.1.1 rather than assumed:
+/// The `as f64` casts below are not decoration. Each per-bin term is computed in `f32` and then
+/// widened; only the final product accumulates in `f64`. In particular the complex product goes
+/// through [`Complex64`] deliberately — doing it entirely in `f32` differs in the last bit.
 ///
-/// * `complex*8 * real*8` promotes the **complex** operand to `complex*16` and
-///   multiplies in double, narrowing only on assignment. Doing the whole product
-///   in `f32` differs in the last bit, so `spectrum(i) = ac(i)*as(i)*amp` is built
-///   through [`Complex64`] here.
-/// * Constant exponents need care, and the two cases here differ. gfortran folds
-///   `x**(-1.0)` into a reciprocal — verified identical to `1.0/x` over 200,000
-///   values — but Rust's `powf(-1.0)` is a libm call that disagrees with `1.0/x`
-///   in about 1 case in 1,600. So `**(-1.0)` is written as an explicit division.
-///   `x**0.5`, by contrast, gfortran does *not* fold: it calls `powf`. Rust
-///   cannot express that portably — LLVM folds `powf(x, 0.5)` to `sqrt(x)` at
-///   `-O2` but not at `-O0`, so the result would depend on optimisation level.
-///   The only `x**0.5` in this routine feeds a dead store and is simply not
-///   computed. See `PORTING_RULES.md` §4b.
+/// # No constant-exponent `powf`, ever
+///
+/// LLVM folds `powf(x, 0.5)` into `sqrt(x)` at `-O2` but not at `-O0`, so a constant exponent
+/// would make this routine's output depend on the optimisation level. There is none here, and
+/// there must not be one added. `x^(-1)` is likewise written as an explicit division rather
+/// than `powf(x, -1.0)`, which is a libm call that disagrees with `1.0/x` about one time in
+/// 1,600.
 ///
 /// # The power normalisation is self-referential, which makes it robust
 ///
-/// `amp = 1/(dt*sqrt(fsa/fold_count))` normalises so the average *power* spectrum is
-/// unity, per Boore (1983) — a 2009-03-18 change from normalising the amplitude
-/// spectrum, which reduced motions about 10% and was offset by raising the default
-/// corner frequency 5%.
+/// `amp = 1/(dt·√(fsa/fold_count))` scales the random sequence so its average **power**
+/// spectrum is unity. Boore (1983, p. 1867) specifies unit average *amplitude*, achieved by
+/// choosing the noise variance; measuring the realised spectrum and correcting it is the same
+/// intent, implemented differently, and matches the RMS averaging of his Figure 1.
 ///
-/// This comment used to claim the calibration depends on `fill_normal_deviates`'s
-/// unit-RMS rescale, so that a plain N(0,1) generator would change the output level.
-/// **That is wrong.** `fsa` is measured from the very sequence that was rescaled, so if
-/// the deviates carry a scale factor `s`, then `ac` does too, `fsa` carries `s^2`, and
-/// `amp` carries `1/s`. The product `ac * as_ * amp` is invariant. See
-/// [`crate::rng::fill_normal_deviates`] for the full trace.
-///
-/// The practical consequence is the opposite of what was documented: this routine is
-/// **indifferent** to the deviate source's scale, which is one less thing tying it to a
-/// particular generator.
+/// The useful consequence is that this routine is **indifferent to the deviate source's
+/// scale**: `fsa` is measured from the very sequence that produced `ac`, so a scale factor `s`
+/// in the generator gives `ac` a factor `s`, `fsa` a factor `s²`, and `amp` a factor `1/s`.
+/// The product is invariant. One less thing tying the result to a particular generator.
 pub fn stochastic_spectrum(
     rng: &mut impl Draws,
     plan: &SpectrumPlan,
     model: &SourceModel,
     path: &RayPath,
 ) -> Array1<Complex32> {
-    // Destructured rather than read through the structs field by field, so that the
-    // arithmetic below reads as arithmetic. The names are the ones the derivation uses.
+    // Destructured so that the arithmetic below reads as arithmetic, under the names the
+    // derivation uses.
     let &SourceModel { dt, window_eps, window_eta, subevent_moment, kappa_s, moment_scale } =
         model;
     let &RayPath {
@@ -220,49 +203,56 @@ pub fn stochastic_spectrum(
     let (np2, fold_count) = (*np2, *fold_count);
 
     let pai = std::f32::consts::PI;
+
+    // `rp`, `fs` and `prtitn` are the three factors of Boore (1983) eq. 2,
+    // `C = R_θφ · FS · PRTITN / (4πρβ³)`: average radiation pattern, free-surface
+    // amplification, and the partition of energy between two horizontal components
+    // (nominally 1/√2, written as two digits). They combine into `cc` below.
+    //
+    // `rp` AND `prtitn` ARE CANCELLED LATER, and that is their only purpose.
+    // `radiate_and_invert` divides by exactly `0.63 * 0.71` after multiplying in the
+    // conically averaged pattern from `crate::radiation`, so what survives is that pattern
+    // standing where Boore's scalar average would have been — which is `RP_ij` in Graves &
+    // Pitarka (2010) eq. 11. **Change one of these four numbers and you must change its
+    // partner.** See `PHYSICS.md` §5.
     let rp = 0.63f32;
 
     let fc2 = corner_frequency_hz * corner_frequency_hz;
 
-    // fs is the free-surface factor; prtitn the vector partition factor for two
-    // orthogonal components, nominally 1/sqrt(2) but written as two digits.
     let fs = 2.0f32;
     let prtitn = 0.71f32;
 
     let distance_cm = distance_km * 100000.0;
 
-    // Saragoni-Hart style envelope: b and c from the (window_eps, window_eta) window shape.
+    // The Saragoni & Hart (1974) shaping window, `w(t) = a·t^b·e^(−ct)·H(t)`, in the
+    // parameterisation of Boore (1983) eq. 7–11. `b` and `c` are eq. 8 and 9; they place the
+    // envelope peak at a fraction `ε` of the duration and bring it down to a fraction `η` of
+    // the peak by the end.
     let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
     let c = b / window_eps / window_s;
-    // Computed in real*4, then widened -- gsa is real*8 but 2*b+1.0 is not.
+    // Boore (1983) eq. 11, `a = [(2c)^(2b+1) / Γ(2b+1)]^(1/2)`, which normalises the envelope
+    // to unit squared area. The mixed precision is deliberate: `2b+1` is formed in `f32`, the
+    // division and sqrt happen in `f64`, and the result narrows back.
     let gsa = (2.0 * b + 1.0) as f64;
     let gm = gamma(gsa);
-    // The power is real*4; the division by gm and the sqrt are real*8; the
-    // result narrows back to real*4.
     let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
 
-    // Saragoni-Hart envelope, `aa * t^b * exp(-c*t)` on the evenly spaced grid
-    // `t = (i-1)*dt`.
+    // Evaluate the envelope on the sample grid `t = i·dt`.
     //
-    // `exp(-c*t)` on that grid is a geometric sequence with ratio `exp(-c*dt)`, so it
-    // advances by one multiply per sample instead of one `expf` per sample. That is
-    // `np2` transcendentals removed per call, three calls per subfault.
-    // `PROFILE.md` item 4 ruled this out for bit-identity; Stage 2 allows it.
-    //
-    // The ratio is accumulated in `f64` deliberately. Relative error grows like
-    // `n * eps`, which over 16384 samples is ~1e-3 in `f32` — visible — against
-    // ~2e-12 in `f64`. Underflow is harmless and matches the direct form: once the
-    // product reaches zero it stays there, exactly as `expf` of a large negative
+    // `exp(-c·t)` on an evenly spaced grid is a geometric sequence with ratio `exp(-c·dt)`, so
+    // it advances by one multiply per sample instead of one `expf` per sample -- `np2`
+    // transcendentals removed per call, three calls per subfault. THE RATIO IS ACCUMULATED IN
+    // `f64` DELIBERATELY: relative error grows like `n·eps`, which over 16384 samples is ~1e-3
+    // in `f32` (visible) against ~2e-12 in `f64`. Underflow is harmless and matches the direct
+    // form -- once the product reaches zero it stays there, as `expf` of a large negative
     // argument would.
     //
-    // `t^b` has no recurrence for real `b`, but it does not need one: `b` comes from the
-    // window shape, which is fixed for the whole run, and `t` is `index * dt` on a fixed
-    // grid. So the whole table is a per-segment constant and arrives precomputed. That
-    // removed 5.5M `powf` per medium-fault run computing at most `np2` distinct values.
-    // The recurrence is what stops this being a plain elementwise expression, and `scan`
-    // is the shape that says so: `aa * power` is per-element, `decay` is carried. Built by
-    // scanning rather than zero-filling then overwriting -- `np2` floats were being written
-    // twice per call, three calls per subfault.
+    // `t^b` has no such recurrence for real `b` and does not need one: it is a per-segment
+    // constant and arrives precomputed in `envelope_power`.
+    //
+    // `scan` rather than a loop because that is the shape of the computation: `aa * power` is
+    // per-element, `decay` is carried. Building by scan also avoids zero-filling `np2` floats
+    // and immediately overwriting them.
     let decay_per_sample = (-(c as f64) * dt as f64).exp();
     let w: Vec<f32> = envelope_power
         .iter()
@@ -278,22 +268,16 @@ pub fn stochastic_spectrum(
     let omgc = 2.0 * pai * corner_frequency_hz;
     let omgm = 2.0 * pai * fmax_hz;
 
-    // Bin 0 (DC) stays zero; bins 1..fold_count get the shape. Slicing both from 1 keeps
-    // the two arrays' correspondence in the types instead of in two matching `[i]`s.
-    // Sized at `np2` even though the highest index ever read is `fold_count - 1`, i.e.
-    // half of it is never touched. Shrinking it to `fold_count` MEASURED SLOWER: at np2 =
-    // 16384 the `f64` buffer is exactly 128 KB, which is glibc's mmap threshold, so
-    // `calloc` hands back fresh already-zero pages and the zeroing costs nothing. At
-    // `fold_count` it is 64 KB, comes off the heap, and has to be memset for real.
-    // +5.4M instructions per run for "using less memory". See REFACTOR.md §2.6b, which
-    // measured the same effect from the other direction.
-    // Kept a `Vec` rather than an `Array1` precisely so the allocation above stays the one
-    // that was measured: `vec![0.0f64; n]` reaches `alloc_zeroed`, which is what puts it on
-    // the mmap path at 128 KB.
+    // The spectral shape, bin by bin. DC stays zero; bins `1..fold_count` get the shape.
     //
-    // `azip!` rather than a nested `.zip().zip()`: three arrays walked together read as
-    // three named bindings instead of a `((shape, fr), path_fr)` tuple unpacked in the
-    // pattern. It also ASSERTS the three lengths agree, where `zip` silently stops at the
+    // SIZED AT `np2`, NOT `fold_count`, ON PURPOSE, even though the top half is never read.
+    // Shrinking it MEASURED SLOWER: at np2 = 16384 the `f64` buffer is exactly 128 KB, glibc's
+    // mmap threshold, so `alloc_zeroed` hands back fresh already-zero pages for free. At
+    // `fold_count` it is 64 KB, comes off the heap, and must be memset for real -- +5.4M
+    // instructions per run in exchange for using less memory. It stays a `Vec` rather than an
+    // `Array1` for the same reason: `vec![0.0f64; n]` is what reaches `alloc_zeroed`.
+    //
+    // `azip!` asserts the three lengths agree, where a nested `zip` would silently stop at the
     // shortest -- a real check, since `frequency_hz` and `path_exponent` are caller-supplied.
     let mut as_ = vec![0.0f64; np2];
     azip!((
@@ -303,37 +287,28 @@ pub fn stochastic_spectrum(
     ) {
         let fr2 = fr * fr;
 
-        // The Q model qv = 150.0*fr**0.5 is computed by the Fortran but feeds
-        // only the first, dead, a3 form below, so it is not computed here.
-        // Earlier variants in the source: 100+10*fr**1.70 and 270*fr**0.5
-        // ("Beresnev Northridge").
-        //
-        // Dropping it also removes the port's last CONSTANT-exponent powf.
-        // That matters: LLVM folds powf(x, 0.5) into sqrt(x) at -O2 but not at
-        // -O0, and gfortran's x**0.5 is a real powf call, so keeping it would
-        // have made the port's output depend on optimisation level. See
-        // PORTING_RULES.md §4b.
-
+        // Boore (1983) eq. 3, the ω-squared source spectrum, "following Aki (1967) and Brune
+        // (1970)": `S(ω,ω_c) = ω²/(1 + (ω/ω_c)²)`. Rises as f² below the corner, flat above.
         let omg = 2.0 * pai * fr;
         let a1 = (cc * subevent_moment * (omg * omg / (1.0 + (omg / omgc) * (omg / omgc)))) as f64;
 
-        // `a2` (near-surface attenuation) and `a3` (path attenuation) were two
-        // separate `expf` calls per frequency bin. Two simplifications, both
-        // arithmetic identities verified numerically to double-precision epsilon
-        // before being applied:
+        // Near-surface and whole-path attenuation, plus 1/R geometric spreading.
         //
-        //   a3's argument   -0.5*omg*qbar*fr^-qfe  with omg = 2*pi*fr
-        //                 = -pi*qbar*fr^(1-qfe)              one fewer multiply
-        //   a2 * a3       = exp(-pi*fr*kappa) * exp(-pi*qbar*fr^(1-qfe))
-        //                 = exp(-pi*(fr*kappa + qbar*fr^(1-qfe)))   one fewer expf
+        // `κ > 0` -- the production branch -- is Anderson & Hough (1984), `exp(−πκf)`, and
+        // Graves & Pitarka (2010) eq. 16. It is combined with the path term in a single
+        // `exp`, which is an arithmetic identity rather than an approximation:
         //
-        // Only the `kappa > 0` branch can be combined; the `kappa <= 0` form of `a2`
-        // is a rational function, not an exponential, and production always has
-        // `kappa = 0.045`. Both branches are exercised — the tier-4 golden includes a
-        // negative-kappa case.
+        //   path Q      exp(−ωR/2Qβ)  with  Q(f) = Q₀f^x  and  q̄ = R/(Q₀β)
+        //             = exp(−π·q̄·f^(1−x))              G&P eq. 14
+        //   combined    exp(−πfκ)·exp(−π·q̄·f^(1−x))
+        //             = exp(−π(fκ + q̄·f^(1−x)))       one `expf` instead of two
         //
-        // No assumption is made about the frequency axis being evenly spaced, unlike
-        // the envelope recurrence above. `frequency_hz` is caller-supplied data.
+        // `κ ≤ 0` IS A DIFFERENT FILTER, and not Boore's. Boore (1983) eq. 4 is an eight-pole
+        // form `[1+(ω/ω_m)^8]^(−1/2)`; this is a single pole, `1/(1 + ω/ω_m)`. Production
+        // always has `κ = 0.045`, so only the tier-4 golden's negative-κ case reaches it.
+        //
+        // Unlike the envelope recurrence above, nothing here assumes the frequency axis is
+        // evenly spaced -- `frequency_hz` is caller-supplied data.
         let path_attenuation = qbar * path_fr;
         let a2a3 = if kappa_s <= 0.0 {
             let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
@@ -343,19 +318,36 @@ pub fn stochastic_spectrum(
             ((-pai * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
         };
 
+        // Frankel's (1995) finite-fault factor, as given by Graves & Pitarka (2010) eq. 12:
+        // it scales the subfault corner frequency towards the mainshock's while keeping the
+        // summed moment right.
+        //
+        // NOT a two-corner spectrum, despite the shape of the expression. Multiplied into
+        // `a1` the `(1 + (f/f_c)²)` cancels exactly, leaving a SINGLE-corner spectrum of
+        // moment `F·M₀` and corner `f_c/√F`:
+        //
+        //   a1 ∝ M₀f²/(1+x),  frank = F(1+x)/(1+Fx),  x = (f/f_c)²
+        //   a1·frank ∝ (F·M₀)·f² / (1 + (f/(f_c/√F))²)
+        //
+        // which is what G&P describe in words. Looking for a sag between two corners here --
+        // as in Boore, Di Alessandro & Abrahamson (2014) eq. 4 -- will not find one. The
+        // cancellation is exact in real arithmetic but is NOT performed, so simplifying it
+        // would move the last bits. See `PHYSICS.md` §2.
         let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
 
         *shape = a1 * a2a3 * frank as f64;
     });
 
 
+    // The random phase spectrum. `remove_quadratic_trend` removes the quadratic acceleration
+    // trend so that final velocity and displacement come out at zero.
     let mut a = vec![0.0f32; np2];
     fill_normal_deviates(rng, np2, &mut a);
     remove_quadratic_trend(dt, &mut a);
 
-    // Built by collecting rather than zero-filling then overwriting every element: `ac` is
-    // np2 complex values allocated three times per subfault, and the zeroing pass was
-    // pure waste.
+    // Windowed noise: the envelope times the deviates, as the imaginary part of a real signal.
+    // Collected rather than zero-filled and overwritten -- this is `np2` complex values
+    // allocated three times per subfault.
     let mut ac: Vec<Complex32> = a
         .iter()
         .zip(&w)
@@ -364,37 +356,27 @@ pub fn stochastic_spectrum(
 
     forward(&mut ac);
 
-    // Average POWER spectrum to unity (2009-03-18), not amplitude.
+    // Measure the realised average power of the noise spectrum, so it can be normalised out.
+    // `norm_sqr()` is `re² + im²` -- the same quantity as `|z|²` without the `hypot` and the
+    // squaring that undoes it, which was 4.5% of total runtime.
     //
-    // `norm_sqr()` is `re^2 + im^2`. The Fortran wrote `cabs(ac(i))*cabs(ac(i))`,
-    // which takes a square root and then squares it away again -- one `hypotf` per
-    // frequency bin, and `hypot` is not cheap. That was 4.5% of total runtime, and
-    // `PORTING_RULES.md` §4 / `PROFILE.md` item 3 recorded that it could not be
-    // simplified because `hypot(re,im)^2` and `re^2 + im^2` differ in the last bits.
-    // Under Stage 2 it can: this is the same quantity, computed without the detour.
-    // `Sum for f32` folds left to right, matching the Fortran's `fsa = fsa + ..`. Any
-    // reassociating form (chunked, pairwise, parallel) would not -- see REFACTOR.md §1.3b.
+    // `Sum for f32` FOLDS LEFT TO RIGHT AND MUST CONTINUE TO. This is a reduction, not an
+    // element-wise operation: any reassociating form -- chunked, pairwise, parallel -- gives a
+    // different answer and moves every waveform in the program.
     let fsa: f32 = ac[..fold_count].iter().map(Complex32::norm_sqr).sum();
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
-    // The mirror is not a second computation. It is the Hermitian symmetry of the first,
-    // and separating the two says so.
+    // Apply the shape, then mirror to Hermitian symmetry. The mirror is not a second
+    // computation -- it is the symmetry of the first, and `as_` and `amp` being real is what
+    // lets the two separate: conjugation commutes with real scaling, and negating an imaginary
+    // part is exact, so conjugating before or after narrowing gives the same bits.
     //
-    // The old loop scaled `ac[j]` into `spectrum[j]` and, in the same iteration, built
-    // `conj(ac[j+1] * as_[j+1]) * amp` into `spectrum[np2-j-1]`. That second quantity IS
-    // the first at index `j+1`, conjugated: `as_` and `amp` are real, so conjugation
-    // commutes with both, and negating an imaginary part is exact in `f32` and `f64`
-    // alike. So `conj` before narrowing and `conj` after give the same bits, and the two
-    // halves separate. Tier 4 is the check on that claim, not this comment.
-    //
-    // In place on `ac`, which the returned array now IS. §5.2's second buffer and its zero
-    // fill are both gone, and with them the extra allocation §5.2 flagged as temporary.
+    // In place on `ac`, which is the array being returned.
     let mut spectrum = Array1::from(ac);
     let np = np2 / 2;
 
-    // Positive frequencies, Nyquist included. complex*8 * real*8 goes through complex*16;
-    // see the note above. Bin 0 comes out zero because `as_[0]` is never written, which is
-    // what the old `j = 0` iteration did too.
+    // Positive frequencies, Nyquist included. The `Complex64` intermediate is the precision
+    // note above. Bin 0 comes out zero because `as_[0]` is never written.
     azip!((
         bin in spectrum.slice_mut(s![..fold_count]),
         &shape in ArrayView1::from(&as_[..fold_count]),
@@ -403,49 +385,46 @@ pub fn stochastic_spectrum(
         *bin = Complex32::new(d.re as f32, d.im as f32);
     });
 
-    // Negative frequencies: bin `np2 - k` is `conj(bin k)` for k in `1..np`. A REVERSED
-    // view of the head against the tail, rather than the index `np2 - j - 1` whose old
-    // comment needed a worked example on np2 = 16 to be believable. Checked the same way:
-    // np2 = 16 gives np = 8, so dest runs 9..15 while src runs 7 down to 1 -- dest 9 takes
-    // src 7, dest 15 takes src 1.
+    // Negative frequencies: bin `np2 - k` is `conj(bin k)` for k in `1..np`. A reversed view of
+    // the head assigned into the tail, which cannot be off by one the way an index expression
+    // can. Checked on np2 = 16, where np = 8: dest runs 9..15 while src runs 7 down to 1, so
+    // dest 9 takes src 7 and dest 15 takes src 1.
     //
-    // The old loop's last iteration ALSO wrote `spectrum[np]`, which the Nyquist store
-    // then overwrote. That write was dead. Dropping it is what leaves the two halves
-    // disjoint, which is the only reason this can be a pair of views at all -- and it
-    // removes the separate Nyquist line, since the positive half already covers bin `np`.
+    // Bin `np` is its own mirror and belongs to the positive half, which is why the two halves
+    // are disjoint and this can be a pair of views at all.
     let (positive, mut negative) = spectrum.view_mut().split_at(Axis(0), np + 1);
     azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
 
     spectrum
 }
 
-/// Multiply a spectrum by its radiation pattern, invert, scale and taper.
+/// Apply the radiation pattern, invert to a time series, scale and taper.
+/// (orig. `hb_high_ref.f:2234`)
 ///
-/// `hb_high_ref.f:2234` (`HIGHCOR`). Returns the real time series; the spectrum goes in by
-/// value because the inverse transform consumes it.
+/// Completes Graves & Pitarka (2010) eq. 10 for one component: the spectrum from
+/// [`stochastic_spectrum`] carries `C·S·G·P`, and the conically averaged pattern `RP_ij` from
+/// [`crate::radiation`] goes on here. Takes the spectrum **by value** because the inverse
+/// transform consumes it.
 ///
-/// Lengths carry the information the Fortran passed as `fold_count`, `mirror_count` and
-/// `np2`: the radiation pattern covers the positive frequencies, so `radiation.len()` *is*
-/// `fold_count`, and the mirrored half is `radiation[1..fold_count - 1]` walked backwards.
-/// The Fortran wrote that index as `radiation(2*fold_count - i)`, which needed a worked
-/// example on `np2 = 16` to believe; a reversed view cannot be off by one.
+/// Lengths carry what the original passed as three separate counts: the radiation pattern
+/// covers the positive frequencies, so `radiation.len()` *is* `fold_count`, and the mirrored
+/// half is `radiation[1..fold_count-1]` walked backwards.
 ///
-/// `RADIATION_NORM` is the radiation-pattern normalisation and `PARTITION_FACTOR` the vector
-/// partition factor for two orthogonal components — nominally `1/sqrt(2)`, written as two
-/// digits in the original and kept that way because it is a calibration choice, not an
-/// approximation of anything.
+/// # `RADIATION_NORM` and `PARTITION_FACTOR` exist to be cancelled
 ///
-/// # The taper constant was a typo, and it is now fixed
+/// They are the same `0.63` and `0.71` that [`stochastic_spectrum`] multiplied in as part of
+/// Boore (1983) eq. 2's constant `C`. Dividing by them here leaves the conically averaged
+/// pattern in their place, which is exactly what Graves & Pitarka (2010) eq. 11 asks for.
+/// **The four constants are a matched set — change one and you must change its partner.**
+/// See `PHYSICS.md` §5.
 ///
-/// The taper used `dd = 3.14159625/n0` (`:2266`). That is **not** pi — the last digits of
-/// `3.14159265` are transposed. Every other occurrence in the file is some truncation of the
-/// correct value (`3.1415926`, `3.14159265`, `3.141592654`), so this one was a genuine slip
-/// rather than a deliberate approximation.
+/// # The taper constant was a typo in the original, and is fixed here
 ///
-/// It was reproduced verbatim for as long as bit-identity was the contract. The error is
-/// about 1.1e-6 relative — roughly thirty times the worst of the file's honest truncations —
-/// and it left the taper fractionally short of a half cosine, so the final sample was not
-/// exactly zero. It is now `std::f32::consts::PI`, and the taper closes properly.
+/// The taper step used `3.14159625`, which is **not** pi — the last digits of `3.14159265` are
+/// transposed. Every other occurrence in the source was some honest truncation of the correct
+/// value, so this one was a slip. The error is about 1.1e-6 relative, roughly thirty times the
+/// worst of those truncations, and it left the taper fractionally short of a half cosine so the
+/// final sample was not exactly zero. It is `std::f32::consts::PI` now and the taper closes.
 pub fn radiate_and_invert(
     mut spectrum: Array1<Complex32>,
     radiation: ArrayView1<f32>,
@@ -455,16 +434,15 @@ pub fn radiate_and_invert(
 
     let np2 = spectrum.len();
     let fold_count = radiation.len();
-    // `mirror_count` was a parameter and is always `fold_count - 2`; the old code asserted
-    // exactly this. Sliced explicitly rather than as `fold_count..` because the two are only
-    // incidentally equal for the np2 the program uses.
+    // Always `fold_count - 2`. Sliced explicitly rather than as `fold_count..` because the two
+    // are only incidentally equal for the `np2` this program uses.
     let mirror_count = fold_count - 2;
 
-    // Positive frequencies, signed radiation pattern -- sign preserved since 2004-12-21,
-    // where the older code took abs().
-    // `azip!` rather than `*=`: ndarray's operator overloads require both sides to have the
-    // same element type, and this is Complex32 scaled by f32. Same iteration, same
-    // bit-exactness -- element-wise either way.
+    // Positive frequencies, then the mirrored half. The pattern is SIGNED -- the polarity from
+    // `crate::radiation` is carried through rather than discarded.
+    //
+    // `azip!` rather than `*=` because ndarray's operator overloads want matching element
+    // types, and this is `Complex32` scaled by `f32`. Same iteration either way.
     azip!((bin in &mut spectrum.slice_mut(s![..fold_count]), &gain in &radiation) *bin *= gain);
     azip!(
         (bin in &mut spectrum.slice_mut(s![fold_count..fold_count + mirror_count]),
@@ -477,8 +455,9 @@ pub fn radiate_and_invert(
     let scale = 1.0 / (RADIATION_NORM * PARTITION_FACTOR * np2 as f32);
     let mut samples = spectrum.mapv(|bin| scale * bin.re);
 
-    // Raised-cosine taper over the final tenth. `i + 1` keeps the Fortran's 1-based step
-    // number, which is what makes the last sample land on cos(pi) and the taper close.
+    // Raised-cosine taper over the final tenth, so the transient closes smoothly instead of
+    // being truncated. The `i + 1` is what makes the last sample land on `cos(π)` and the
+    // taper reach zero.
     let taper_len = np2 / 10;
     let step = std::f32::consts::PI / taper_len as f32;
     let taper =
@@ -493,9 +472,13 @@ pub fn radiate_and_invert(
 mod tests {
     use super::gamma;
 
-    /// The gamma argument the port actually needs, pinned so that a future change of
-    /// implementation has to look at the one value that matters rather than at the
-    /// thousand it does not. Lived in `special.rs` until §5.6 deleted that module.
+    /// The one gamma argument production actually evaluates, pinned so that a future change of
+    /// implementation has to look at the value that matters rather than at the thousand that
+    /// do not. `3.5062997341156006` is `2b+1` for the fixed window shape.
+    ///
+    /// The reference value is what the original's hand-rolled series returned; the two differ
+    /// by three ulps of `f64`, and the assertion below shows that difference does not survive
+    /// the narrowing to `f32` that the consumer applies.
     #[test]
     fn the_production_gamma_argument_survives_narrowing_to_f32() {
         let gsa = 3.5062997341156006f64;
@@ -509,7 +492,8 @@ mod tests {
         assert_eq!((got as f32).to_bits(), (fortran as f32).to_bits());
     }
 
-    /// Poles are loud now, rather than DGAMM's plausible-looking 1.0e75.
+    /// A pole must be loud. The caller never checks, so a finite sentinel would propagate a
+    /// plausible-looking wrong number into the spectrum.
     #[test]
     fn gamma_poles_are_not_finite() {
         for pole in [0.0, -1.0, -2.0, -3.0] {

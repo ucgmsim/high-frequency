@@ -174,7 +174,7 @@ impl Draws for FixtureDraws {
 /// interface contract and cannot grow a field.
 pub enum DrawSource {
     /// **The default.** `rand_pcg`'s PCG32, seeded through `rand_core`'s `seed_from_u64`
-    /// expansion — see [`DrawSource::for_run`] for why that matters.
+    /// expansion — see [`DrawSource::for_station`] for why that matters.
     Modern(rand_pcg::Pcg32),
     /// The Fortran's `init_random_seed`. Opt-in via `HB_LEGACY_SEEDING`, and retained
     /// only to regenerate results produced before §3.1.

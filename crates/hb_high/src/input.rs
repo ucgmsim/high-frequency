@@ -71,7 +71,7 @@ pub struct Subfault {
     /// `sddp` — slip.
     ///
     /// **This field changes meaning partway through a run.** It holds slip as read from
-    /// the file until [`crate::sim::normalise_source`], which converts it in place to
+    /// the file until `sim::normalise_source`, which converts it in place to
     /// relative moment and then rescales it to unit mean. Everything downstream of that
     /// call is reading moment weights, not slip. The Fortran does the same thing to the
     /// same array; naming it `slip_cm` would be a lie for most of the program's life,
