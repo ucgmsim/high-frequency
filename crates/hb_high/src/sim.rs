@@ -28,16 +28,17 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
 };
+use ndarray::{Array1, ArrayView1};
+
 use crate::fort::{truncate_toward_zero, Complex32};
 use crate::geom::{subfault_geometry, GeoPoint, SubfaultGeometry};
-use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
 use crate::ray::green_function;
 use crate::rng::{fill_uniform_deviates, normal_deviate, Draws, DrawSource};
 use crate::site::{site_amplification_factors, apply_site_amplification};
 use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
-use crate::stoc::stochastic_spectrum;
+use crate::stoc::{radiate_and_invert, stochastic_spectrum};
 
 /// The three output components, in the order the Fortran computes them.
 ///
@@ -574,8 +575,6 @@ struct SpectrumPlan {
     np2: usize,
     /// `nfold` — positive-frequency bin count, `np2/2 + 1`.
     fold_count: usize,
-    /// `mfold` — mirrored bin count, `np2/2 - 1`.
-    mirror_count: usize,
     frequency_hz: Vec<f32>,
 
     // ---- precomputed transcendentals -------------------------------------------------
@@ -608,7 +607,6 @@ fn plan_segment_spectrum(tmax: f32, dt: f32, run: &RunScalars) -> SpectrumPlan {
         np2 *= 2;
     }
     let fold_count = np2 / 2 + 1;
-    let mirror_count = np2 / 2 - 1;
 
     let df = 1.0 / (np2 as f32 * dt);
     // 0-based, which also removes the `- 1`: the axis is `df * bin`.
@@ -628,7 +626,6 @@ fn plan_segment_spectrum(tmax: f32, dt: f32, run: &RunScalars) -> SpectrumPlan {
     SpectrumPlan {
         np2,
         fold_count,
-        mirror_count,
         frequency_hz,
         log_frequency_hz,
         path_exponent,
@@ -780,10 +777,18 @@ fn subfault_pass(
                     ),
                 };
                 let k = component.index();
-                apply_radiation_and_invert(
-                    plan.fold_count, plan.mirror_count,
-                    &mut spectrum[k], &mut subfault_acc[k], &radiation,
+                // TEMPORARY clone, and the reason is worth stating: `radiate_and_invert`
+                // takes the spectrum BY VALUE because the inverse transform consumes it,
+                // but `spectrum[k]` is a scratch buffer that `stochastic_spectrum` refills
+                // through an out-parameter on the next subfault. `mem::take` would hand
+                // that call an empty buffer. §5.2 makes `stochastic_spectrum` RETURN its
+                // spectrum, at which point the value flows straight through and this clone
+                // and the copy below both go.
+                let samples = radiate_and_invert(
+                    Array1::from(spectrum[k].clone()),
+                    ArrayView1::from(&radiation[..]),
                 );
+                subfault_acc[k].copy_from_slice(samples.as_slice().expect("contiguous"));
             }
 
             // Rupture time at this subfault.

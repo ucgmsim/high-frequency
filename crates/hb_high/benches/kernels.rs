@@ -24,7 +24,7 @@ use std::hint::black_box;
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::{subfault_geometry, GeoPoint};
-use hb_high::highcor::apply_radiation_and_invert;
+use hb_high::stoc::radiate_and_invert;
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern};
 use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time, Takeoff};
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
@@ -322,7 +322,6 @@ fn bench_spectrum(c: &mut Criterion) {
 
     for &np2 in NP2S {
         let nf = np2 / 2 + 1;
-        let mf = np2 / 2 - 1;
         let dfr = dfr_axis(np2);
         // Precomputed per-segment tables, as `SpectrumPlan` supplies in the real program.
         let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - 0.6)).collect();
@@ -351,13 +350,15 @@ fn bench_spectrum(c: &mut Criterion) {
             })
         });
 
-        // apply_radiation_and_invert: the radiation multiply, one inverse FFT, the scale and the
-        // raised-cosine taper.
-        group.bench_with_input(BenchmarkId::new("apply_radiation_and_invert", np2), &np2, |b, &np2| {
-            let mut stdd = vec![0.0; np2];
-            b.iter_batched_ref(
-                || src.clone(),
-                |cw| apply_radiation_and_invert(nf, mf, cw.as_mut_slice(), stdd.as_mut_slice(), rdna.as_slice()),
+        // radiate_and_invert: the radiation multiply, one inverse FFT, the scale and the
+        // raised-cosine taper. Takes the spectrum by value, so the batched setup hands it a
+        // fresh Array1 each iteration rather than resetting a buffer -- which also means this
+        // timing now INCLUDES the result allocation, where the out-parameter form excluded it.
+        group.bench_with_input(BenchmarkId::new("radiate_and_invert", np2), &np2, |b, &_np2| {
+            let radiation = ndarray::Array1::from(rdna.clone());
+            b.iter_batched(
+                || ndarray::Array1::from(src.clone()),
+                |spectrum| radiate_and_invert(spectrum, radiation.view()),
                 criterion::BatchSize::SmallInput,
             )
         });

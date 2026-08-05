@@ -52,7 +52,7 @@ pub fn forward(data: &mut [Complex32]) {
 
 /// Synthesis transform — the Fortran's `FAST(NNN, ACE, +1)`.
 ///
-/// Unnormalised; [`crate::highcor::apply_radiation_and_invert`] divides by `np2`.
+/// Unnormalised; [`crate::stoc::radiate_and_invert`] divides by `np2`.
 pub fn inverse(data: &mut [Complex32]) {
     transform(data, false)
 }

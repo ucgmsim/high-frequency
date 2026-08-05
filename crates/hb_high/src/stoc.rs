@@ -1,6 +1,7 @@
 //! `stochastic_spectrum` — the stochastic source spectrum for one subfault.
 
-use crate::fft::{forward, remove_quadratic_trend};
+use ndarray::{azip, s, Array1, ArrayView1};
+use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fort::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
 use crate::special::gamma;
@@ -246,4 +247,74 @@ pub fn stochastic_spectrum(
         spectrum[np2 - j - 1] = Complex32::new(d.re as f32, d.im as f32);
     }
     spectrum[fold_count - 1] = scale(ac[fold_count - 1], as_[fold_count - 1], amp);
+}
+
+/// Multiply a spectrum by its radiation pattern, invert, scale and taper.
+///
+/// `hb_high_ref.f:2234` (`HIGHCOR`). Returns the real time series; the spectrum goes in by
+/// value because the inverse transform consumes it.
+///
+/// Lengths carry the information the Fortran passed as `fold_count`, `mirror_count` and
+/// `np2`: the radiation pattern covers the positive frequencies, so `radiation.len()` *is*
+/// `fold_count`, and the mirrored half is `radiation[1..fold_count - 1]` walked backwards.
+/// The Fortran wrote that index as `radiation(2*fold_count - i)`, which needed a worked
+/// example on `np2 = 16` to believe; a reversed view cannot be off by one.
+///
+/// `RADIATION_NORM` is the radiation-pattern normalisation and `PARTITION_FACTOR` the vector
+/// partition factor for two orthogonal components — nominally `1/sqrt(2)`, written as two
+/// digits in the original and kept that way because it is a calibration choice, not an
+/// approximation of anything.
+///
+/// # The taper constant was a typo, and it is now fixed
+///
+/// The taper used `dd = 3.14159625/n0` (`:2266`). That is **not** pi — the last digits of
+/// `3.14159265` are transposed. Every other occurrence in the file is some truncation of the
+/// correct value (`3.1415926`, `3.14159265`, `3.141592654`), so this one was a genuine slip
+/// rather than a deliberate approximation.
+///
+/// It was reproduced verbatim for as long as bit-identity was the contract. The error is
+/// about 1.1e-6 relative — roughly thirty times the worst of the file's honest truncations —
+/// and it left the taper fractionally short of a half cosine, so the final sample was not
+/// exactly zero. It is now `std::f32::consts::PI`, and the taper closes properly.
+pub fn radiate_and_invert(
+    mut spectrum: Array1<Complex32>,
+    radiation: ArrayView1<f32>,
+) -> Array1<f32> {
+    const RADIATION_NORM: f32 = 0.63;
+    const PARTITION_FACTOR: f32 = 0.71;
+
+    let np2 = spectrum.len();
+    let fold_count = radiation.len();
+    // `mirror_count` was a parameter and is always `fold_count - 2`; the old code asserted
+    // exactly this. Sliced explicitly rather than as `fold_count..` because the two are only
+    // incidentally equal for the np2 the program uses.
+    let mirror_count = fold_count - 2;
+
+    // Positive frequencies, signed radiation pattern -- sign preserved since 2004-12-21,
+    // where the older code took abs().
+    // `azip!` rather than `*=`: ndarray's operator overloads require both sides to have the
+    // same element type, and this is Complex32 scaled by f32. Same iteration, same
+    // bit-exactness -- element-wise either way.
+    azip!((bin in &mut spectrum.slice_mut(s![..fold_count]), &gain in &radiation) *bin *= gain);
+    azip!(
+        (bin in &mut spectrum.slice_mut(s![fold_count..fold_count + mirror_count]),
+         &gain in &radiation.slice(s![1..fold_count - 1; -1]))
+        *bin *= gain
+    );
+
+    inverse(spectrum.as_slice_mut().expect("an owned Array1 is contiguous"));
+
+    let scale = 1.0 / (RADIATION_NORM * PARTITION_FACTOR * np2 as f32);
+    let mut samples = spectrum.mapv(|bin| scale * bin.re);
+
+    // Raised-cosine taper over the final tenth. `i + 1` keeps the Fortran's 1-based step
+    // number, which is what makes the last sample land on cos(pi) and the taper close.
+    let taper_len = np2 / 10;
+    let step = std::f32::consts::PI / taper_len as f32;
+    let taper =
+        Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
+    let mut tail = samples.slice_mut(s![np2 - taper_len..]);
+    tail *= &taper;
+
+    samples
 }

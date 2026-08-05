@@ -385,6 +385,7 @@ dependencies = [
  "criterion",
  "geographiclib-rs",
  "libm",
+ "ndarray",
  "proptest",
  "rand_core 0.10.1",
  "rand_pcg",

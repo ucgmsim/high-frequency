@@ -26,6 +26,7 @@ libm = "0.2"
 rustfft = "6.4.1"
 bon = "3.9.3"
 thiserror = "2.0.19"
+ndarray = "0.17.2"
 
 # dev-dependencies do not enter the dependency graph of anything that links this
 # crate, so criterion and proptest cannot affect the numerics.

@@ -32,7 +32,6 @@ pub mod fft;
 pub mod fort;
 pub mod geom;
 pub mod input;
-pub mod highcor;
 pub mod radiation;
 pub mod ray;
 pub mod rng;
