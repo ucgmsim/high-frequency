@@ -9,3 +9,7 @@
 *.gcda
 *.gcno
 *.gcov
+
+# Reduced-n validation runs (bisection artifacts). The certified baselines are
+# the unsuffixed files and are written only with --baseline.
+harness/science_*_n*.csv

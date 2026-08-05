@@ -41,11 +41,11 @@ cargo build --release --offline -q
 fail=0
 
 echo "############ Tier B -- paired, matched seeds, vs the oracle ############"
-./target/release/validate --tier b --cell a --seeds "$SEEDS_B" || fail=1
+./target/release/validate --tier b --cell a --seeds "$SEEDS_B" --baseline || fail=1
 
 echo
 echo "############ Tier C -- distributional, vs production Fortran ############"
-./target/release/validate --tier c --cell a --seeds "$SEEDS_C" || fail=1
+./target/release/validate --tier c --cell a --seeds "$SEEDS_C" --baseline || fail=1
 
 echo
 echo "############ Tier D -- inter-frequency correlation ############"
@@ -63,7 +63,7 @@ echo "############ Tier D -- inter-frequency correlation ############"
 #
 # That splits ONE binary's realisations in half, so every flag is a known false
 # alarm and the flag rate measures calibration. It currently returns 0 of 15.
-./target/release/validate --tier d --cell a --seeds "$SEEDS_D" || fail=1
+./target/release/validate --tier d --cell a --seeds "$SEEDS_D" --baseline || fail=1
 
 if [ "${CELL_B:-0}" = "1" ]; then
     echo

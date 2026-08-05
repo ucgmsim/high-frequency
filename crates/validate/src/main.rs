@@ -97,7 +97,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         Some("d") => Tier::D,
         _ => {
             return Err(
-                "usage: validate --tier b|c|d [--cell a|b|c] [--band 0.02] [--seeds N]".into(),
+                "usage: validate --tier b|c|d [--cell a|b|c] [--band 0.02] [--seeds N] \
+                 [--ref-bin PATH] [--aa] [--baseline]"
+                    .into(),
             )
         }
     };
@@ -121,14 +123,26 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         return Err("--aa is only meaningful for tier d".into());
     }
 
+    // Opt in to overwriting the recorded baseline CSV; see the write site.
+    let baseline = std::env::args().any(|a| a == "--baseline");
+
     let root = repo_root();
     let rust = root.join("target/release/hb_high");
     // Tier B compares against the ORACLE, which shares the port's PCG32 stream, so
     // matched seeds give matched realisations. Tier C/D compare against PRODUCTION,
     // which uses gfortran's generator -- necessarily unpaired.
-    let reference = match tier {
-        Tier::B => root.join("reference/build/hb_ref"),
-        Tier::C | Tier::D => root.join("reference/build/hb_prod"),
+    //
+    // `--ref-bin` overrides both. Stage 3 needs it because the interesting comparison
+    // stops being Rust-vs-Fortran and becomes Rust-vs-Rust: an earlier commit's binary,
+    // built by `run_selfparity.sh` into `target/selfparity-target/release/hb_high`. Both
+    // halves of that have existed since §2.8 and had never been connected -- the path was
+    // hardcoded here, so there was no way to point the campaign at anything else.
+    let reference = match arg("--ref-bin") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match tier {
+            Tier::B => root.join("reference/build/hb_ref"),
+            Tier::C | Tier::D => root.join("reference/build/hb_prod"),
+        },
     };
     for p in [&rust, &reference] {
         if !p.exists() {
@@ -321,6 +335,36 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             100.0 * med.exp_m1(),
             100.0 * max_hw.exp_m1()
         );
+
+        // THE RESOLUTION GATE. A tier that cannot resolve the band it claims to test has
+        // not passed -- it has ABSTAINED, and abstention must not be spelled the same way
+        // as success.
+        //
+        // This closes a hole that would otherwise have swallowed the whole of Stage 3.
+        // The verdict gate below accepts `Undetermined` on purpose, because an
+        // undetermined endpoint is a statement about the sample rather than the port. But
+        // nothing checked that the sample could decide ANYTHING. A paired tier whose
+        // stream had desynchronised -- exactly what replacing the RNG does -- produces
+        // differences of unrelated realisations, a half-width inflated from ~1e-6 to
+        // ~0.066 (+-6.8% against a +-2% band), `Undetermined` on every endpoint, and a
+        // PASS. The CSV looks entirely plausible.
+        //
+        // The threshold is the TYPICAL half-width, not the worst: a handful of genuinely
+        // noisy endpoints (PGA and short-period pSA are extreme-value statistics) should
+        // not condemn a run that resolved the other 370. Failing here means the sample is
+        // too small, the reference is wrong, or the comparison has come unpaired -- and
+        // all three want a human, not a green tick.
+        if med.exp_m1() > band {
+            all_pass = false;
+            println!(
+                "  NOT EQUIVALENT: this run resolves only +/-{:.3}% typical, which cannot \
+                 decide a +/-{:.1}% band.\n  \
+                 It has abstained, not passed. Suspect sample size, the reference binary, \
+                 or a desynchronised paired comparison.",
+                100.0 * med.exp_m1(),
+                100.0 * band
+            );
+        }
         let count = |v: Verdict| verdicts.iter().filter(|(_, e)| e.verdict == v).count();
         let (cert, refu, undet) = (
             count(Verdict::Certified),
@@ -459,11 +503,21 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         }
     }
 
+    // Writing the canonical filename is OPT-IN, via `--baseline`. Everything else writes
+    // to `..._n<seeds>.csv`.
+    //
+    // Bisection runs at reduced `n` constantly, and an underpowered run silently
+    // overwriting the certified CSV is how a baseline gets lost without anyone noticing.
+    // (Learned by doing exactly that, one command before writing this.) Inferring it from
+    // the seed count does not work -- cell A's default is 600 but the campaign runs 2500 --
+    // so it has to be said out loud.
+    let suffix = if baseline { String::new() } else { format!("_n{n_seeds}") };
     let out = root.join(format!(
-        "harness/science_tier{}_cell{}{}.csv",
+        "harness/science_tier{}_cell{}{}{}.csv",
         format!("{tier:?}").to_lowercase(),
         cell.name,
-        if aa { "_aa" } else { "" }
+        if aa { "_aa" } else { "" },
+        suffix
     ));
     std::fs::write(
         &out,
