@@ -92,9 +92,19 @@ Short, and none of it is fidelity to the Fortran:
 
 | | what | when |
 | --- | --- | --- |
-| `harness/run_cheap.sh` | tests, clippy, replay-parity at 1e-6 on a frozen draw source | **every commit**, ~25 s |
-| `harness/run_long.sh` | equivalence vs production Fortran: mean, scatter and quantiles, plus inter-frequency correlation and its A/A control | **once per stage**, ~1 h |
-| `harness/run_long.sh --quick` | the same at n=100 and ±10% | **bisection only**, never a certification |
+| `cargo test --workspace` | properties, kernel goldens, and `snapshot.rs` — the whole pipeline against `harness/golden/snapshot.txt` on a frozen draw source | **every commit**, seconds |
+| `pytest tests/` | batch invariants, `station_seeds` properties, stub/dataclass agreement | **every commit**, ~10 s |
+| `cargo clippy --workspace` | zero warnings | **every commit**, and CI runs it with `-D warnings` |
+
+**The statistical tiers are gone with the oracle.** §4.3 deleted `crates/validate`,
+`crates/im`, `reference/` and the `run_*` scripts, because the port is certified and the
+instrument had nothing left to measure. What replaced them is not weaker for the questions
+that remain: `snapshot.rs` pins the pipeline exactly rather than distributionally, and
+`ENGINEERING_RULES` §6's rules were derived from those campaigns and outlive them.
+
+If a future change needs a statistical adjudication again — a new physics option, a changed
+draw structure — the campaign is recoverable from git history at `71d43c3` or earlier, and
+`REFACTOR.md` records the results it produced so a new run has something to compare with.
 
 Three rules about gates themselves, all learned the hard way:
 
@@ -123,9 +133,11 @@ Two corollaries, both of which the quantile gate got wrong:
 - **A family of tests needs a multiplicity correction.** Tier D Holm-corrects its 15. The
   quantile gate refutes per-endpoint across **375** and corrects nothing.
 
-Replay-parity goes **red by design** when a commit changes the draw structure. That is the
-gate saying "this one needs the long tier", which is the correct answer for exactly those
-commits. Re-freeze `harness/CHEAP_BASELINE` once the long tier has adjudicated.
+The **snapshot** goes red by design when a commit changes the draw structure — count, order,
+or generator. That is the gate saying "this one needs adjudicating", which is the correct
+answer for exactly those commits. Re-record with `UPDATE_SNAPSHOT=1` and put the
+adjudication in the commit message; a re-recorded snapshot with no explanation is
+indistinguishable from a silently broken one.
 
 ## 7. Reproduced Fortran defects
 
