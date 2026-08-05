@@ -18,3 +18,8 @@ harness/science_*_n*.csv
 .venv/
 *.so
 *.egg-info/
+
+# Paper PDFs for the physics annotations. papers/README.md IS committed and records
+# citation, source and verification status for each; the PDFs themselves are ~10 MB of
+# publisher-copyright material and do not belong in git history.
+papers/*.pdf
