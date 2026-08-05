@@ -186,6 +186,17 @@ impl ListReader {
         Ok((n, items))
     }
 
+    /// One list-directed read, consumed **positionally in declaration order**.
+    ///
+    /// This is the safe form of [`ListReader::read_values`] and should be preferred.
+    /// Indexing the returned vector (`v[3]`) is what makes a mis-counted deck rebind
+    /// every later field silently — the exact hazard `config.rs`'s module doc describes,
+    /// and the one that left production with `ispar_adjust` permanently 0. A cursor
+    /// cannot be read out of order, and cannot skip a field without saying `skip`.
+    pub fn read_items(&mut self, n: usize) -> Result<Items, DeckError> {
+        Ok(Items { values: self.read_values(n)?, next: 0 })
+    }
+
     /// One list-directed `f32`.
     pub fn f32(&mut self) -> Result<f32, DeckError> {
         let v = self.read_values(1)?;
@@ -202,6 +213,92 @@ impl ListReader {
     pub fn i32(&mut self) -> Result<i32, DeckError> {
         let v = self.read_values(1)?;
         parse_i32(v.first().and_then(|x| x.as_deref()).unwrap_or(""))
+    }
+}
+
+/// The items of one list-directed read, taken in order.
+///
+/// Two Fortran subtleties are handled here rather than at every call site:
+///
+/// * a `/` terminates the read early, so this can hold **fewer** items than were asked
+///   for. The Fortran leaves the unfilled ones at their previous values; this port has no
+///   previous value, so taking one is a named error. Indexing a short vector — which is
+///   what the call sites used to do — was an index panic instead.
+/// * a doubled comma is a *null*, meaning "leave this item unchanged", which is `None`
+///   and likewise not a number.
+pub struct Items {
+    values: Vec<Option<String>>,
+    next: usize,
+}
+
+impl Items {
+    /// The next token, or an error naming which item ran out.
+    fn take(&mut self) -> Result<&str, DeckError> {
+        let at = self.next;
+        self.next += 1;
+        match self.values.get(at) {
+            Some(Some(s)) => Ok(s),
+            // A null (`,,`) or past the end of a slash-terminated read.
+            Some(None) | None => Err(DeckError::UnexpectedEof { wanted: at + 1, got: at }),
+        }
+    }
+
+    pub fn f32(&mut self) -> Result<f32, DeckError> {
+        let t = self.take()?;
+        parse_f32(t)
+    }
+
+    pub fn f64(&mut self) -> Result<f64, DeckError> {
+        let t = self.take()?;
+        parse_f64(t)
+    }
+
+    pub fn i32(&mut self) -> Result<i32, DeckError> {
+        let t = self.take()?;
+        parse_i32(t)
+    }
+
+    /// The next item verbatim — a station name, not a number.
+    pub fn text(&mut self) -> Result<&str, DeckError> {
+        self.take()
+    }
+
+    /// A count: rejects a negative rather than wrapping it into a huge `usize`.
+    ///
+    /// `Vec::with_capacity` on a wrapped negative aborts the process instead of reporting
+    /// a bad file, and four readers used to do exactly that.
+    pub fn count(&mut self) -> Result<usize, DeckError> {
+        let v = self.i32()?;
+        usize::try_from(v).map_err(|_| DeckError::BadNumber {
+            token: v.to_string(),
+            kind: "count (must not be negative)",
+        })
+    }
+
+    /// Items read and discarded — the dead perturbation sigmas, for instance. Explicit so
+    /// the position stays obvious.
+    pub fn skip(&mut self, n: usize) {
+        self.next += n;
+    }
+
+    /// The deck's "use the default" convention: **below -1.0**, not merely negative.
+    pub fn defaulted_f32(&mut self) -> Result<Option<f32>, DeckError> {
+        let v = self.f32()?;
+        Ok(if v < -1.0 { None } else { Some(v) })
+    }
+
+    /// The deck's other convention: non-positive means "derive this".
+    pub fn derived_f32(&mut self) -> Result<Option<f32>, DeckError> {
+        let v = self.f32()?;
+        Ok(if v <= 0.0 { None } else { Some(v) })
+    }
+
+    /// A third convention, and it is genuinely a third: the Fortran tests `sm < 0.0` for
+    /// the moment, so an explicit **zero is honoured** rather than derived. Named here
+    /// beside the other two instead of open-coded at its one call site.
+    pub fn derived_allowing_zero_f32(&mut self) -> Result<Option<f32>, DeckError> {
+        let v = self.f32()?;
+        Ok(if v < 0.0 { None } else { Some(v) })
     }
 }
 

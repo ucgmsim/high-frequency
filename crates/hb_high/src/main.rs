@@ -58,71 +58,55 @@ struct DeckIo {
 fn read_deck(
     deck: &mut ListReader,
 ) -> Result<(HfConfig, DeckIo), Box<dyn std::error::Error>> {
-    use hb_high::deck::{parse_f32, parse_f64, parse_i32};
-
-    /// "Use the default" is signalled by a value below **-1.0**, not merely a
-    /// negative one. Getting that boundary wrong would substitute a default for a
-    /// legitimate small negative input, silently.
-    fn defaulted(v: f32) -> Option<f32> {
-        if v < -1.0 { None } else { Some(v) }
-    }
-    /// The other convention in this deck: non-positive means "derive this".
-    fn derived(v: f32) -> Option<f32> {
-        if v <= 0.0 { None } else { Some(v) }
-    }
-
     let stress_average = deck.f32()?;
     let asite = deck.read_filename()?;
     let outname = deck.read_filename()?;
 
-    // `read(5,*) nrtyp,(irtype(i),i=1,nrtyp)` is ONE read whose length depends
-    // on its own first item.
+    // `read(5,*) nrtyp,(irtype(i),i=1,nrtyp)` is ONE read whose length depends on its own
+    // first item.
     let (nrtyp, irtype_items) = deck.read_count_and_list()?;
-    let mut rayset = Vec::with_capacity(nrtyp as usize);
-    for item in irtype_items.iter().take(nrtyp as usize) {
-        rayset.push(RayType(parse_i32(item.as_deref().unwrap_or(""))?));
-    }
+    let rayset = irtype_items
+        .iter()
+        .take(nrtyp.max(0) as usize)
+        .map(|item| Ok(RayType(hb_high::deck::parse_i32(item.as_deref().unwrap_or(""))?)))
+        .collect::<Result<Vec<_>, hb_high::deck::DeckError>>()?;
 
     let isite_amp = deck.i32()?;
+
     let (iftt, fhil) = {
-        let v = deck.read_values(4)?;
-        let g = |k: usize| v[k].as_deref().unwrap_or("");
-        let _nbu = parse_i32(g(0))?;
-        let iftt = parse_i32(g(1))?;
-        let _flol = parse_f32(g(2))?;
-        (iftt, parse_f32(g(3))?)
+        let mut r = deck.read_items(4)?;
+        r.skip(1); // nbu
+        let iftt = r.i32()?;
+        r.skip(1); // flol -- clobbered by the radiation routines and only read by filter3d
+        (iftt, r.f32()?)
     };
+
     let irand = deck.i32()?;
     let nsite = deck.i32()? as usize;
 
     let (duration, dt, fmx, akapp, qfexp) = {
-        let v = deck.read_values(5)?;
-        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?, g(2)?, g(3)?, g(4)?)
+        let mut r = deck.read_items(5)?;
+        (r.f32()?, r.f32()?, r.f32()?, r.f32()?, r.f32()?)
     };
 
     let (rupture_velocity, czero, calpha) = {
-        let v = deck.read_values(5)?;
-        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
+        let mut r = deck.read_items(5)?;
         (
             RuptureVelocity {
-                frac: defaulted(g(0)?),
-                shallow: defaulted(g(1)?),
-                deep: defaulted(g(2)?),
+                frac: r.defaulted_f32()?,
+                shallow: r.defaulted_f32()?,
+                deep: r.defaulted_f32()?,
             },
-            defaulted(g(3)?),
-            defaulted(g(4)?),
+            r.defaulted_f32()?,
+            r.defaulted_f32()?,
         )
     };
 
     let (moment, rupture_velocity_override) = {
-        let v = deck.read_values(2)?;
-        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
-        // A negative moment means derive it from the slip model. Note the boundary
-        // differs from `derived`: the Fortran tests `sm < 0.0`, so an explicit zero
-        // is honoured rather than derived.
-        let m = g(0)?;
-        (if m < 0.0 { None } else { Some(m) }, derived(g(1)?))
+        let mut r = deck.read_items(2)?;
+        // Note the moment's convention differs from `derived`: the Fortran tests
+        // `sm < 0.0`, so an explicit zero is honoured rather than derived.
+        (r.derived_allowing_zero_f32()?, r.derived_f32()?)
     };
 
     let slip_model = deck.read_filename()?;
@@ -131,23 +115,20 @@ fn read_deck(
     let vs_moho = if vsmoho <= 0.0 { None } else { Some(vsmoho) };
 
     let nl_skip = {
-        let v = deck.read_values(6)?;
-        let gf = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
-        let nlskip = parse_i32(v[0].as_deref().unwrap_or(""))?;
-        // Velocity-model perturbation sigmas and icflag: all dead under the
-        // production deck (every sigma is 0.0), so read past them. The original
-        // also normalises icflag to 1 when it is neither 0 nor 1, which cannot
-        // matter once nothing reads it.
-        let (_vpsig, _vshsig, _rhosig, _qssig) = (gf(1)?, gf(2)?, gf(3)?, gf(4)?);
-        let _icflag = parse_i32(v[5].as_deref().unwrap_or(""))?;
+        let mut r = deck.read_items(6)?;
+        let nlskip = r.i32()?;
+        // Velocity-model perturbation sigmas and icflag: all dead under the production
+        // deck (every sigma is 0.0), so read past them. The original also normalises
+        // icflag to 1 when it is neither 0 nor 1, which cannot matter once nothing reads
+        // it.
+        r.skip(5);
         nlskip
     };
     let _velname = deck.read_filename()?;
 
     let (fa_sig1, fa_sig2, rv_sig1) = {
-        let v = deck.read_values(3)?;
-        let g = |k: usize| parse_f32(v[k].as_deref().unwrap_or(""));
-        (g(0)?, g(1)?, g(2)?)
+        let mut r = deck.read_items(3)?;
+        (r.f32()?, r.f32()?, r.f32()?)
     };
 
     let ipdur_model = deck.i32()?;
@@ -158,28 +139,25 @@ fn read_deck(
         )
     })?;
 
-    // NOTE: this read wants THREE items and the deck supplies a bare `0` line
-    // followed by three more, so it takes the `0` as ispar_adjust and two from the
-    // next record -- leaving the third to be discarded when the next read starts a
-    // fresh record. That is why production's tect_type never arrives and why
-    // targ_mag and fault_area are swapped relative to what hf_sim.py intends.
-    // Reproduced deliberately; see REFACTOR.md §1.1.
+    // NOTE: this read wants THREE items and the deck supplies a bare `0` line followed by
+    // three more, so it takes the `0` as ispar_adjust and two from the next record --
+    // leaving the third to be discarded when the next read starts a fresh record. That is
+    // why production's tect_type never arrives and why targ_mag and fault_area are
+    // swapped relative to what hf_sim.py intends. Reproduced deliberately; see
+    // REFACTOR.md §1.1.
     let (stress_param_adjust, target_magnitude, fault_area) = {
-        let v = deck.read_values(3)?;
+        let mut r = deck.read_items(3)?;
         (
-            StressParamAdjust::from_deck(parse_i32(v[0].as_deref().unwrap_or(""))?),
-            derived(parse_f32(v[1].as_deref().unwrap_or(""))?),
-            derived(parse_f32(v[2].as_deref().unwrap_or(""))?),
+            StressParamAdjust::from_deck(r.i32()?),
+            r.derived_f32()?,
+            r.derived_f32()?,
         )
     };
 
     let seek_bytes = {
         // Pre-set to 0, then read.
-        let v = deck.read_values(1)?;
-        v[0].as_deref()
-            .map(|s| parse_f64(s).map(|x| x as i64))
-            .transpose()?
-            .unwrap_or(0)
+        let mut r = deck.read_items(1)?;
+        r.f64().map(|x| x as i64).unwrap_or(0)
     };
 
     Ok((

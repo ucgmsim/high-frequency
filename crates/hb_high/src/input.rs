@@ -176,7 +176,9 @@ pub struct StochModel {
 /// `3.1415926/180` from `:150`.
 pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> {
     let mut r = ListReader::new(text);
-    let nevnt = r.i32()? as usize;
+    // A count, so a negative is rejected rather than wrapped into a huge `usize` that
+    // aborts the process inside `Vec::with_capacity`.
+    let nevnt = r.read_items(1)?.count()?;
 
     let mut segments = Vec::with_capacity(nevnt);
     let mut subfault_count = 0usize;
@@ -184,23 +186,21 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
     let mut max_hypocentre_depth_km = 0.0f32;
 
     for _ in 0..nevnt {
-        let v = r.read_values(6)?;
-        let g = |k: usize| v[k].as_deref().unwrap_or("");
-        let fault_lon_deg = crate::deck::parse_f32(g(0))?;
-        let fault_lat_deg = crate::deck::parse_f32(g(1))?;
-        let along_strike_count = crate::deck::parse_i32(g(2))? as usize;
-        let down_dip_count = crate::deck::parse_i32(g(3))? as usize;
-        let subfault_length_km = crate::deck::parse_f32(g(4))?;
-        let subfault_width_km = crate::deck::parse_f32(g(5))?;
+        let mut h = r.read_items(6)?;
+        let fault_lon_deg = h.f32()?;
+        let fault_lat_deg = h.f32()?;
+        let along_strike_count = h.count()?;
+        let down_dip_count = h.count()?;
+        let subfault_length_km = h.f32()?;
+        let subfault_width_km = h.f32()?;
 
-        let v = r.read_values(6)?;
-        let g = |k: usize| v[k].as_deref().unwrap_or("");
-        let strike_deg = crate::deck::parse_f32(g(0))?;
-        let dip_deg = crate::deck::parse_f32(g(1))?;
-        let rake_deg = crate::deck::parse_f32(g(2))?;
-        let top_depth_km = crate::deck::parse_f32(g(3))?;
-        let hypocentre_along_strike_km = crate::deck::parse_f32(g(4))?;
-        let hypocentre_down_dip_km = crate::deck::parse_f32(g(5))?;
+        let mut h = r.read_items(6)?;
+        let strike_deg = h.f32()?;
+        let dip_deg = h.f32()?;
+        let rake_deg = h.f32()?;
+        let top_depth_km = h.f32()?;
+        let hypocentre_along_strike_km = h.f32()?;
+        let hypocentre_down_dip_km = h.f32()?;
 
         // The Fortran writes these as `nx*nw + nstot`, i.e. accumulator last. Operand
         // order is irrelevant to both -- integer addition is exact and IEEE addition is
@@ -230,9 +230,9 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
         for field in fields {
             for row in subfaults.chunks_mut(along_strike_count) {
                 // One record per down-dip row, one value per along-strike column.
-                let values = r.read_values(along_strike_count)?;
-                for (subfault, value) in row.iter_mut().zip(&values) {
-                    *field(subfault) = crate::deck::parse_f32(value.as_deref().unwrap_or(""))?;
+                let mut values = r.read_items(along_strike_count)?;
+                for subfault in row.iter_mut() {
+                    *field(subfault) = values.f32()?;
                 }
             }
         }
@@ -269,7 +269,7 @@ pub fn read_velocity_model(
     vsmoho: f64,
 ) -> Result<usize, DeckError> {
     let mut r = ListReader::new(text);
-    let mut j0 = r.i32()? as usize;
+    let mut j0 = r.read_items(1)?.count()?;
     assert!(
         j0 <= params::NLAYMAX,
         "velocity model has {j0} layers, exceeding nlaymax = {}",
@@ -278,14 +278,13 @@ pub fn read_velocity_model(
 
     let mut jmoho = j0;
     for i in 0..j0 {
-        let v = r.read_values(6)?;
-        let g = |k: usize| v[k].as_deref().unwrap_or("");
-        vmod_in[i].thickness_km = crate::deck::parse_f32(g(0))?;
-        vmod_in[i].vp_km_s = crate::deck::parse_f64(g(1))?;
-        vmod_in[i].vsh_km_s = crate::deck::parse_f64(g(2))?;
-        vmod_in[i].density_g_cm3 = crate::deck::parse_f64(g(3))?;
-        vmod_in[i].attenuation_p = crate::deck::parse_f32(g(4))?;
-        vmod_in[i].attenuation_s = crate::deck::parse_f32(g(5))?;
+        let mut layer = r.read_items(6)?;
+        vmod_in[i].thickness_km = layer.f32()?;
+        vmod_in[i].vp_km_s = layer.f64()?;
+        vmod_in[i].vsh_km_s = layer.f64()?;
+        vmod_in[i].density_g_cm3 = layer.f64()?;
+        vmod_in[i].attenuation_p = layer.f32()?;
+        vmod_in[i].attenuation_s = layer.f32()?;
 
         vmod_in[i].depth_km = vmod_in[i].thickness_km;
         if i > 0 {
@@ -389,15 +388,15 @@ pub fn read_stations(text: &str, nsite: usize) -> Result<Vec<Station>, DeckError
             break;
         }
         let mut r = ListReader::new(line);
-        let v = match r.read_values(3) {
+        let mut v = match r.read_items(3) {
             Ok(v) => v,
             // end=1: run out of stations and stop, rather than erroring.
             Err(_) => break,
         };
         out.push(Station {
-            stlon: crate::deck::parse_f32(v[0].as_deref().unwrap_or(""))?,
-            stlat: crate::deck::parse_f32(v[1].as_deref().unwrap_or(""))?,
-            cap: v[2].as_deref().unwrap_or("").to_string(),
+            stlon: v.f32()?,
+            stlat: v.f32()?,
+            cap: v.text()?.to_string(),
         });
     }
     Ok(out)
