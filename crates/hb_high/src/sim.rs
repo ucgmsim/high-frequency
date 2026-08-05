@@ -177,7 +177,7 @@ pub fn simulate(
         (config.duration, config.dt, config.fmax, config.kappa, config.qfexp);
     let rvsig1 = config.rv_sig1;
     let mut stress_average = config.stress_drop;
-    let mut irand = config.seed;
+    let irand = config.seed;
 
     // The slip model is normalised in place and the velocity model gains an air
     // layer, so both are worked on as copies.
@@ -268,10 +268,9 @@ pub fn simulate(
     // the buffers are sized from the deck.
     let ndata = truncate_toward_zero(duration / dt) as usize;
 
+    // The draw source and whether the rupture-time jitter applies are decided together,
+    // because under legacy seeding the jitter gate is a side effect of the seeding ritual.
     let (mut rng, deviates) = seed_and_predraw(config, irand, nr, config.draws_normal_deviates());
-    // init_random_seed mutates its argument, and the mutated value gates the
-    // rupture-time jitter below.
-    irand = deviates.seeded_irand;
 
     let mut vmod = VelocityModel::new();
     // `ndata` samples, not `mmv`: the output loop reads `1..=ndata` and nothing else
@@ -294,7 +293,7 @@ pub fn simulate(
         site_table_len: nsfac,
         ndata,
         layer_count: j0,
-        jitter_enabled: irand > 0,
+        jitter_enabled: deviates.jitter_enabled,
     };
 
     // ------------------------------------------------- the single station ---
@@ -435,8 +434,10 @@ impl SegmentAngles {
 
 /// The generator and the three pre-drawn blocks, in the order the Fortran draws them.
 struct Deviates {
-    /// `irand` after `init_random_seed` mutated it.
-    seeded_irand: i32,
+    /// Whether the rupture-time jitter draw happens. Under modern seeding it always
+    /// does; legacy reproduces the Fortran's `irand + 8 > 0` sign test, which is an
+    /// artifact of `init_random_seed` mutating its argument in place.
+    jitter_enabled: bool,
     /// `fgrand` — one block of `MMV`, indexed by `irandcnt`.
     normal: Vec<f32>,
     /// `rna` / `rnb` — the vertical component's uniforms.
@@ -459,7 +460,7 @@ fn seed_and_predraw(
     radv_sample_count: usize,
     draw_normals: bool,
 ) -> (DrawSource, Deviates) {
-    let (mut rng, seeded_irand) = DrawSource::for_run(irand);
+    let (mut rng, jitter_enabled) = DrawSource::for_run(irand);
 
     // `nr` values, not `mmv`. `vertical_radiation_spectrum` reads exactly this many, and
     // the Fortran reserved and zeroed 262144 to use 1000 of them.
@@ -477,7 +478,7 @@ fn seed_and_predraw(
     }
     let _ = config;
 
-    (rng, Deviates { seeded_irand, normal, radv_uniform_a, radv_uniform_b })
+    (rng, Deviates { jitter_enabled, normal, radv_uniform_a, radv_uniform_b })
 }
 
 /// What the time-window pass produces for one segment.

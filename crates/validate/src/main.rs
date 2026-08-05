@@ -192,9 +192,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             .to_string(),
     ];
     let mut ifc: Vec<IfcTest> = Vec::new();
-    /// Endpoints whose *distribution shape* differs, even where the mean agrees.
+    // Endpoints whose *distribution shape* differs, even where the mean agrees.
     let mut shape_failures: Vec<String> = Vec::new();
-    /// Whether the sample was ever large enough for a shape gate to have an opinion.
+    // Whether the sample was ever large enough for a shape gate to have an opinion.
     let mut shape_gated = false;
 
     for st in &strata {

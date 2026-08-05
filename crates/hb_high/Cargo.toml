@@ -18,6 +18,10 @@ description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic h
 # replaced the transcribed DGAMM in special.rs.
 [dependencies]
 geographiclib-rs = "0.2.7"
+# §3.1: the PRNG itself, so the seeding can come from `rand`'s SplitMix64 expansion
+# rather than the Fortran's fold. Pinned to what is in the offline registry.
+rand_core = "0.10"
+rand_pcg = "0.10"
 libm = "0.2"
 rustfft = "6.4.1"
 
