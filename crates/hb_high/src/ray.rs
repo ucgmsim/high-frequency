@@ -376,9 +376,9 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
         }
     }
 
-    #[allow(unused_assignments)]
-    let mut eps = 1.0e-20f64;
-    eps = 1.0e-10;
+    // The Fortran sets this to 1.0d-20 and then immediately to 1.0d-10; only the second
+    // is ever read.
+    let mut eps = 1.0e-10f64;
     let ptest = 1.0 / v;
 
     // Label 222: grow eps until backing off from the cut actually lands below

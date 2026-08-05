@@ -27,12 +27,8 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
     let sin_az = (azimuth_rad - strike_rad).sin();
     let cos_az = (azimuth_rad - strike_rad).cos();
 
-    // RDP is computed by the Fortran and then discarded -- the P radiation
-    // coefficient is never returned or used. Kept so the two sources stay
-    // line-comparable; see PORTING_RULES.md §7.
-    let _rdp = cos_rake * sin_dip * (sin_takeoff * sin_takeoff) * 2.0 * sin_az * cos_az - cos_rake * cos_dip * 2.0 * sin_takeoff * cos_takeoff * cos_az
-        + sin_rake * 2.0 * sin_dip * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff) * (sin_az * sin_az))
-        + sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * 2.0 * sin_takeoff * cos_takeoff * sin_az;
+    // The Fortran also computes RDP, the P radiation coefficient, and never returns or
+    // uses it. §3.5 dropped it along with the rest of the line-comparability scaffolding.
 
     let rdsv = sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * sin_az
         - cos_rake * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * cos_az
@@ -102,20 +98,15 @@ pub fn horizontal_radiation_spectrum(
 
     let fr1 = 0.5f32;
     let fr2 = 2.0f32;
-    // Set to 0.5 then immediately overwritten. Kept for line-comparability.
-    #[allow(unused_assignments)]
-    let mut radmin = 0.5f32;
-    // "Since using a conical average around theoretical ray, don't allow much
-    // purely theoretical rad pattern" -- 2009-02-10.
-    radmin = 1.0;
+    // "Since using a conical average around theoretical ray, don't allow much purely
+    // theoretical rad pattern" -- 2009-02-10, which set this to 1.0 and left the
+    // superseded 0.5 in place above it.
+    let radmin = 1.0f32;
 
     let (rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
 
-    // The Fortran computes RDX with a cos(THAA) factor and then immediately
-    // recomputes it without. The first value is dead; kept so the two sources
-    // line up.
-    let _rdx_superseded =
-        rdsva * takeoff_rad.cos() * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
+    // The Fortran computes RDX once with a cos(THAA) factor and immediately recomputes it
+    // without; only the second survives.
 
     // The 2004-03-19 "RADPAT FIX": take abs() after summing SV and SH, not
     // before, otherwise a negative cos or sin creates asymmetry.
@@ -181,9 +172,9 @@ pub fn horizontal_radiation_spectrum(
 /// called *after* both `RADFRQ_lin` calls, `flol` ends the subfault at 0.001
 /// rather than the deck's 0.02. Inert only because `filter3d` is dead.
 ///
-/// Two initialisations are immediately superseded and kept for comparability:
-/// `fr2 = 1.5` before `fr2 = 0.01`, and `radvh = 0.7` before the computed
-/// average. The take-off range is clamped to `[90, 180]` degrees.
+/// The Fortran writes `fr2 = 1.5` before `fr2 = 0.01`, and `radvh = 0.7` before the
+/// computed average; only the second of each survives, and §3.5 dropped the dead ones.
+/// The take-off range is clamped to `[90, 180]` degrees.
 #[allow(clippy::too_many_arguments)]
 pub fn vertical_radiation_spectrum(
     strike_rad: f32,
@@ -200,10 +191,8 @@ pub fn vertical_radiation_spectrum(
 ) -> f32 {
     let pu = std::f32::consts::PI / 180.0;
 
-    let _fr2_superseded = 1.5f32;
     let fr1 = 0.001f32;
     let fr2 = 0.01f32;
-    let _radvh_superseded = 0.7f32;
 
     let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
     let rdx = rdsva * takeoff_rad.sin();
