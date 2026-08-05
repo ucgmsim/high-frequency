@@ -256,9 +256,18 @@ pub struct HfConfig {
     pub rayset: Vec<RayType>,
     /// `isite_amp != 0`.
     pub site_amp: bool,
-    /// `irand`. Note this is *mutated* by seeding: `init_random_seed` advances it,
-    /// and the advanced value gates the rupture-time jitter.
-    pub seed: i32,
+    /// This station's seed, and the whole of its identity as far as the generator is
+    /// concerned.
+    ///
+    /// `u64` rather than the deck's `i32`. It is per-station, not per-run: each station gets
+    /// an independent PCG stream via [`crate::rng::DrawSource::for_station`], which is what
+    /// makes a batch of stations safe to reorder, subset or resume. The Fortran shared one
+    /// stream across its station loop, which is why `nsite != 1` had to be refused.
+    ///
+    /// The Fortran's `irand` was also *mutated* by seeding — `init_random_seed` advanced it
+    /// and the advanced value gated the rupture-time jitter. That is gone; only
+    /// `HB_LEGACY_SEEDING` still reproduces the sign test.
+    pub seed: u64,
     /// Record length, seconds.
     pub duration: f32,
     /// Sample interval, seconds.

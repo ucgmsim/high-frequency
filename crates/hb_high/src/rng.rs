@@ -222,17 +222,32 @@ impl DrawSource {
     /// sign of a name hash. (Dormant in production only because `rupv` defaults to -1, so
     /// the branch is unreachable.) Under modern seeding the jitter is simply on; legacy
     /// reproduces the sign test exactly.
-    pub fn for_run(irand: i32) -> (Self, bool) {
+    /// # Why the seed is a `u64`, and why widening it changed nothing
+    ///
+    /// A station's seed is its identity, and identities should not be a scarce resource.
+    /// The deck could only express `i32`, which is what forced `hf_sim.py` to derive station
+    /// seeds as `int32(root) ^ stable_hash(name)` — landing about half of them negative and
+    /// arming the `irand + 8 > 0` jitter gate against the sign of a name hash.
+    ///
+    /// The widening is **bit-exact for every deck-sourced seed**, deliberately, because §4.2
+    /// certifies this against the Fortran and a certification is worthless if the stream
+    /// moved underneath it. The deck path passes `irand as i64 as u64`, so:
+    ///
+    /// * `Modern` already computed `seed_from_u64(irand as i64 as u64)` — identical;
+    /// * `Legacy` and `Fixture` narrow back with `as i32`, which round-trips a
+    ///   sign-extended value exactly, so the frozen `CHEAP_BASELINE` still replays.
+    ///
+    /// What the wider type buys is the other 2⁶⁴ − 2³² seeds, which is the space
+    /// `numpy.random.SeedSequence` draws station seeds from on the Python side.
+    pub fn for_station(seed: u64) -> (Self, bool) {
         if std::env::var_os("HB_FIXTURE_RNG").is_some() {
-            (Self::Fixture(FixtureDraws::seed(irand)), true)
+            (Self::Fixture(FixtureDraws::seed(seed as i32)), true)
         } else if std::env::var_os("HB_LEGACY_SEEDING").is_some() {
-            let (rng, seeded) = Pcg32::seed(irand);
+            let (rng, seeded) = Pcg32::seed(seed as i32);
             (Self::Legacy(rng), seeded > 0)
         } else {
             use rand_core::SeedableRng;
-            // Sign-extended through i64 so a negative deck seed maps to a distinct u64
-            // rather than colliding with its magnitude.
-            let g = rand_pcg::Pcg32::seed_from_u64(irand as i64 as u64);
+            let g = rand_pcg::Pcg32::seed_from_u64(seed);
             (Self::Modern(g), true)
         }
     }

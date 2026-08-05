@@ -452,11 +452,11 @@ struct Deviates {
 /// would put different deviates in different slots and change every vertical component.
 fn seed_and_predraw(
     config: &HfConfig,
-    irand: i32,
+    seed: u64,
     radv_sample_count: usize,
     draw_normals: bool,
 ) -> (DrawSource, Deviates) {
-    let (mut rng, jitter_enabled) = DrawSource::for_run(irand);
+    let (mut rng, jitter_enabled) = DrawSource::for_station(seed);
 
     // `nr` values, not `mmv`. `vertical_radiation_spectrum` reads exactly this many, and
     // the Fortran reserved and zeroed 262144 to use 1000 of them.

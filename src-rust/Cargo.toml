@@ -14,7 +14,7 @@ path = "lib.rs"
 [dependencies]
 hb_high = { path = "../crates/hb_high" }
 numpy = "0.29"
-pyo3 = "0.29"
+pyo3 = { version = "0.29", features = ["extension-module"] }
 
 [lints]
 workspace = true

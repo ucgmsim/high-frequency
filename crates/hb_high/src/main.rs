@@ -165,7 +165,9 @@ fn read_deck(
             stress_drop: stress_average,
             rayset,
             site_amp: isite_amp != 0,
-            seed: irand,
+            // Sign-extended so `as i32` recovers it exactly: that is what keeps the
+            // legacy and fixture streams -- and the frozen CHEAP_BASELINE -- unchanged.
+            seed: irand as i64 as u64,
             duration,
             dt,
             fmax: fmx,

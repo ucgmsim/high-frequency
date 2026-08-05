@@ -840,7 +840,7 @@ fn velocity_model_text(layers: usize) -> String {
 }
 
 /// Production-shaped configuration, with the seed left to the caller.
-fn config(seed: i32) -> HfConfig {
+fn config(seed: u64) -> HfConfig {
     HfConfig {
         stress_drop: 50.0,
         rayset: vec![RayType(1)],
@@ -873,7 +873,7 @@ fn config(seed: i32) -> HfConfig {
 }
 
 /// Run one station through the whole simulation.
-fn run(seed: i32) -> hb_high::sim::Simulation {
+fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = read_stoch(&stoch_text(&[(4, 3, 1.5, 1.5)]), hb_high::config::DEG_TO_RAD)
         .expect("valid stoch");
     let mut vmod = hb_high::state::VelocityModelInput::new();
