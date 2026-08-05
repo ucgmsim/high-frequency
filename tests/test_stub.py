@@ -46,8 +46,7 @@ def stub_signature_arguments() -> set[str]:
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "_simulate_stations":
             return {
-                argument.arg
-                for argument in (*node.args.args, *node.args.kwonlyargs)
+                argument.arg for argument in (*node.args.args, *node.args.kwonlyargs)
             }
     pytest.fail("_simulate_stations is not declared in _hf_simulation.pyi")
 

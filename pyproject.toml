@@ -14,7 +14,9 @@ dependencies = ["numpy>=2"]
 [tool.setuptools_scm]
 
 [project.optional-dependencies]
-test = ["hypothesis[numpy]>=6.151.0", "pytest>=9.0.2", "pytest-cov>=7.0.0"]
+test = ["hypothesis[numpy]>=6.151.0", "pytest>=9.0.2", "pytest-cov>=7.0.0", "xarray>=2024.1"]
+# Opt-in: hf_simulation.dataset needs xarray, the rest of the package does not.
+xarray = ["xarray>=2024.1"]
 types = []
 
 [dependency-groups]
