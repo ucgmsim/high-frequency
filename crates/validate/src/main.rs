@@ -121,14 +121,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     };
     let band: f64 =
         arg("--band").and_then(|s| s.parse().ok()).unwrap_or(stats::DEFAULT_BAND);
-    // The quantile gate's band, separate from the mean's.
-    //
-    // The +/-2% band is a deliberate physics choice about IM MEANS -- roughly 0.04 of a
-    // typical GMM aleatory sigma. Reusing it on q05/q95 was a category error on my part: a
-    // tail quantile is a fundamentally noisier statistic than a mean at the same n, so the
-    // same numeric band is a materially stricter test. Defaults to `band` so nothing
-    // changes until an A/A run says what the null actually supports.
-    let shape_band: f64 = arg("--shape-band").and_then(|s| s.parse().ok()).unwrap_or(band);
+    // The quantile gate's band, separate from the mean's, and set by MEASUREMENT.
+    let shape_band: f64 =
+        arg("--shape-band").and_then(|s| s.parse().ok()).unwrap_or(stats::SHAPE_BAND);
     let n_seeds: usize = arg("--seeds").and_then(|s| s.parse().ok()).unwrap_or(cell.seeds);
 
     // A/A calibration: run ONE binary and split its realisations in half. Every

@@ -32,6 +32,28 @@
 /// mean ratio. ±2% ≈ 0.04 of a typical ground-motion-model aleatory sigma.
 pub const DEFAULT_BAND: f64 = 0.02;
 
+/// The band for the **quantile** gate, which is not the same statistic as the mean.
+///
+/// `DEFAULT_BAND` is a deliberate physics choice about IM *means* — roughly 0.04 of a
+/// typical GMM aleatory sigma. Reusing it on `q05`/`q95` was a category error: a tail
+/// quantile is a much noisier statistic at the same `n`, so the identical number is a
+/// materially stricter test.
+///
+/// **This value is measured, not chosen.** At ±2%, an A/A run — production Fortran against
+/// itself, 10,200 seeds split into halves of 5,100 to match the A/B's resolution — flagged
+/// **11 of 375 endpoints as known false alarms (2.93%)**, with a worst excursion of
+/// **3.03%**. The real A/B comparison flagged 14 (3.73%) with a worst excursion of 2.2%, so
+/// the gate was firing at its resting pulse and reporting it as a defect.
+///
+/// ±4% sits above that measured 3.03% worst case, so the same null run yields **0 of 375**
+/// — deductively, not by assumption: every endpoint the ±2% run did not flag has an
+/// excursion below 2%, so 3.03% is the maximum over all of them. It is still 0.08 of a GMM
+/// sigma, which is a tight scientific claim.
+///
+/// Re-measure this if the endpoint set, the strata, or `GATED_QUANTILES` change. A band
+/// carried over from a different endpoint set is exactly the mistake this constant records.
+pub const SHAPE_BAND: f64 = 0.04;
+
 /// Sample size needed to have a realistic chance of *passing* an equivalence test
 /// at `band`, given the log-scale scatter `sigma`.
 ///
