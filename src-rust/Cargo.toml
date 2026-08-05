@@ -1,0 +1,20 @@
+[package]
+name = "hf_simulation_ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for the hb_high stochastic high-frequency generator"
+
+[lib]
+name = "_hf_simulation"
+crate-type = ["cdylib", "lib"]
+path = "lib.rs"
+
+[dependencies]
+hb_high = { path = "../crates/hb_high" }
+numpy = "0.29"
+pyo3 = "0.29"
+
+[lints]
+workspace = true

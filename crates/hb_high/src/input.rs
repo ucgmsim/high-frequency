@@ -78,7 +78,64 @@ pub struct Subfault {
     pub rupture_time_s: f32,
 }
 
+/// `#[bon::bon]` transforms only the `#[builder]`-marked function below; every other
+/// method in this block is left exactly as written.
+///
+/// A segment needs twelve geometry scalars and a grid. As positional arguments that is a
+/// row of bare floats in which `strike_deg`, `dip_deg` and `rake_deg` are mutually
+/// swappable without a type error — the exact shape of bug the deck format produced for
+/// twenty years. `Segment::builder().strike_deg(...)` cannot make that mistake.
+#[bon::bon]
 impl Segment {
+    /// Build a segment from its geometry and the subfault grid.
+    ///
+    /// The grid is strike-index-fastest, one row per down-dip index — the order the
+    /// `.stoch` file stores it in and the order every accumulation over it runs.
+    /// `along_strike_offset_km` is derived here rather than supplied, because it is a
+    /// function of the geometry and every consumer wants it.
+    ///
+    /// This is the constructor the Python boundary uses. `read_stoch` was previously
+    /// the only way to obtain a `Segment`, which tied the data model to a text format.
+    #[builder]
+    pub fn new(
+        fault_lon_deg: f32,
+        fault_lat_deg: f32,
+        along_strike_count: usize,
+        down_dip_count: usize,
+        subfault_length_km: f32,
+        subfault_width_km: f32,
+        strike_deg: f32,
+        dip_deg: f32,
+        rake_deg: f32,
+        top_depth_km: f32,
+        hypocentre_along_strike_km: f32,
+        hypocentre_down_dip_km: f32,
+        subfaults: Vec<Subfault>,
+    ) -> Self {
+        assert_eq!(
+            subfaults.len(),
+            along_strike_count * down_dip_count,
+            "subfault grid holds {} entries, expected {along_strike_count}x{down_dip_count}",
+            subfaults.len()
+        );
+        Self {
+            fault_lon_deg,
+            fault_lat_deg,
+            along_strike_count,
+            down_dip_count,
+            subfault_length_km,
+            subfault_width_km,
+            strike_deg,
+            dip_deg,
+            rake_deg,
+            top_depth_km,
+            hypocentre_along_strike_km,
+            hypocentre_down_dip_km,
+            along_strike_offset_km: 0.5 * along_strike_count as f32 * subfault_length_km,
+            subfaults,
+        }
+    }
+
     /// Subfault count, `nx * nw`.
     pub fn subfault_total(&self) -> usize {
         self.subfaults.len()
@@ -166,6 +223,38 @@ pub struct StochModel {
     pub max_hypocentre_depth_km: f32,
 }
 
+impl StochModel {
+    /// Assemble a slip model from its segments, deriving the three aggregates.
+    ///
+    /// Each aggregate accumulates in segment order. Integer addition is exact and the
+    /// area sum is a reduction over a handful of terms, so the order is not delicate —
+    /// but it is the order `read_stoch` used, and keeping it means the two agree bit for
+    /// bit on any model either can express.
+    ///
+    /// `deg_to_rad` is a parameter rather than a constant because the hypocentre depth
+    /// needs `sin(dip)`, and the caller owns the degree convention.
+    pub fn new(segments: Vec<Segment>, deg_to_rad: f32) -> Self {
+        let mut subfault_count = 0usize;
+        let mut fault_area_km2 = 0.0f32;
+        let mut max_hypocentre_depth_km = 0.0f32;
+
+        for seg in &segments {
+            subfault_count += seg.along_strike_count * seg.down_dip_count;
+            fault_area_km2 += seg.along_strike_count as f32 * seg.subfault_length_km
+                * seg.down_dip_count as f32 * seg.subfault_width_km;
+
+            // 2014-12-19: this was '*' and should have been '/'; fixed upstream.
+            let zhyp = seg.top_depth_km
+                + seg.hypocentre_down_dip_km / (seg.dip_deg * deg_to_rad).sin();
+            if zhyp > max_hypocentre_depth_km {
+                max_hypocentre_depth_km = zhyp;
+            }
+        }
+
+        Self { segments, subfault_count, fault_area_km2, max_hypocentre_depth_km }
+    }
+}
+
 /// Read a `.stoch` file — `hb_high_ref.f:253-285`.
 ///
 /// Produced from an SRF by `srf2stoch`. Format: segment count, then per segment
@@ -247,6 +336,80 @@ pub fn read_stoch(text: &str, deg_to_rad: f32) -> Result<StochModel, DeckError> 
     }
 
     Ok(StochModel { segments, subfault_count, fault_area_km2, max_hypocentre_depth_km })
+}
+
+/// Why a velocity model cannot be used as given.
+///
+/// Deliberately **not** a `DeckError`: that type describes a list-directed text read and
+/// lives in `deck.rs`, which §4.3 deletes. The surviving data model must not depend on the
+/// dying one.
+#[derive(Debug, thiserror::Error)]
+pub enum ModelError {
+    #[error("velocity model has no layers")]
+    NoLayers,
+    #[error("velocity model has {count} layers, exceeding nlaymax = {max}")]
+    TooManyLayers { count: usize, max: usize },
+    #[error(
+        "the first layer already reaches vs_moho = {vs_moho_km_s} km/s, so there is no \
+         model above the Moho to simulate"
+    )]
+    MohoAtFirstLayer { vs_moho_km_s: f64 },
+}
+
+/// Build the velocity model from layer records, returning the layer count after Moho
+/// truncation.
+///
+/// This is [`read_velocity_model`] with the parsing removed: depth accumulation, the
+/// truncation at the first layer reaching `vs_moho_km_s`, and the zero-thickness bottom
+/// layer that makes reflected rays come out right (2016-08-03).
+///
+/// # Why this duplicates `read_velocity_model` rather than replacing its body
+///
+/// The reader accumulates and truncates **in the same pass it parses**, and `break`s at
+/// the Moho — so it never reads the records below it. Factoring the shared half out would
+/// make it read the whole file first, which is a behaviour change to the one code path
+/// that still has to certify against the Fortran oracle. `read_velocity_model` is deleted
+/// in §4.3; until then the duplication is the cheaper risk.
+pub fn build_velocity_model(
+    vmod_in: &mut VelocityModelInput,
+    layers: &[crate::state::InputLayer],
+    vs_moho_km_s: f64,
+) -> Result<usize, ModelError> {
+    if layers.is_empty() {
+        return Err(ModelError::NoLayers);
+    }
+    if layers.len() > params::NLAYMAX {
+        return Err(ModelError::TooManyLayers {
+            count: layers.len(),
+            max: params::NLAYMAX,
+        });
+    }
+
+    let mut layer_count = layers.len();
+    for (i, layer) in layers.iter().enumerate() {
+        vmod_in[i] = *layer;
+        vmod_in[i].depth_km = layer.thickness_km;
+        if i > 0 {
+            vmod_in[i].depth_km += vmod_in[i - 1].depth_km;
+        }
+
+        if layer.vsh_km_s >= vs_moho_km_s {
+            if i == 0 {
+                // The Fortran reads depth_km(0) here, one before the array start. Not
+                // reachable with the production vs_moho of 999.9, and an error rather
+                // than a silent out-of-bounds read.
+                return Err(ModelError::MohoAtFirstLayer { vs_moho_km_s });
+            }
+            // A LAYER COUNT, so one more than the 0-based index that reached it.
+            layer_count = i + 1;
+            vmod_in[i].thickness_km = 0.0;
+            vmod_in[i].depth_km = vmod_in[i - 1].depth_km;
+            break;
+        }
+    }
+
+    vmod_in[layer_count - 1].thickness_km = 0.0;
+    Ok(layer_count)
 }
 
 /// Read the 1-D velocity model into `/vmod_in/` — `hb_high_ref.f:322-349`.
@@ -476,6 +639,82 @@ mod tests {
         assert_eq!(s.at(1, 1).rise_time_s, 1.32973e-1);
         assert_eq!(s.at(2, 2).rupture_time_s, 5.81083e-1);
         assert_eq!(s.along_strike_offset_km, 0.5 * 2.0 * 1.64);
+    }
+
+    /// The bridge test for §4.3: the array path must reproduce the text path exactly.
+    ///
+    /// `build_velocity_model` duplicates `read_velocity_model`'s truncation because the
+    /// reader cannot be split without changing how much of the file it consumes. That
+    /// duplication is only safe while something checks the two agree — so this compares
+    /// every field of every layer, across a model that truncates and one that does not.
+    /// When `read_velocity_model` goes, this test goes with it, having done its job.
+    #[test]
+    fn the_array_path_and_the_text_path_agree_field_for_field() {
+        let text = "4\n1.0 2.0 1.0 2.0 100 50\n2.0 4.0 2.5 2.5 200 100\n\
+                    3.0 8.0 4.6 3.3 400 200\n5.0 8.5 4.9 3.4 500 250\n";
+        let layers = [
+            (1.0f32, 2.0f64, 1.0f64, 2.0f64, 100.0f32, 50.0f32),
+            (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
+            (3.0, 8.0, 4.6, 3.3, 400.0, 200.0),
+            (5.0, 8.5, 4.9, 3.4, 500.0, 250.0),
+        ]
+        .map(|(thickness_km, vp_km_s, vsh_km_s, density_g_cm3, qp, qs)| {
+            crate::state::InputLayer {
+                // `depth_km` is derived by both paths, so it is deliberately left at
+                // zero here: if either path failed to compute it, the comparison below
+                // would show two zeroes and pass. The no-Moho case rules that out,
+                // because its depths must reach 11.0.
+                depth_km: 0.0,
+                thickness_km,
+                vp_km_s,
+                vsh_km_s,
+                density_g_cm3,
+                attenuation_p: qp,
+                attenuation_s: qs,
+            }
+        });
+
+        // 4.0 truncates at the third layer (vsh 4.6); 999.9 never truncates.
+        for vs_moho in [4.0f64, 999.9] {
+            let mut from_text = VelocityModelInput::new();
+            let text_count = read_velocity_model(text, &mut from_text, vs_moho).unwrap();
+
+            let mut from_arrays = VelocityModelInput::new();
+            let array_count =
+                build_velocity_model(&mut from_arrays, &layers, vs_moho).unwrap();
+
+            assert_eq!(text_count, array_count, "layer count at vs_moho={vs_moho}");
+            for i in 0..text_count {
+                assert_eq!(
+                    from_text[i], from_arrays[i],
+                    "layer {i} of {text_count} at vs_moho={vs_moho}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_moho_in_the_first_layer_is_an_error_not_a_panic() {
+        // The Fortran reads depth_km(0) here. read_velocity_model reproduces that as a
+        // panic; the array path, which has to face untrusted Python input, returns.
+        let layers = [crate::state::InputLayer {
+            depth_km: 0.0,
+            thickness_km: 1.0,
+            vp_km_s: 8.0,
+            vsh_km_s: 4.6,
+            density_g_cm3: 3.3,
+            attenuation_p: 400.0,
+            attenuation_s: 200.0,
+        }];
+        let mut v = VelocityModelInput::new();
+        assert!(matches!(
+            build_velocity_model(&mut v, &layers, 4.0),
+            Err(ModelError::MohoAtFirstLayer { .. })
+        ));
+        assert!(matches!(
+            build_velocity_model(&mut v, &[], 999.9),
+            Err(ModelError::NoLayers)
+        ));
     }
 
     #[test]

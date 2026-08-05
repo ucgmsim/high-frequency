@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm", "setuptools-rust>=1.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hf-simulation"
+authors = [{ name = "ucgmsim" }]
+description = "Stochastic high-frequency seismogram generation (EMOD3D hb_high, ported to Rust)"
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["version"]
+dependencies = ["numpy>=2"]
+
+[tool.setuptools_scm]
+
+[project.optional-dependencies]
+test = ["hypothesis[numpy]>=6.151.0", "pytest>=9.0.2", "pytest-cov>=7.0.0"]
+types = []
+
+[dependency-groups]
+dev = ["deptry", "ruff", "ty", "numpydoc"]
+
+[tool.deptry]
+pep621_dev_dependency_groups = ["test", "types"]
+
+[tool.setuptools.packages]
+find = { where = [
+  ".",
+], include = [
+  "hf_simulation",
+], exclude = [
+  "crates",
+  "harness",
+  "src-rust",
+  "tests",
+] }
+
+[[tool.setuptools-rust.ext-modules]]
+target = "hf_simulation._hf_simulation"
+path = "src-rust/Cargo.toml"
+binding = "PyO3"
+
+[tool.ruff.lint]
+extend-select = [
+  # isort imports
+  "I",
+  # Use r'\s+' rather than '\s+'
+  "W605",
+  # All the naming errors, like using camel case for function names.
+  "N",
+  # Missing docstrings in classes, methods, and functions
+  "D101",
+  "D102",
+  "D103",
+  "D105",
+  "D107",
+  # Use f-string instead of a format call
+  "UP032",
+  # Standard library import is deprecated
+  "UP035",
+  # Missing function argument type-annotation
+  "ANN001",
+  # Using except without specifying an exception type to catch
+  "BLE001",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = [
+  "source_modelling",
+  "workflow",
+  "qcore",
+  "empirical",
+  "nshmdb",
+  "IM",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["D104"]
+"tests/**.py" = ["D"]
+
+[tool.numpydoc_validation]
+checks = [
+  "GL05",
+  "GL08",
+  "GL10",
+  "PR01",
+  "PR02",
+  "PR03",
+  "PR04",
+  "PR05",
+  "PR06",
+  "PR07",
+  "RT01",
+  "RT02",
+  "RT03",
+  "RT04",
+  "YD01",
+]
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "**/*.rs" },
+]
