@@ -31,14 +31,14 @@ use crate::config::{
 use ndarray::{s, Array1, ArrayView1};
 
 use crate::fort::{truncate_toward_zero, Complex32};
-use crate::geom::{subfault_geometry, GeoPoint, SubfaultGeometry};
+use crate::geom::{subfault_geometry, FaultPlane, GeoPoint, SubfaultGeometry};
 use crate::input::{insert_air_layer, Segment, StochModel};
-use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
+use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, RadiationAngles};
 use crate::ray::green_function;
 use crate::rng::{fill_uniform_deviates, normal_deviate, Draws, DrawSource};
 use crate::site::{site_amplification_factors, apply_site_amplification};
 use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
-use crate::stoc::{radiate_and_invert, stochastic_spectrum};
+use crate::stoc::{radiate_and_invert, stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
 
 /// The three output components, in the order the Fortran computes them.
 ///
@@ -299,11 +299,18 @@ pub fn simulate(
         let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const, deg_to_rad);
 
         let geom = subfault_geometry(
-            GeoPoint { lat_deg: seg.fault_lat_deg, lon_deg: seg.fault_lon_deg },
+            &FaultPlane {
+                origin: GeoPoint { lat_deg: seg.fault_lat_deg, lon_deg: seg.fault_lon_deg },
+                strike_deg: seg.strike_deg,
+                dip_deg: seg.dip_deg,
+                top_depth_km: seg.top_depth_km,
+                along_strike_offset_km: seg.along_strike_offset_km,
+                subfault_length_km: seg.subfault_length_km,
+                subfault_width_km: seg.subfault_width_km,
+                along_strike_count: seg.along_strike_count,
+                down_dip_count: seg.down_dip_count,
+            },
             GeoPoint { lat_deg: station.stlat, lon_deg: station.stlon },
-            seg.strike_deg, seg.dip_deg, seg.top_depth_km, seg.along_strike_offset_km,
-            seg.subfault_length_km, seg.subfault_width_km,
-            seg.along_strike_count, seg.down_dip_count,
         );
 
         let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
@@ -313,11 +320,21 @@ pub fn simulate(
         // single-segment, which is why it was invisible. Now the minimum over all of them,
         // which is what "closest subfault distance" means.
 
-        let plan = plan_segment_spectrum(windows.tmax, dt, &run);
+        let plan =
+            SpectrumPlan::new(windows.tmax, dt, run.q_exponent, run.window_eps, run.window_eta);
 
         subfault_pass(
-            &mut rng, &mut acc, seg, &geom, &windows, &plan, &vmod, &rv, &angles, &run,
-            config, &deviates, &siteamp_log_freq,
+            &mut rng,
+            &mut acc,
+            SegmentPass { seg, geom: &geom, windows: &windows, plan: &plan, angles: &angles },
+            RunContext {
+                vmod: &vmod,
+                rupture: &rv,
+                run: &run,
+                config,
+                deviates: &deviates,
+                siteamp_log_freq: &siteamp_log_freq,
+            },
         );
     }
 
@@ -570,67 +587,29 @@ fn time_window_pass(
     WindowPass { window_s, tmax }
 }
 
-/// Transform length and frequency axis for one segment.
-struct SpectrumPlan {
-    np2: usize,
-    /// `nfold` — positive-frequency bin count, `np2/2 + 1`.
-    fold_count: usize,
-    frequency_hz: Vec<f32>,
-
-    // ---- precomputed transcendentals -------------------------------------------------
-    //
-    // The three tables below were, between them, the largest single cost in the program:
-    // 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, computing at most
-    // `np2`, `fold_count` and `fold_count` DISTINCT values respectively. Every one was a
-    // pure function of quantities that do not change within a segment, recomputed once
-    // per subfault per ray per component.
-    //
-    // Hoisting them is bit-exact by construction: `powf` and `ln` are deterministic, so
-    // evaluating a pure function once and reusing it gives the identical `f32`.
-    /// `ln(frequency_hz[i])`. Index 0 is `-inf` and is never read — the site-amplification
-    /// interpolation starts at bin 1, because `ln(0)` has no meaning as a frequency.
-    log_frequency_hz: Vec<f32>,
-    /// `frequency_hz[i]^(1 - qfexp)` — the path-attenuation frequency dependence.
-    path_exponent: Vec<f32>,
-    /// `(i * dt)^b` — the power-law factor of the Saragoni-Hart envelope.
-    ///
-    /// `b` comes from the window shape `(eps, eta)`, which is fixed for the whole run, so
-    /// this is `np2` values that were being recomputed 336 times on the medium fault.
-    envelope_power: Vec<f32>,
+/// The five per-segment things the subfault pass reads.
+///
+/// Bundled with [`RunContext`] to get `subfault_pass` from thirteen positional arguments
+/// to four. The two bundles are the natural cut: this one changes once per segment, that
+/// one not at all.
+#[derive(Clone, Copy)]
+struct SegmentPass<'a> {
+    seg: &'a Segment,
+    geom: &'a SubfaultGeometry,
+    windows: &'a WindowPass,
+    plan: &'a SpectrumPlan,
+    angles: &'a SegmentAngles,
 }
 
-/// Smallest power of two at or above `2 * tmax / dt`, and the axis that goes with it.
-fn plan_segment_spectrum(tmax: f32, dt: f32, run: &RunScalars) -> SpectrumPlan {
-    let ntmax = truncate_toward_zero(2.0 * tmax / dt) as usize;
-    let mut np2 = 2usize;
-    while np2 < ntmax {
-        np2 *= 2;
-    }
-    let fold_count = np2 / 2 + 1;
-
-    let df = 1.0 / (np2 as f32 * dt);
-    // 0-based, which also removes the `- 1`: the axis is `df * bin`.
-    let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
-
-    let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
-    let path_exponent: Vec<f32> =
-        frequency_hz.iter().map(|f| f.powf(1.0 - run.q_exponent)).collect();
-
-    // The Saragoni-Hart shape parameter, from the window shape alone. Identical to the
-    // expression in `stochastic_spectrum`, which is where it used to live.
-    let b = -run.window_eps * run.window_eta.ln()
-        / (1.0 + run.window_eps * (run.window_eps.ln() - 1.0));
-    let envelope_power: Vec<f32> =
-        (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
-
-    SpectrumPlan {
-        np2,
-        fold_count,
-        frequency_hz,
-        log_frequency_hz,
-        path_exponent,
-        envelope_power,
-    }
+/// Everything the subfault pass reads that is fixed for the whole run.
+#[derive(Clone, Copy)]
+struct RunContext<'a> {
+    vmod: &'a VelocityModel,
+    rupture: &'a RuptureVelocityTaper,
+    run: &'a RunScalars,
+    config: &'a HfConfig,
+    deviates: &'a Deviates,
+    siteamp_log_freq: &'a [f32],
 }
 
 /// Subfault pass — `hb_high_ref.f`'s second subfault loop.
@@ -641,23 +620,30 @@ fn plan_segment_spectrum(tmax: f32, dt: f32, run: &RunScalars) -> SpectrumPlan {
 /// `horizontal_radiation_spectrum` call draws from the live stream. Walking the grid the
 /// other way pairs a different deviate with every subfault and changes every waveform.
 /// See `PORTING_RULES.md` §5.
-#[allow(clippy::too_many_arguments)]
 fn subfault_pass(
     rng: &mut impl Draws,
     acc: &mut [Vec<f32>; 3],
-    seg: &Segment,
-    geom: &SubfaultGeometry,
-    windows: &WindowPass,
-    plan: &SpectrumPlan,
-    vmod: &VelocityModel,
-    rupture: &RuptureVelocityTaper,
-    angles: &SegmentAngles,
-    run: &RunScalars,
-    config: &HfConfig,
-    deviates: &Deviates,
-    siteamp_log_freq: &[f32],
+    segment: SegmentPass<'_>,
+    ctx: RunContext<'_>,
 ) {
+    // Destructured immediately so the body below reads exactly as it did when these were
+    // thirteen positional parameters. The bundles exist to make the CALL safe, not to be
+    // threaded through the body field by field.
+    let SegmentPass { seg, geom, windows, plan, angles } = segment;
+    let RunContext { vmod, rupture, run, config, deviates, siteamp_log_freq } = ctx;
+
     let np2 = plan.np2;
+    // Fixed for the whole run, so it is built once here rather than per call. Six of
+    // `stochastic_spectrum`'s nineteen former arguments were these, re-passed on every one
+    // of the hundreds of thousands of calls in a run.
+    let model = SourceModel {
+        dt: run.dt,
+        window_eps: run.window_eps,
+        window_eta: run.window_eta,
+        subevent_moment: run.subevent_moment,
+        kappa_s: run.kappa_s,
+        moment_scale: run.moment_scale,
+    };
     // Holds three owned spectra between the two component loops. A `Vec` rather than a
     // `[_; 3]` because the values MOVE out at the end -- `drain` hands each one to
     // `radiate_and_invert`, which consumes it -- and because it must be filled by an
@@ -723,16 +709,23 @@ fn subfault_pass(
                 sub_tstart = 0.7 * stime;
             }
 
-            // Three calls in component order: each draws `np2` normal deviates.
+            // Three calls in component order: each draws `np2` normal deviates. The only
+            // field that differs between them is `fmax_hz`, which the vertical caps.
             spectrum.clear();
             for component in Component::ALL {
                 spectrum.push(stochastic_spectrum(
-                    rng, np2, rpath, subfault_window_s, run.window_eps, run.window_eta,
-                    shear_velocity_km_s, density_g_cm3, run.dt,
-                    run.subevent_moment, run.avg_subfault_km, fce,
-                    component.capped_fmax(run.fmax_hz), run.kappa_s,
-                    &plan.frequency_hz, &plan.path_exponent,
-                    &plan.envelope_power, qbar, run.moment_scale,
+                    rng,
+                    plan,
+                    &model,
+                    &RayPath {
+                        distance_km: rpath,
+                        window_s: subfault_window_s,
+                        shear_velocity_km_s,
+                        density_g_cm3,
+                        corner_frequency_hz: fce,
+                        fmax_hz: component.capped_fmax(run.fmax_hz),
+                        qbar,
+                    },
                 ));
             }
 
@@ -772,16 +765,21 @@ fn subfault_pass(
             // `drain` moves each spectrum out. The zip is sound because the fill loop
             // above pushes in `Component::ALL` order and this walks the same order; the
             // Vec is left empty and reusable for the next ray type.
+            let arrival = RadiationAngles {
+                strike_rad: angles.strike_rad,
+                dip_rad: angles.dip_rad,
+                rake_rad: angles.rake_rad,
+                azimuth_rad: pa,
+                takeoff_rad: th,
+            };
             for (component, spec) in Component::ALL.into_iter().zip(spectrum.drain(..)) {
                 match component.azimuth_offset_deg() {
                     Some(offset_deg) => horizontal_radiation_spectrum(
-                        rng, angles.strike_rad, angles.dip_rad, angles.rake_rad, pa, th,
-                        &plan.frequency_hz, plan.fold_count, offset_deg * run.deg_to_rad,
+                        rng, &arrival, &plan.frequency_hz, offset_deg * run.deg_to_rad,
                         run.radv_sample_count, &mut radiation,
                     ),
                     None => vertical_radiation_spectrum(
-                        angles.strike_rad, angles.dip_rad, angles.rake_rad, pa, th,
-                        &plan.frequency_hz, plan.fold_count,
+                        &arrival, &plan.frequency_hz,
                         &deviates.radv_uniform_a, &deviates.radv_uniform_b,
                         run.radv_sample_count, &mut radiation,
                     ),
@@ -987,7 +985,6 @@ struct SourceScale {
 /// averages, pass 3's is the one that reaches `moment_scale`. The Fortran shadows one
 /// `subfault_count` with the other, so only the second survives — hence only that one is
 /// returned.
-#[allow(clippy::too_many_arguments)]
 fn normalise_source(
     stoch: &mut StochModel,
     layer_count: usize,

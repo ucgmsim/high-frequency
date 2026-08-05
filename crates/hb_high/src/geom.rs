@@ -166,6 +166,25 @@ impl SubfaultGeometry {
     }
 }
 
+/// One segment's fault plane: where it is, how it is oriented, and how it is diced.
+///
+/// These nine travelled as nine positional arguments next to a tenth, `station`, that is
+/// also a [`GeoPoint`] — so the two geographic points were adjacent and interchangeable
+/// without a compile error. They are all fields of the caller's `Segment`.
+#[derive(Clone, Copy)]
+pub struct FaultPlane {
+    /// The segment's own origin, **not** the station.
+    pub origin: GeoPoint,
+    pub strike_deg: f32,
+    pub dip_deg: f32,
+    pub top_depth_km: f32,
+    pub along_strike_offset_km: f32,
+    pub subfault_length_km: f32,
+    pub subfault_width_km: f32,
+    pub along_strike_count: usize,
+    pub down_dip_count: usize,
+}
+
 /// `subroutine subfault_geometry(...)` — `hb_high_ref.f:2593`.
 ///
 /// Per-subfault source-to-receiver geometry for a single planar fault segment.
@@ -187,19 +206,18 @@ impl SubfaultGeometry {
 /// Fortran.
 ///
 /// Everything here is `f32`; there is no double-precision arithmetic.
-#[allow(clippy::too_many_arguments)]
-pub fn subfault_geometry(
-    fault: GeoPoint,
-    station: GeoPoint,
-    strike_deg: f32,
-    dip_deg: f32,
-    top_depth_km: f32,
-    along_strike_offset_km: f32,
-    subfault_length_km: f32,
-    subfault_width_km: f32,
-    along_strike_count: usize,
-    down_dip_count: usize,
-) -> SubfaultGeometry {
+pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeometry {
+    let &FaultPlane {
+        origin: fault,
+        strike_deg,
+        dip_deg,
+        top_depth_km,
+        along_strike_offset_km,
+        subfault_length_km,
+        subfault_width_km,
+        along_strike_count,
+        down_dip_count,
+    } = plane;
     // Sized to the actual grid, not to the compile-time maximum. The Fortran declares
     // these `(nq, np)` = 600x100, i.e. 234 KB each and 1.14 MB for the five, essentially
     // all of it untouched -- and it allocates them per segment. Layout is not observable

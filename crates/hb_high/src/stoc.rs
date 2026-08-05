@@ -6,6 +6,103 @@ use crate::fort::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
 use crate::special::gamma;
 
+/// Transform length and frequency axis for one segment.
+///
+/// Lived in `sim.rs` until §5.3. It is *the spectrum plan* — every field exists to serve
+/// [`stochastic_spectrum`] and the two routines that decorate its output — so it belongs
+/// beside them, which is the same argument that moved `highcor.rs` here in §5.1a.
+pub struct SpectrumPlan {
+    pub np2: usize,
+    /// `nfold` — positive-frequency bin count, `np2/2 + 1`, and the length of every
+    /// positive-frequency table below.
+    pub fold_count: usize,
+    pub frequency_hz: Vec<f32>,
+
+    // ---- precomputed transcendentals -------------------------------------------------
+    //
+    // The three tables below were, between them, the largest single cost in the program:
+    // 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, computing at most
+    // `np2`, `fold_count` and `fold_count` DISTINCT values respectively. Every one was a
+    // pure function of quantities that do not change within a segment, recomputed once
+    // per subfault per ray per component.
+    //
+    // Hoisting them is bit-exact by construction: `powf` and `ln` are deterministic, so
+    // evaluating a pure function once and reusing it gives the identical `f32`.
+    /// `ln(frequency_hz[i])`. Index 0 is `-inf` and is never read — the site-amplification
+    /// interpolation starts at bin 1, because `ln(0)` has no meaning as a frequency.
+    pub log_frequency_hz: Vec<f32>,
+    /// `frequency_hz[i]^(1 - q_exponent)` — the path-attenuation frequency dependence.
+    pub path_exponent: Vec<f32>,
+    /// `(i * dt)^b` — the power-law factor of the Saragoni-Hart envelope.
+    ///
+    /// `b` comes from the window shape `(window_eps, window_eta)`, which is fixed for the
+    /// whole run, so this is `np2` values that were being recomputed 336 times on the
+    /// medium fault.
+    pub envelope_power: Vec<f32>,
+}
+
+impl SpectrumPlan {
+    /// Smallest power of two at or above `2 * tmax_s / dt`, and the axis that goes with it.
+    pub fn new(tmax_s: f32, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+        let ntmax = (2.0 * tmax_s / dt).trunc() as usize;
+        let mut np2 = 2usize;
+        while np2 < ntmax {
+            np2 *= 2;
+        }
+        let fold_count = np2 / 2 + 1;
+
+        let df = 1.0 / (np2 as f32 * dt);
+        // 0-based, which also removes the `- 1`: the axis is `df * bin`.
+        let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
+
+        let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
+        let path_exponent: Vec<f32> =
+            frequency_hz.iter().map(|f| f.powf(1.0 - q_exponent)).collect();
+
+        // The Saragoni-Hart shape parameter, from the window shape alone. Identical to the
+        // expression in `stochastic_spectrum`, which is where it used to live.
+        let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
+        let envelope_power: Vec<f32> = (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
+
+        SpectrumPlan {
+            np2,
+            fold_count,
+            frequency_hz,
+            log_frequency_hz,
+            path_exponent,
+            envelope_power,
+        }
+    }
+}
+
+/// Spectral-model constants that are **fixed for the whole run**.
+///
+/// The cut between this and [`RayPath`] is the useful one: everything here is the same on
+/// every one of the hundreds of thousands of calls in a run, and everything there changes
+/// on each. Nineteen positional arguments hid that distinction completely.
+pub struct SourceModel {
+    pub dt: f32,
+    /// `tw_eps` / `tw_eta` — the Saragoni-Hart window shape.
+    pub window_eps: f32,
+    pub window_eta: f32,
+    pub subevent_moment: f32,
+    pub kappa_s: f32,
+    pub moment_scale: f32,
+}
+
+/// One `(subfault, ray, component)`'s own path, and the medium at its source.
+pub struct RayPath {
+    pub distance_km: f32,
+    pub window_s: f32,
+    pub shear_velocity_km_s: f32,
+    pub density_g_cm3: f32,
+    pub corner_frequency_hz: f32,
+    /// Capped at 15 Hz for the vertical component, which is why this is per-call rather
+    /// than a [`SourceModel`] constant.
+    pub fmax_hz: f32,
+    pub qbar: f32,
+}
+
 /// `subroutine stochastic_spectrum(...)` — `hb_high_ref.f:1670`.
 ///
 /// Builds the complex Fourier spectrum of one subfault's stochastic S-wave
@@ -17,7 +114,9 @@ use crate::special::gamma;
 /// subfault per component. Returning it lets the value flow straight into
 /// [`radiate_and_invert`], which consumes it, so the caller no longer clones.
 ///
-/// `dlm` is declared and never used; kept in the signature for call-site parity.
+/// `dlm` — the average subfault dimension — was declared and never used, and was kept in
+/// the signature for parity with the Fortran call site. That reason expired with Stage 5,
+/// and it is gone.
 ///
 /// # Precision layout
 ///
@@ -59,30 +158,28 @@ use crate::special::gamma;
 /// The practical consequence is the opposite of what was documented: this routine is
 /// **indifferent** to the deviate source's scale, which is one less thing tying it to a
 /// particular generator.
-#[allow(clippy::too_many_arguments)]
 pub fn stochastic_spectrum(
     rng: &mut impl Draws,
-    np2: usize,
-    distance_km: f32,
-    window_s: f32,
-    window_eps: f32,
-    window_eta: f32,
-    shear_velocity_km_s: f32,
-    density_g_cm3: f32,
-    dt: f32,
-    subevent_moment: f32,
-    _avg_subfault_km: f32,
-    corner_frequency_hz: f32,
-    fmax_hz: f32,
-    kappa_s: f32,
-    frequency_hz: &[f32],
-    // `frequency_hz[i]^(1 - qfexp)`, precomputed per segment -- see `SpectrumPlan`.
-    path_exponent: &[f32],
-    // `(i * dt)^b`, precomputed per segment -- see `SpectrumPlan`.
-    envelope_power: &[f32],
-    qbar: f32,
-    moment_scale: f32,
+    plan: &SpectrumPlan,
+    model: &SourceModel,
+    path: &RayPath,
 ) -> Array1<Complex32> {
+    // Destructured rather than read through the structs field by field, so that the
+    // arithmetic below reads as arithmetic. The names are the ones the derivation uses.
+    let &SourceModel { dt, window_eps, window_eta, subevent_moment, kappa_s, moment_scale } =
+        model;
+    let &RayPath {
+        distance_km,
+        window_s,
+        shear_velocity_km_s,
+        density_g_cm3,
+        corner_frequency_hz,
+        fmax_hz,
+        qbar,
+    } = path;
+    let SpectrumPlan { np2, fold_count, frequency_hz, path_exponent, envelope_power, .. } = plan;
+    let (np2, fold_count) = (*np2, *fold_count);
+
     let pai = std::f32::consts::PI;
     let rp = 0.63f32;
 
@@ -93,7 +190,6 @@ pub fn stochastic_spectrum(
     let fs = 2.0f32;
     let prtitn = 0.71f32;
 
-    let fold_count = np2 / 2 + 1;
     let distance_cm = distance_km * 100000.0;
 
     // Saragoni-Hart style envelope: b and c from the (window_eps, window_eta) window shape.
@@ -185,13 +281,13 @@ pub fn stochastic_spectrum(
         //
         // No assumption is made about the frequency axis being evenly spaced, unlike
         // the envelope recurrence above. `frequency_hz` is caller-supplied data.
-        let path = qbar * path_fr;
+        let path_attenuation = qbar * path_fr;
         let a2a3 = if kappa_s <= 0.0 {
             let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
-            let a3 = ((-pai * path).exp() / distance_cm) as f64;
+            let a3 = ((-pai * path_attenuation).exp() / distance_cm) as f64;
             a2 * a3
         } else {
-            ((-pai * (fr * kappa_s + path)).exp() / distance_cm) as f64
+            ((-pai * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
         };
 
         let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);

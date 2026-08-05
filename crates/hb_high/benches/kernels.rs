@@ -23,9 +23,9 @@ use std::hint::black_box;
 
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
-use hb_high::geom::{subfault_geometry, GeoPoint};
-use hb_high::stoc::radiate_and_invert;
-use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern};
+use hb_high::geom::{subfault_geometry, FaultPlane, GeoPoint};
+use hb_high::stoc::{radiate_and_invert, RayPath, SourceModel, SpectrumPlan};
+use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern, RadiationAngles};
 use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time, Takeoff};
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::{site_amplification_factors, apply_site_amplification};
@@ -230,6 +230,15 @@ fn bench_radiation(c: &mut Criterion) {
     let dfr = dfr_axis(np2);
     let mut rdna = vec![0.0; np2];
 
+    // The same arrival geometry both routines used as five loose positional f32s.
+    const ARRIVAL: RadiationAngles = RadiationAngles {
+        strike_rad: 1.2,
+        dip_rad: 0.9,
+        rake_rad: -0.4,
+        azimuth_rad: 2.1,
+        takeoff_rad: 2.6,
+    };
+
     // Per call, not per draw: the useful comparison is against one FFT of the
     // same np2, since both happen the same number of times per subfault.
     group.throughput(Throughput::Elements(1));
@@ -237,8 +246,8 @@ fn bench_radiation(c: &mut Criterion) {
         let (mut g, _) = Pcg32::seed(7);
         b.iter(|| {
             horizontal_radiation_spectrum(
-                &mut g, 1.2, 0.9, -0.4, 2.1, 2.6, dfr.as_slice(), nfold,
-                black_box(-90.0f32.to_radians()), NR, rdna.as_mut_slice(),
+                &mut g, &ARRIVAL, &dfr[..nfold],
+                black_box(-90.0f32.to_radians()), NR, &mut rdna[..nfold],
             )
         })
     });
@@ -250,7 +259,7 @@ fn bench_radiation(c: &mut Criterion) {
     fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
     group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
         b.iter(|| {
-            vertical_radiation_spectrum(1.2, 0.9, -0.4, 2.1, 2.6, dfr.as_slice(), nfold, rna.as_slice(), rnb.as_slice(), NR, rdna.as_mut_slice())
+            vertical_radiation_spectrum(&ARRIVAL, &dfr[..nfold], rna.as_slice(), rnb.as_slice(), NR, &mut rdna[..nfold])
         })
     });
 
@@ -345,13 +354,32 @@ fn bench_spectrum(c: &mut Criterion) {
         // the returned array, which is where that allocation comes back out.
         group.bench_with_input(BenchmarkId::new("stochastic_spectrum", np2), &np2, |b, &np2| {
             let (mut g, _) = Pcg32::seed(5);
-            b.iter(|| {
-                stochastic_spectrum(
-                    &mut g, np2, 60.0, 2.0, 0.2, 0.05, 3.2, 2.7, DT, 3.0e22, 0.0,
-                    1.5, 10.0, 0.045, dfr.as_slice(),
-                    path_exp.as_slice(), env_pow.as_slice(), 0.02, 2.1,
-                )
-            })
+            let plan = SpectrumPlan {
+                np2,
+                fold_count: nf,
+                log_frequency_hz: log_dfr.clone(),
+                path_exponent: path_exp.clone(),
+                envelope_power: env_pow.clone(),
+                frequency_hz: dfr.clone(),
+            };
+            let model = SourceModel {
+                dt: DT,
+                window_eps: 0.2,
+                window_eta: 0.05,
+                subevent_moment: 3.0e22,
+                kappa_s: 0.045,
+                moment_scale: 2.1,
+            };
+            let path = RayPath {
+                distance_km: 60.0,
+                window_s: 2.0,
+                shear_velocity_km_s: 3.2,
+                density_g_cm3: 2.7,
+                corner_frequency_hz: 1.5,
+                fmax_hz: 10.0,
+                qbar: 0.02,
+            };
+            b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path))
         });
 
         // radiate_and_invert: the radiation multiply, one inverse FFT, the scale and the
@@ -420,10 +448,18 @@ fn bench_geom(c: &mut Criterion) {
             |b, &(nx, nw)| {
                 b.iter(|| {
                     subfault_geometry(
-                        GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                        &FaultPlane {
+                            origin: GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                            strike_deg: 220.0,
+                            dip_deg: 70.0,
+                            top_depth_km: 5.0,
+                            along_strike_offset_km: 0.5 * nx as f32 * 1.5,
+                            subfault_length_km: 1.5,
+                            subfault_width_km: 1.5,
+                            along_strike_count: nx,
+                            down_dip_count: nw,
+                        },
                         GeoPoint { lat_deg: -43.0, lon_deg: 173.1 },
-                        220.0, 70.0, 5.0,
-                        0.5 * nx as f32 * 1.5, 1.5, 1.5, nx, nw,
                     )
                 })
             },

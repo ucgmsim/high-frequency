@@ -2,6 +2,22 @@
 //!
 //! Tier 0 holds `RDATN` only; `RADFRQ_lin` and `RADV_lin` land here in tier 2.
 
+/// Fault orientation and the ray's arrival direction — the five angles every radiation
+/// calculation takes, and takes in the same order.
+///
+/// They travelled as five positional `f32`s, which is exactly the shape a transposition
+/// hides in: `(strike, dip, rake, azimuth, takeoff)` are all radians, all plausible for
+/// each other, and a swap produces a wrong answer rather than a compile error.
+pub struct RadiationAngles {
+    pub strike_rad: f32,
+    pub dip_rad: f32,
+    pub rake_rad: f32,
+    /// Source to receiver, clockwise from north.
+    pub azimuth_rad: f32,
+    /// Incidence angle, measured from down.
+    pub takeoff_rad: f32,
+}
+
 /// `SUBROUTINE RDATN(STR,DIP,RAK,AZ,TH,RDSH,RDSV)` — `hb_high_ref.f:2275`.
 ///
 /// SH and SV radiation coefficients for a double couple (Aki & Richards).
@@ -80,20 +96,15 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
 ///
 /// `RNA` and `RNB` are declared in the Fortran signature and never read; they
 /// are omitted here.
-#[allow(clippy::too_many_arguments)]
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
-    strike_rad: f32,
-    dip_rad: f32,
-    rake_rad: f32,
-    azimuth_rad: f32,
-    takeoff_rad: f32,
+    angles: &RadiationAngles,
     frequency_hz: &[f32],
-    fold_count: usize,
     component_rad: f32,
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
+    let &RadiationAngles { strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad } = angles;
     let pu = std::f32::consts::PI / 180.0;
 
     let fr1 = 0.5f32;
@@ -142,7 +153,7 @@ pub fn horizontal_radiation_spectrum(
 
     let radvh = (radv / sample_count as f32).sqrt();
 
-    for (gain, &freq) in radiation[..fold_count].iter_mut().zip(frequency_hz) {
+    for (gain, &freq) in radiation.iter_mut().zip(frequency_hz) {
         let del = if freq <= fr1 {
             radmin
         } else if freq <= fr2 {
@@ -175,20 +186,15 @@ pub fn horizontal_radiation_spectrum(
 /// The Fortran writes `fr2 = 1.5` before `fr2 = 0.01`, and `radvh = 0.7` before the
 /// computed average; only the second of each survives, and §3.5 dropped the dead ones.
 /// The take-off range is clamped to `[90, 180]` degrees.
-#[allow(clippy::too_many_arguments)]
 pub fn vertical_radiation_spectrum(
-    strike_rad: f32,
-    dip_rad: f32,
-    rake_rad: f32,
-    azimuth_rad: f32,
-    takeoff_rad: f32,
+    angles: &RadiationAngles,
     frequency_hz: &[f32],
-    fold_count: usize,
     uniform_a: &[f32],
     uniform_b: &[f32],
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
+    let &RadiationAngles { strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad } = angles;
     let pu = std::f32::consts::PI / 180.0;
 
     let fr1 = 0.001f32;
@@ -231,7 +237,7 @@ pub fn vertical_radiation_spectrum(
     // blend between. The Fortran writes `rdx` first and then overwrites or adds to it,
     // which reads as three branches only once you notice the fall-through; written as
     // one expression per bin it is visibly a piecewise function.
-    for (gain, &freq) in radiation[..fold_count].iter_mut().zip(frequency_hz) {
+    for (gain, &freq) in radiation.iter_mut().zip(frequency_hz) {
         *gain = if freq <= fr1 {
             rdx
         } else if freq <= fr2 {

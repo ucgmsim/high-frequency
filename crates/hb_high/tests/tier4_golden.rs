@@ -12,7 +12,7 @@ use hb_high::fort::Complex32;
 use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};
-use hb_high::stoc::stochastic_spectrum;
+use hb_high::stoc::{stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
 
 mod common;
 use common::*;
@@ -42,15 +42,44 @@ fn stoc_f_matches_fortran() {
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let (mut rng, _) = Pcg32::seed(seed);
-        // The two per-segment tables `SpectrumPlan` precomputes in the program. Built
-        // here from the golden's own inputs, so this still checks the arithmetic rather
-        // than the caching: `powf` is deterministic, so hoisting it is bit-exact.
-        let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - qfe)).collect();
+        // The per-segment tables `SpectrumPlan` precomputes in the program. Built here from
+        // the golden's own inputs by struct literal rather than through `SpectrumPlan::new`,
+        // for two reasons: the golden records `np2` directly where `new` derives it from a
+        // window length, and building the tables here keeps this a test of the ARITHMETIC
+        // rather than of the caching. `powf` is deterministic, so hoisting it is bit-exact.
         let b = -eps * eta.ln() / (1.0 + eps * (eps.ln() - 1.0));
-        let env_pow: Vec<f32> = (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
-        let cw = stochastic_spectrum(&mut rng, np2, rr, tw, eps, eta, betvs, row, dt, smt, dlm,
-               fc, fmx, akapp, dfr.as_slice(),
-               path_exp.as_slice(), env_pow.as_slice(), qb, bigc);
+        let plan = SpectrumPlan {
+            np2,
+            fold_count: nf,
+            log_frequency_hz: dfr.iter().map(|f| f.ln()).collect(),
+            path_exponent: dfr.iter().map(|f| f.powf(1.0 - qfe)).collect(),
+            envelope_power: (0..np2).map(|i| (i as f32 * dt).powf(b)).collect(),
+            frequency_hz: dfr.clone(),
+        };
+        // `dlm` was argument 11 and unused; §5.3 deleted it from the signature. The golden
+        // still records it, so it is still read off the record and simply not passed.
+        let _ = dlm;
+        let cw = stochastic_spectrum(
+            &mut rng,
+            &plan,
+            &SourceModel {
+                dt,
+                window_eps: eps,
+                window_eta: eta,
+                subevent_moment: smt,
+                kappa_s: akapp,
+                moment_scale: bigc,
+            },
+            &RayPath {
+                distance_km: rr,
+                window_s: tw,
+                shear_velocity_km_s: betvs,
+                density_g_cm3: row,
+                corner_frequency_hz: fc,
+                fmax_hz: fmx,
+                qbar: qb,
+            },
+        );
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
         // Scale from the Fortran record, so the tolerance does not float with our

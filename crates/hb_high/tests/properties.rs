@@ -38,7 +38,7 @@ use hb_high::config::{
 };
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
-use hb_high::geom::{distance_azimuth, subfault_geometry, GeoPoint};
+use hb_high::geom::{distance_azimuth, subfault_geometry, FaultPlane, GeoPoint};
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
@@ -189,10 +189,18 @@ proptest! {
     ) {
         let (along, down) = (4usize, 3usize);
         let g = subfault_geometry(
-            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+            &FaultPlane {
+                origin: GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                strike_deg: 220.0,
+                dip_deg,
+                top_depth_km,
+                along_strike_offset_km: 0.5 * along as f32 * subfault_km,
+                subfault_length_km: subfault_km,
+                subfault_width_km: subfault_km,
+                along_strike_count: along,
+                down_dip_count: down,
+            },
             GeoPoint { lat_deg: -43.0, lon_deg: 173.0 + station_offset_deg },
-            220.0, dip_deg, top_depth_km, 0.5 * along as f32 * subfault_km,
-            subfault_km, subfault_km, along, down,
         );
         for i in 1..=along {
             for j in 1..=down {
@@ -215,10 +223,18 @@ proptest! {
     fn depth_increases_down_dip(dip_deg in 5.0f32..85.0, top_depth_km in 0.5f32..25.0) {
         let (along, down) = (3usize, 5usize);
         let g = subfault_geometry(
-            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+            &FaultPlane {
+                origin: GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                strike_deg: 220.0,
+                dip_deg,
+                top_depth_km,
+                along_strike_offset_km: 0.5 * along as f32 * 1.5,
+                subfault_length_km: 1.5,
+                subfault_width_km: 1.5,
+                along_strike_count: along,
+                down_dip_count: down,
+            },
             GeoPoint { lat_deg: -43.0, lon_deg: 173.5 },
-            220.0, dip_deg, top_depth_km,
-            0.5 * along as f32 * 1.5, 1.5, 1.5, along, down,
         );
         for i in 1..=along {
             for j in 2..=down {
