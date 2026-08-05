@@ -26,7 +26,26 @@ use std::sync::Arc;
 
 use rustfft::{Fft, FftDirection, FftPlanner};
 
-use crate::fort::Complex32;
+// `complex*8` / `complex*16` are `num_complex::Complex`, re-exported here because this is
+// the module that owns the transform and hands them to everyone else. They lived in
+// `fort.rs` until §5.3, which deleted it.
+//
+// This was hand-written for as long as bit-identity was the goal: a dependency is free to
+// implement `abs` or `exp` differently from gfortran, and nothing produces a compile error
+// when it does. Checked rather than assumed before swapping, against the same gfortran
+// 16.1.1 vectors the old unit tests pinned:
+//
+//   norm (was abs)   hypot both sides            IDENTICAL bit for bit
+//   exp              exp(re)*(cos im, sin im)    IDENTICAL
+//   mul              textbook four-multiply      IDENTICAL
+//   div              1-2 ulps different          num-complex does not use gfortran's
+//                                                Smith-with-range-reduction branch
+//
+// So only division moved, at two call sites in `ray.rs`. See `REFACTOR.md` §2.2.
+pub use rustfft::num_complex::Complex;
+
+pub type Complex32 = Complex<f32>;
+pub type Complex64 = Complex<f64>;
 
 /// A planned transform of one length and direction. `rustfft` hands these out behind an
 /// `Arc` because a plan is shareable and immutable once built.

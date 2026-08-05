@@ -2,7 +2,7 @@
 
 use ndarray::{azip, s, Array1, ArrayView1};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
-use crate::fort::{Complex32, Complex64};
+use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
 use crate::special::gamma;
 

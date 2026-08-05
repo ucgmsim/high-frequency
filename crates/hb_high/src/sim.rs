@@ -30,7 +30,7 @@ use crate::config::{
 };
 use ndarray::{s, Array1, ArrayView1};
 
-use crate::fort::{truncate_toward_zero, Complex32};
+use crate::fft::Complex32;
 use crate::geom::{subfault_geometry, FaultPlane, GeoPoint, SubfaultGeometry};
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, RadiationAngles};
@@ -252,7 +252,7 @@ pub fn simulate(
     // longer than the compiled array rather than reporting anything -- arguably worse
     // than the `np2 > mm` abort below it, which at least said something. Both are gone;
     // the buffers are sized from the deck.
-    let ndata = truncate_toward_zero(duration / dt) as usize;
+    let ndata = (duration / dt).trunc() as usize;
 
     // The draw source and whether the rupture-time jitter applies are decided together,
     // because under legacy seeding the jitter gate is a side effect of the seeding ritual.
@@ -808,10 +808,16 @@ fn subfault_pass(
                 None => subfault.rupture_time_s,
             };
 
-            // Both terms truncate TOWARD ZERO, not toward negative infinity, so a
-            // negative `sub_tstart` makes `kst` smaller and possibly negative.
-            let kst = truncate_toward_zero(ratim / run.dt)
-                + truncate_toward_zero(sub_tstart / run.dt);
+            // Both terms truncate TOWARD ZERO, not toward negative infinity, so a negative
+            // `sub_tstart` makes `kst` smaller and possibly negative. `accumulate_subfault`
+            // relies on that and clips; see `PORTING_RULES.md` §7.
+            //
+            // `trunc()` is written explicitly even though `as i32` alone would round the
+            // same way, because it is the rounding MODE that is load-bearing here and a
+            // bare cast does not say so. This was a `truncate_toward_zero` shim in
+            // `fort.rs` until §5.3 -- a function whose body was `x.trunc() as i32`, i.e.
+            // documentation with parentheses around it.
+            let kst = (ratim / run.dt).trunc() as i32 + (sub_tstart / run.dt).trunc() as i32;
 
             // ONE DRAW, AND IT MUST STAY. The Fortran loops `k = 1, nsum` here, draws a
             // uniform, and turns it into a sub-event time offset. But `nsum` was frozen

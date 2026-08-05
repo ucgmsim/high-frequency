@@ -1,7 +1,7 @@
 //! Ray theory. `cagniard_time`, `cagniard_time_derivative`, `stationary_ray_parameter`, `travel_time` and `green_function` follow in
 //! tiers 2-4.
 
-use crate::fort::Complex64;
+use crate::fft::Complex64;
 use crate::state::{Direction, Interaction, Rays, RayState, VelocityModel, WaveMode};
 
 /// `function vertical_slowness(ray_parameter,velocity_km_s)` — `hb_high_ref.f:3349`. Complex vertical slowness
@@ -305,7 +305,7 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
 ///
 /// The divisions are `real*8 / complex*16`, which Fortran evaluates by promoting
 /// the numerator to complex and doing a full complex division — Smith's
-/// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fort::Complex`]'s `Div`.
+/// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fft::Complex`]'s `Div`.
 ///
 /// The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
 pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, range_km: f64) -> Complex64 {

@@ -37,7 +37,7 @@ use hb_high::config::{
     HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
 };
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
-use hb_high::fort::{Complex32, Complex64};
+use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry, FaultPlane, GeoPoint};
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::radiation::radiation_pattern;

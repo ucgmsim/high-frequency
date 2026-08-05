@@ -28,7 +28,7 @@
 | 1b | Unsuffixed literal carries only `f32` | **EXPIRED**, six sites remaining as §3.4 candidates |
 | 2 | Precision is per expression | **BINDING in part** — the narrowings that are genuinely *more* accurate stay. The ones reproducing the original being *worse* (the single-precision `qb` accumulator) are §3.4 candidates |
 | 3 | 1-based, column-major arrays | **EXPIRED** — self-retired at §2.3, with its warning vindicated: three off-by-ones, one of which no gate caught |
-| 4 | Intrinsic shims | **EXPIRED** — `fort.rs` is down to one function |
+| 4 | Intrinsic shims | **EXPIRED** — `fort.rs` is deleted (§5.3). Its last function was `x.trunc() as i32`, which is what a bare `as` cast already does in Rust |
 | 4b | Constant exponents and `powf` | **EXPIRED** as a spelling rule. The debug/release self-consistency it produced survives on independent grounds |
 | 5 | Control flow and **iteration order** | **SPLIT — read the note below.** The RNG-stream half is being broken deliberately in Stage 3; the float-summation half is real numerics |
 | 6 | Common blocks → one context struct | **BINDING as a naming standard.** The `ir` argument it said to "drop in Phase 3" was dropped in §2.8 |
@@ -139,7 +139,7 @@ mostly uses explicit `d0` suffixes, but do not assume it.
 | `real*8`, or implicit under `implicit real*8 (a-h,o-z)` | `f64` |
 | `integer`, implicit `i-n` | `i32` |
 | `integer*8` | `i64` |
-| `complex*8` | `Complex32` (in `fort.rs`) |
+| `complex*8` | `Complex32` (in `fft.rs` since §5.3) |
 | `complex*16` | `Complex64` |
 | `character*256` | `String` (trimmed at the first blank — see rule 8) |
 
@@ -190,8 +190,9 @@ porting the routine; do not guess.
 
 ## 4. Intrinsic shims
 
-Implemented in `fort.rs`. Each exists because the obvious Rust equivalent is
-subtly different:
+Implemented in `fort.rs`, **which no longer exists** — §5.3 deleted the last of them.
+The table is kept as archaeology: each entry exists because the obvious Rust equivalent is
+subtly different, and that is still the right thing to check when reading the original.
 
 | Fortran | Rust equivalent | trap |
 | --- | --- | --- |

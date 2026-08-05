@@ -8,7 +8,7 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::fort::Complex32;
+use hb_high::fft::Complex32;
 use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};

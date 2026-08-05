@@ -32,7 +32,7 @@
 //! Every comparison is exact. See `PORTING_RULES.md` §10.
 
 use hb_high::fft::remove_quadratic_trend;
-use hb_high::fort::{Complex32, Complex64};
+use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, GeoPoint};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;

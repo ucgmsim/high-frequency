@@ -1,6 +1,6 @@
 //! Site amplification.
 
-use crate::fort::Complex32;
+use crate::fft::Complex32;
 use crate::state::VelocityModel;
 
 /// `subroutine site_amplification_factors(layer_count,frequency_count,fn,factors)` — `hb_high_ref.f:3020`.

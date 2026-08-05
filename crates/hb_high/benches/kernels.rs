@@ -22,7 +22,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::hint::black_box;
 
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
-use hb_high::fort::{Complex32, Complex64};
+use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{subfault_geometry, FaultPlane, GeoPoint};
 use hb_high::stoc::{radiate_and_invert, RayPath, SourceModel, SpectrumPlan};
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern, RadiationAngles};
