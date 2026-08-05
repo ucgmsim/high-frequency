@@ -44,7 +44,7 @@ use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::apply_site_amplification;
-use hb_high::special::gamma;
+use hb_high::stoc::gamma;
 use proptest::prelude::*;
 
 /// Angular difference in degrees, folded into `[0, 180]`.

@@ -1,7 +1,7 @@
 //! Random number generation.
 //!
-//! `Pcg32` mirrors `reference/pcg32.f` line for line; the two are meant to be
-//! diffed side by side. `normal_deviates` and `uniform_deviates` are transliterations
+//! `Pcg32` mirrored `reference/pcg32.f` line for line until §4.3 deleted that file; the
+//! original is recoverable from git history. `normal_deviates` and `uniform_deviates` are transliterations
 //! of the Fortran routines at `hb_high_ref.f:4033` and `:2428`, unchanged from
 //! the original — they are algorithm, not generator.
 //!
@@ -9,20 +9,20 @@
 //! *number* of draws each routine consumes matters as much as their values.
 //! See `PORTING_RULES.md` §5 on iteration order.
 //!
-//! # This module is deliberately left un-tidied
+//! # This module WAS deliberately left un-tidied, and no longer is
 //!
-//! §2.8 converted the rest of the crate's index loops to iterators. The four in here
-//! were skipped on purpose, and the `#[allow]` below is the record of that decision
-//! rather than an oversight: `REFACTOR.md` §2.7 replaces this whole module with
-//! `rand_pcg`, gated on a draw-for-draw equality test, and "What not to do" is explicit
-//! that "small" is not a reason to disturb a generator whose stream is baked into every
-//! golden. Cleaning up code that is queued for deletion buys nothing and spends the one
-//! thing this file has — a diff against `reference/pcg32.f` that a reader can follow.
+//! §2.8 skipped this file's four index loops and recorded the decision as a module-level
+//! `#![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]`. The reason given
+//! was that `REFACTOR.md` §2.7 would replace the whole module with `rand_pcg`, so the one
+//! thing worth preserving was a line-for-line diff against `reference/pcg32.f`.
+//!
+//! **Both halves of that reason have expired.** §4.3 deleted `reference/`, so there is no
+//! file left to diff against; and §2.7 has not happened. What remained was a blanket
+//! suppression on a module nobody was about to delete — which `ENGINEERING_RULES` §3 names
+//! as exactly how 28 warnings once accumulated unseen. §5.6 removed it, and the loops it
+//! was covering are iterators now.
 
-// `needless_range_loop`: the loops write `out[..count]` sequentially and are correct as
-// iterators. `assign_op_pattern`: the Box-Muller step is written in the Fortran's order.
-// Both are staying until §2.7 deletes the module; see the note above.
-#![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]
+use ndarray::ArrayViewMut1;
 
 /// A source of uniform deviates in `[0, 1)`.
 ///
@@ -315,7 +315,7 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
     // The original's computed `goto (1,2),j`.
     let mut j = 1;
 
-    for n in 0..count {
+    for slot in out[..count].iter_mut() {
         let w = if j == 1 {
             x1 = rng.next_f32();
             while x1 == 0.0 {
@@ -325,7 +325,10 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
             while x2 == 0.0 {
                 x2 = rng.next_f32();
             }
-            x2 = std::f32::consts::TAU * x2;
+            // `x2 *= TAU` rather than the Fortran's `TAU * x2`: IEEE 754 multiplication
+            // commutes bit-for-bit, so the operand order was never load-bearing here --
+            // unlike the ADDITION order in the reductions, which is.
+            x2 *= std::f32::consts::TAU;
             x1 = -x1.ln();
             x1 = (x1 + x1).sqrt();
             j = 2;
@@ -334,19 +337,23 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
             j = 1;
             x1 * x2.sin()
         };
-        out[n] = w;
+        *slot = w;
     }
 
-    let mut s = 0.0f32;
-    for i in 0..count {
-        s += out[i] * out[i];
-    }
+    // THE SUM STAYS A LEFT-TO-RIGHT f32 FOLD, and `Sum for f32` is one -- matching the
+    // Fortran's `s = s + ..`. This is a REDUCTION, not an elementwise operation, so unlike
+    // everything §5.4 converted it is not order-independent: any reassociating form
+    // (chunked, pairwise, parallel, `ndarray`'s `.sum()`) would move every waveform in the
+    // program. ENGINEERING_RULES §4 permits that with an argument; it must not ride along
+    // inside a mechanical sweep. Same reasoning as `fsa` in `stoc::stochastic_spectrum`.
+    let s: f32 = out[..count].iter().map(|&v| v * v).sum();
     // count is promoted to real*4 for the division, and the sqrt is single
     // precision. Do not compute this in f64.
-    s = (count as f32 / s).sqrt();
-    for i in 0..count {
-        out[i] *= s;
-    }
+    let s = (count as f32 / s).sqrt();
+    // The rescale IS elementwise, so it is the ndarray operator. Bound to a name because
+    // `*=` needs a place expression, not a temporary.
+    let mut scaled = ArrayViewMut1::from(&mut out[..count]);
+    scaled *= s;
 }
 
 /// One standard normal deviate.
@@ -384,9 +391,9 @@ pub fn normal_deviate<R: Draws>(rng: &mut R) -> f32 {
 pub fn fill_uniform_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]) {
     // Explicit `count` for the same reason as `fill_normal_deviates`.
     assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
-    for i in 0..count {
-        out[i] = rng.next_f32();
-    }
+    // Sequential by necessity -- each slot takes the next draw, and the order IS the
+    // stream. `for_each` over the slice rather than an index loop; nothing else changes.
+    out[..count].iter_mut().for_each(|slot| *slot = rng.next_f32());
 }
 
 #[cfg(test)]

@@ -38,4 +38,3 @@ pub mod sim;
 pub mod site;
 pub mod state;
 pub mod stoc;
-pub mod special;

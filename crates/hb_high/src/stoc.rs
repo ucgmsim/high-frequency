@@ -4,7 +4,46 @@ use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
-use crate::special::gamma;
+
+/// `Gamma(x)`.
+///
+/// Replaces `FUNCTION DGAMM(X)` (`hb_high_ref.f:2745`), which was a 20-term
+/// Chebyshev-like series with hand-rolled argument reduction into `[-0.5, 0.5]`, plus two
+/// error paths that wrote a diagnostic to unit 6 and returned `1.0e75`.
+///
+/// Lived in a `special.rs` of its own until §5.6. A module for one `#[inline]` line was
+/// more structure than the thing deserved, and its only call is [`stochastic_spectrum`]'s
+/// `gamma(2b+1)` below. It stays a named function rather than an inlined `libm::tgamma`
+/// because `tests/properties.rs` pins its recurrence, positivity and factorial agreement —
+/// tests that mean "the gamma this crate uses" and would become tests of a dependency.
+///
+/// # Why this was safe to swap
+///
+/// `b` comes from the time-window shape `(window_eps, window_eta)`, which production
+/// hardcodes, so the argument is always `3.5062997341156006`, and there:
+///
+/// ```text
+/// DGAMM             3.346549271566832    (0x400ac5bb9fdea847)
+/// libm::tgamma      3.346549271566831    (0x400ac5bb9fdea844)
+/// ```
+///
+/// Three ulps of `f64`. The result is consumed as `aa = sqrt((2c)^(2b+1) / gm) as f32`,
+/// and `f32` keeps 24 mantissa bits against `f64`'s 53, so the difference is annihilated
+/// by the narrowing. It is *not* bit-identical by construction, only in effect — which is
+/// why the parity ladder is evidence here rather than a guarantee.
+///
+/// # What changed in behaviour
+///
+/// The `1.0e75` sentinel is gone. `stochastic_spectrum` never checked for it, so a pole or
+/// an overflow used to propagate a plausible-looking finite number straight into the
+/// spectrum. `libm::tgamma` returns infinity or NaN instead, which is louder and cannot be
+/// mistaken for a value. Neither is reachable from a real deck: the argument is a constant
+/// of the window shape. `DGAMM` also refused any `x > 57`; `tgamma` is happy to about 171
+/// before overflowing, so that artificial ceiling is gone too.
+#[inline]
+pub fn gamma(x: f64) -> f64 {
+    libm::tgamma(x)
+}
 
 /// Transform length and frequency axis for one segment.
 ///
@@ -448,4 +487,37 @@ pub fn radiate_and_invert(
     tail *= &taper;
 
     samples
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gamma;
+
+    /// The gamma argument the port actually needs, pinned so that a future change of
+    /// implementation has to look at the one value that matters rather than at the
+    /// thousand it does not. Lived in `special.rs` until §5.6 deleted that module.
+    #[test]
+    fn the_production_gamma_argument_survives_narrowing_to_f32() {
+        let gsa = 3.5062997341156006f64;
+        let fortran = 3.346549271566832f64;
+        let got = gamma(gsa);
+        assert!(
+            (got - fortran).abs() / fortran < 1e-15,
+            "gamma({gsa}) = {got}, Fortran gave {fortran}"
+        );
+        // The consumer narrows to f32; show the difference does not survive that.
+        assert_eq!((got as f32).to_bits(), (fortran as f32).to_bits());
+    }
+
+    /// Poles are loud now, rather than DGAMM's plausible-looking 1.0e75.
+    #[test]
+    fn gamma_poles_are_not_finite() {
+        for pole in [0.0, -1.0, -2.0, -3.0] {
+            assert!(
+                !gamma(pole).is_finite(),
+                "gamma({pole}) = {} should not be a usable value",
+                gamma(pole)
+            );
+        }
+    }
 }
