@@ -107,8 +107,8 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         Some("d") => Tier::D,
         _ => {
             return Err(
-                "usage: validate --tier c|d [--cell a|b|c] [--band 0.02] [--seeds N] \
-                 [--ref-bin PATH] [--aa] [--baseline]"
+                "usage: validate --tier c|d [--cell a|b|c] [--band 0.02] \
+                 [--shape-band 0.02] [--seeds N] [--ref-bin PATH] [--aa] [--baseline]"
                     .into(),
             )
         }
@@ -121,17 +121,33 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
     };
     let band: f64 =
         arg("--band").and_then(|s| s.parse().ok()).unwrap_or(stats::DEFAULT_BAND);
+    // The quantile gate's band, separate from the mean's.
+    //
+    // The +/-2% band is a deliberate physics choice about IM MEANS -- roughly 0.04 of a
+    // typical GMM aleatory sigma. Reusing it on q05/q95 was a category error on my part: a
+    // tail quantile is a fundamentally noisier statistic than a mean at the same n, so the
+    // same numeric band is a materially stricter test. Defaults to `band` so nothing
+    // changes until an A/A run says what the null actually supports.
+    let shape_band: f64 = arg("--shape-band").and_then(|s| s.parse().ok()).unwrap_or(band);
     let n_seeds: usize = arg("--seeds").and_then(|s| s.parse().ok()).unwrap_or(cell.seeds);
 
     // A/A calibration: run ONE binary and split its realisations in half. Every
-    // flag is then a known false alarm, so the flag rate measures whether the
-    // permutation test is calibrated for a max-over-435-pairs statistic. Without
-    // this, a Tier D failure cannot be attributed between "the codes differ" and
-    // "the test over-rejects".
+    // flag is then a known false alarm, so the flag rate measures whether the test is
+    // calibrated rather than whether the port is correct. Without it, a failure cannot be
+    // attributed between "the codes differ" and "the test over-rejects".
+    //
+    // This used to be refused for anything but tier D, and that restriction cost a whole
+    // campaign. Stage 3's LONG returned 373/375 certified on the mean and 0 refuted, but
+    // its NEW quantile gate flagged 14 of 375 -- with no way to ask how many it flags when
+    // both sides are the same program. Tier D was never in that position: it prints its own
+    // family-wise false-alarm rate (53.7%) beside every verdict, which is the only reason
+    // its lone p=0.005 could be read as expected rather than alarming.
+    //
+    // Note the sample-size arithmetic. Splitting one run in half gives each side n/2, so an
+    // A/A that matches the A/B's RESOLUTION needs 2x the seeds -- and false-alarm rates
+    // depend on the estimator's spread, so matching resolution is the whole point. It costs
+    // the same total work: 2n seeds against one binary, versus n seeds against two.
     let aa = std::env::args().any(|a| a == "--aa");
-    if aa && tier != Tier::D {
-        return Err("--aa is only meaningful for tier d".into());
-    }
 
     // Opt in to overwriting the recorded baseline CSV; see the write site.
     let baseline = std::env::args().any(|a| a == "--baseline");
@@ -285,11 +301,17 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 .map(|(n, _)| n)
                 .collect();
             for name in &names {
-                let xa = a.endpoint(ci, name);
-                let xb = b
-                    .as_ref()
-                    .expect("tiers B and C always collect the reference")
-                    .endpoint(ci, name);
+                // A/A splits one binary's realisations down the middle, exactly as tier D
+                // does with its correlation matrices. Both halves are then the same
+                // program, so every flag below is a known false alarm.
+                let (xa, xb) = match &b {
+                    Some(b) => (a.endpoint(ci, name), b.endpoint(ci, name)),
+                    None => {
+                        let all = a.endpoint(ci, name);
+                        let half = all.len() / 2;
+                        (all[..half].to_vec(), all[half..].to_vec())
+                    }
+                };
                 let e = stats::equivalence_unpaired(&xa, &xb, band);
                 // The gate is "nothing REFUTED". An undetermined endpoint means the
                 // sample could not decide, which is a statement about the sample, not
@@ -330,7 +352,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                     ));
                 }
                 for q in GATED_QUANTILES {
-                    let qe = stats::quantile_equivalence(&xa, &xb, q, band);
+                    let qe = stats::quantile_equivalence(&xa, &xb, q, shape_band);
                     // The same rule the mean gate follows: a test that cannot resolve the
                     // band does not get to refute on it.
                     //
@@ -448,7 +470,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 "shape gates: all endpoints within +/-{:.0}% on scatter and \
                  +/-{:.1}% at q5/q50/q95",
                 100.0 * SD_BAND,
-                100.0 * band
+                100.0 * shape_band
             );
         } else {
             println!(
@@ -462,6 +484,33 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             if shape_failures.len() > 20 {
                 println!("  ... and {} more", shape_failures.len() - 20);
             }
+        }
+
+        // The number that makes the count above interpretable. 14 of 375 means nothing
+        // until you know what the same gate returns when both sides are the same program.
+        let total_endpoints = verdicts.len();
+        if aa {
+            println!(
+                "\nA/A CALIBRATION -- both halves came from the SAME binary, so all {} \
+                 shape flag(s) of {} endpoint(s) are known FALSE ALARMS.\n  \
+                 false-alarm rate {:.2}% at a +/-{:.1}% quantile band.\n  \
+                 If this is near the A/B count, the band is too tight for a tail \
+                 statistic and does not measure the port. If it is near zero, the A/B \
+                 flags are real.",
+                shape_failures.len(),
+                total_endpoints,
+                100.0 * shape_failures.len() as f64 / total_endpoints.max(1) as f64,
+                100.0 * shape_band
+            );
+        } else if !shape_failures.is_empty() {
+            println!(
+                "  {} of {} endpoints ({:.2}%). This count is UNINTERPRETABLE alone -- \
+                 rerun with --aa to measure how often the same gate fires on identical \
+                 programs.",
+                shape_failures.len(),
+                total_endpoints,
+                100.0 * shape_failures.len() as f64 / total_endpoints.max(1) as f64
+            );
         }
 
         // Pooled bias across endpoints. Individual endpoints are noisy and highly

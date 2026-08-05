@@ -96,7 +96,7 @@ Short, and none of it is fidelity to the Fortran:
 | `harness/run_long.sh` | equivalence vs production Fortran: mean, scatter and quantiles, plus inter-frequency correlation and its A/A control | **once per stage**, ~1 h |
 | `harness/run_long.sh --quick` | the same at n=100 and ±10% | **bisection only**, never a certification |
 
-Two rules about gates themselves, both learned the hard way:
+Three rules about gates themselves, all learned the hard way:
 
 - **Every gate asserts its own resolution, not only its verdict.** A tier that cannot
   resolve the band it claims to test has *abstained*, and abstention must not be spelled
@@ -104,6 +104,24 @@ Two rules about gates themselves, both learned the hard way:
   nothing checked that the sample could decide anything.
 - **A gate that cannot fail is worse than no gate**, because it reads as coverage. Delete
   it rather than leave it.
+- **Every gate reports its own false-alarm rate, measured against a null run.** This is the
+  mirror of the first rule and it cost a whole campaign to learn. Stage 3's LONG returned
+  373 of 375 certified on the mean with 0 refuted — and its new quantile gate flagged 14 of
+  375, with no way to ask how many it flags when *both sides are the same program*. A count
+  with no null beside it is uninterpretable: 14 could be a defect or it could be the gate's
+  resting pulse. Tier D was never in that position, because it prints its family-wise
+  false-alarm rate (53.7%) next to every verdict, and that number is the only reason its
+  lone `p=0.005` reads as expected rather than alarming. **A gate with no null is not a
+  gate, it is an opinion.**
+
+Two corollaries, both of which the quantile gate got wrong:
+
+- **A band derived for one statistic does not transfer to another.** The ±2% band is a
+  deliberate choice about IM *means*. A tail quantile is a much noisier statistic at the
+  same `n`, so the same numeric band is a materially stricter test — which is why
+  `--shape-band` is now separate from `--band`.
+- **A family of tests needs a multiplicity correction.** Tier D Holm-corrects its 15. The
+  quantile gate refutes per-endpoint across **375** and corrects nothing.
 
 Replay-parity goes **red by design** when a commit changes the draw structure. That is the
 gate saying "this one needs the long tier", which is the correct answer for exactly those
