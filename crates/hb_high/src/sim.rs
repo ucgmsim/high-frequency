@@ -29,7 +29,7 @@ use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
 };
 use crate::fort::{truncate_toward_zero, Complex32};
-use crate::geom::{subfault_geometry, SubfaultGeometry};
+use crate::geom::{subfault_geometry, GeoPoint, SubfaultGeometry};
 use crate::highcor::apply_radiation_and_invert;
 use crate::input::{insert_air_layer, Segment, StochModel};
 use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum};
@@ -314,7 +314,8 @@ pub fn simulate(
         let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const, deg_to_rad);
 
         let geom = subfault_geometry(
-            seg.fault_lon_deg, seg.fault_lat_deg, station.stlon, station.stlat,
+            GeoPoint { lat_deg: seg.fault_lat_deg, lon_deg: seg.fault_lon_deg },
+            GeoPoint { lat_deg: station.stlat, lon_deg: station.stlon },
             seg.strike_deg, seg.dip_deg, seg.top_depth_km, seg.along_strike_offset_km,
             seg.subfault_length_km, seg.subfault_width_km,
             seg.along_strike_count, seg.down_dip_count,

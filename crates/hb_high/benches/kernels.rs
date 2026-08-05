@@ -23,7 +23,7 @@ use std::hint::black_box;
 
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
-use hb_high::geom::subfault_geometry;
+use hb_high::geom::{subfault_geometry, GeoPoint};
 use hb_high::highcor::apply_radiation_and_invert;
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern};
 use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time, Takeoff};
@@ -409,7 +409,9 @@ fn bench_geom(c: &mut Criterion) {
             |b, &(nx, nw)| {
                 b.iter(|| {
                     subfault_geometry(
-                        173.0, -43.0, 173.1, -43.0, 220.0, 70.0, 5.0,
+                        GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                        GeoPoint { lat_deg: -43.0, lon_deg: 173.1 },
+                        220.0, 70.0, 5.0,
                         0.5 * nx as f32 * 1.5, 1.5, 1.5, nx, nw,
                     )
                 })

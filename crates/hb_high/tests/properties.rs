@@ -38,7 +38,7 @@ use hb_high::config::{
 };
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
-use hb_high::geom::{distance_azimuth, subfault_geometry};
+use hb_high::geom::{distance_azimuth, subfault_geometry, GeoPoint};
 use hb_high::input::{read_stoch, read_velocity_model, Station};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
@@ -71,7 +71,7 @@ proptest! {
     /// this routine has three separate formulations to avoid.
     #[test]
     fn self_distance_is_zero(lat in -85.0f32..85.0, lon in -180.0f32..180.0) {
-        let g = distance_azimuth(lat, lon, lat, lon);
+        let g = distance_azimuth(GeoPoint { lat_deg: lat, lon_deg: lon }, GeoPoint { lat_deg: lat, lon_deg: lon });
         prop_assert_eq!(g.deltkm, 0.0);
     }
 
@@ -81,8 +81,8 @@ proptest! {
         lat_a in -85.0f32..85.0, lon_a in -180.0f32..180.0,
         lat_b in -85.0f32..85.0, lon_b in -180.0f32..180.0,
     ) {
-        let there = distance_azimuth(lat_a, lon_a, lat_b, lon_b);
-        let back = distance_azimuth(lat_b, lon_b, lat_a, lon_a);
+        let there = distance_azimuth(GeoPoint { lat_deg: lat_a, lon_deg: lon_a }, GeoPoint { lat_deg: lat_b, lon_deg: lon_b });
+        let back = distance_azimuth(GeoPoint { lat_deg: lat_b, lon_deg: lon_b }, GeoPoint { lat_deg: lat_a, lon_deg: lon_a });
         prop_assume!(there.deltkm > 10.0);
         let rel = (there.deltkm - back.deltkm).abs() / there.deltkm;
         prop_assert!(rel < 1e-5, "{} vs {}", there.deltkm, back.deltkm);
@@ -110,7 +110,7 @@ proptest! {
     ) {
         // Reject offsets too small for the bearing itself to be well conditioned.
         prop_assume!(dlat.hypot(dlon) > 0.01);
-        let g = distance_azimuth(lat, lon, lat + dlat, lon + dlon);
+        let g = distance_azimuth(GeoPoint { lat_deg: lat, lon_deg: lon }, GeoPoint { lat_deg: lat + dlat, lon_deg: lon + dlon });
 
         // Bearing from north, with the longitude offset foreshortened by the latitude.
         let east = dlon as f64 * (lat as f64).to_radians().cos();
@@ -130,7 +130,7 @@ proptest! {
         lat_a in -85.0f32..85.0, lon_a in -180.0f32..180.0,
         lat_b in -85.0f32..85.0, lon_b in -180.0f32..180.0,
     ) {
-        let g = distance_azimuth(lat_a, lon_a, lat_b, lon_b);
+        let g = distance_azimuth(GeoPoint { lat_deg: lat_a, lon_deg: lon_a }, GeoPoint { lat_deg: lat_b, lon_deg: lon_b });
         prop_assert!((0.0..360.0).contains(&g.azesdg), "azimuth {} out of range", g.azesdg);
         prop_assert!(
             (0.0..std::f32::consts::TAU).contains(&g.azes),
@@ -153,7 +153,7 @@ fn cardinal_azimuths_and_degree_scale() {
         (-1.0, 0.0, 180.0, "south"),
         (0.0, -1.0, 270.0, "west"),
     ] {
-        let g = distance_azimuth(0.0, 0.0, dlat, dlon);
+        let g = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: dlat, lon_deg: dlon });
         assert!(
             angle_gap_deg(g.azesdg, want_az) < 0.01,
             "due {what}: azimuth {}, want {want_az}",
@@ -166,8 +166,8 @@ fn cardinal_azimuths_and_degree_scale() {
         );
     }
     // Flattening: a degree of latitude is the shorter of the two.
-    let lat_km = distance_azimuth(0.0, 0.0, 1.0, 0.0).deltkm;
-    let lon_km = distance_azimuth(0.0, 0.0, 0.0, 1.0).deltkm;
+    let lat_km = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: 1.0, lon_deg: 0.0 }).deltkm;
+    let lon_km = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: 0.0, lon_deg: 1.0 }).deltkm;
     assert!(lat_km < lon_km, "lat {lat_km} should be < lon {lon_km} at the equator");
 }
 
@@ -189,7 +189,8 @@ proptest! {
     ) {
         let (along, down) = (4usize, 3usize);
         let g = subfault_geometry(
-            173.0, -43.0, 173.0 + station_offset_deg, -43.0,
+            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 + station_offset_deg },
             220.0, dip_deg, top_depth_km, 0.5 * along as f32 * subfault_km,
             subfault_km, subfault_km, along, down,
         );
@@ -214,7 +215,9 @@ proptest! {
     fn depth_increases_down_dip(dip_deg in 5.0f32..85.0, top_depth_km in 0.5f32..25.0) {
         let (along, down) = (3usize, 5usize);
         let g = subfault_geometry(
-            173.0, -43.0, 173.5, -43.0, 220.0, dip_deg, top_depth_km,
+            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+            GeoPoint { lat_deg: -43.0, lon_deg: 173.5 },
+            220.0, dip_deg, top_depth_km,
             0.5 * along as f32 * 1.5, 1.5, 1.5, along, down,
         );
         for i in 1..=along {

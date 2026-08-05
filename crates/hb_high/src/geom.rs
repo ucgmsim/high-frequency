@@ -1,6 +1,21 @@
 //! Source-receiver geometry. Tier 0 holds `DELAZ5`; `subfault_geometry` lands here in
 //! tier 1.
 
+/// A point on the ellipsoid.
+///
+/// This exists because the two entry points in this file disagreed. `distance_azimuth`
+/// took **lat first**; `subfault_geometry` took **lon first**, 120 lines away. Both were
+/// called correctly, so it was a latent trap rather than a live bug — but transposing a
+/// lat/lon pair yields a *plausible* distance and a *plausible* azimuth, which then feed
+/// the path-duration table and the `1/R` geometric spreading. Nothing would look wrong.
+///
+/// Named fields make the order unstatable rather than merely documented.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeoPoint {
+    pub lat_deg: f32,
+    pub lon_deg: f32,
+}
+
 /// Outputs of [`distance_azimuth`].
 ///
 /// Four of the Fortran's seven outputs are gone with §2.5: `delt` and `deltdg` (the
@@ -56,12 +71,7 @@ static WGS84: std::sync::OnceLock<geographiclib_rs::Geodesic> = std::sync::OnceL
 /// `DELAZ5` took a flag selecting geographic degrees or geocentric radians. The radians
 /// path was dead — `subfault_geometry` assigned `0` immediately before its first call and
 /// passed the literal `0` at its second, and those were the only live callers.
-pub fn distance_azimuth(
-    event_lat_deg: f32,
-    event_lon_deg: f32,
-    station_lat_deg: f32,
-    station_lon_deg: f32,
-) -> DistanceAzimuth {
+pub fn distance_azimuth(event: GeoPoint, station: GeoPoint) -> DistanceAzimuth {
     use geographiclib_rs::InverseGeodesic;
 
     let geodesic = WGS84.get_or_init(geographiclib_rs::Geodesic::wgs84);
@@ -72,10 +82,10 @@ pub fn distance_azimuth(
     // a distance is expected.
     let (metres, azimuth_deg, _back_azimuth_deg, _arc_deg): (f64, f64, f64, f64) = geodesic
         .inverse(
-            event_lat_deg as f64,
-            event_lon_deg as f64,
-            station_lat_deg as f64,
-            station_lon_deg as f64,
+            event.lat_deg as f64,
+            event.lon_deg as f64,
+            station.lat_deg as f64,
+            station.lon_deg as f64,
         );
 
     // geographiclib reports azimuth in (-180, 180]; the callers want [0, 360). Wrapping
@@ -93,28 +103,6 @@ pub fn distance_azimuth(
     DistanceAzimuth { deltkm: (metres / 1000.0) as f32, azes, azesdg }
 }
 
-/// `subroutine subfault_geometry(...)` — `hb_high_ref.f:2593`.
-///
-/// Per-subfault source-to-receiver geometry for a single planar fault segment.
-/// Fills five `(nq, np)` arrays, indexed `(i, j)` for along-strike and down-dip:
-///
-/// * `dst` — horizontal epicentral distance, km
-/// * `rl`  — slant range from subfault centre to station, km
-/// * `th`  — take-off angle, radians, measured as `pi - atan2(dis, depth)`
-/// * `ph`  — azimuth, radians (`azes` straight from `DELAZ5`)
-/// * `zet` — subfault depth, km
-///
-/// `along_strike_offset_km` is half the fault length along strike, so
-/// `(i-0.5)*subfault_length_km - along_strike_offset_km` centres the along-strike
-/// coordinate on the reference point.
-///
-/// The degree-to-km scale factors `ddx`/`ddy` are obtained empirically: two
-/// `DELAZ5` calls one degree apart in longitude and in latitude respectively.
-/// Both `x` and `y` are computed on each pass but only one is kept, matching the
-/// Fortran.
-///
-/// Everything here is `f32`; there is no double-precision arithmetic.
-#[allow(clippy::too_many_arguments)]
 /// One subfault's source-to-station geometry.
 ///
 /// The Fortran keeps these as five separate `(nq, np)` arrays named `rlsu`, `phsu`,
@@ -178,12 +166,31 @@ impl SubfaultGeometry {
     }
 }
 
+/// `subroutine subfault_geometry(...)` — `hb_high_ref.f:2593`.
+///
+/// Per-subfault source-to-receiver geometry for a single planar fault segment.
+/// Fills five `(nq, np)` arrays, indexed `(i, j)` for along-strike and down-dip:
+///
+/// * `dst` — horizontal epicentral distance, km
+/// * `rl`  — slant range from subfault centre to station, km
+/// * `th`  — take-off angle, radians, measured as `pi - atan2(dis, depth)`
+/// * `ph`  — azimuth, radians (`azes` straight from `DELAZ5`)
+/// * `zet` — subfault depth, km
+///
+/// `along_strike_offset_km` is half the fault length along strike, so
+/// `(i-0.5)*subfault_length_km - along_strike_offset_km` centres the along-strike
+/// coordinate on the reference point.
+///
+/// The degree-to-km scale factors `ddx`/`ddy` are obtained empirically: two
+/// `DELAZ5` calls one degree apart in longitude and in latitude respectively.
+/// Both `x` and `y` are computed on each pass but only one is kept, matching the
+/// Fortran.
+///
+/// Everything here is `f32`; there is no double-precision arithmetic.
 #[allow(clippy::too_many_arguments)]
 pub fn subfault_geometry(
-    fault_lon_deg: f32,
-    fault_lat_deg: f32,
-    station_lon_deg: f32,
-    station_lat_deg: f32,
+    fault: GeoPoint,
+    station: GeoPoint,
     strike_deg: f32,
     dip_deg: f32,
     top_depth_km: f32,
@@ -202,7 +209,7 @@ pub fn subfault_geometry(
 
     // Was the source's own 9-digit `3.14159265`; now the correctly rounded value.
     let pi = std::f32::consts::PI;
-    let thei = fault_lat_deg;
+    let thei = fault.lat_deg;
 
     // Degrees-to-km scale factors, obtained empirically: one geodesic solve a degree east,
     // one a degree north.
@@ -215,16 +222,17 @@ pub fn subfault_geometry(
     //
     // Note the SCALE is what is wanted, not a position: both solves start from
     // (thei, 0.0), so only the one-degree offset matters.
-    let east = distance_azimuth(thei, 0.0, thei, 1.0);
-    let north = distance_azimuth(thei, 0.0, thei + 1.0, 0.0);
+    let origin = GeoPoint { lat_deg: thei, lon_deg: 0.0 };
+    let east = distance_azimuth(origin, GeoPoint { lat_deg: thei, lon_deg: 1.0 });
+    let north = distance_azimuth(origin, GeoPoint { lat_deg: thei + 1.0, lon_deg: 0.0 });
     let ddx = east.deltkm * (pi * east.azesdg / 180.0).sin();
     let ddy = north.deltkm * (pi * north.azesdg / 180.0).cos();
 
     let az = strike_deg * pi / 180.0;
     let dip = dip_deg * pi / 180.0;
 
-    let ylat = fault_lat_deg;
-    let xlon = fault_lon_deg;
+    let ylat = fault.lat_deg;
+    let xlon = fault.lon_deg;
 
     // The Fortran runs `i` outer / `j` inner while the storage is strike-fastest, so its
     // writes are strided. Unlike the subfault pass in `sim`, the order here is FREE:
@@ -251,7 +259,7 @@ pub fn subfault_geometry(
             let stlon = xlon + dlon / ddx;
             let stlat = ylat + dlat / ddy;
 
-            let g = distance_azimuth(stlat, stlon, station_lat_deg, station_lon_deg);
+            let g = distance_azimuth(GeoPoint { lat_deg: stlat, lon_deg: stlon }, station);
             let dis = g.deltkm;
 
             *ray = SubfaultRay {

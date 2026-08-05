@@ -33,7 +33,7 @@
 
 use hb_high::fft::remove_quadratic_trend;
 use hb_high::fort::{Complex32, Complex64};
-use hb_high::geom::distance_azimuth;
+use hb_high::geom::{distance_azimuth, GeoPoint};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
@@ -100,7 +100,10 @@ fn distance_azimuth_stays_close_to_fortran() {
         // exercised it rather than trusting the old comment that said so.
         assert!(iflag <= 0, "case {n} used the dead coord_mode > 0 path");
 
-        let g = distance_azimuth(thei, alei, thsi, alsi);
+        let g = distance_azimuth(
+            GeoPoint { lat_deg: thei, lon_deg: alei },
+            GeoPoint { lat_deg: thsi, lon_deg: alsi },
+        );
 
         // At zero separation the azimuth is arbitrary in both formulations.
         if want_km > 1.0 {

@@ -12,7 +12,7 @@
 //! them would mean editing the drivers and regenerating every golden, and the names
 //! are useful provenance where they are. See `REFACTOR.md` §1.4b.
 
-use hb_high::geom::subfault_geometry;
+use hb_high::geom::{subfault_geometry, GeoPoint};
 use hb_high::ray::{geometric_spreading, build_ray_path, Takeoff};
 use hb_high::site::site_amplification_factors;
 use hb_high::state::{RayState, VelocityModel};
@@ -193,7 +193,9 @@ fn subfault_geometry_stays_close_to_fortran() {
         let (dx, dy) = (r.f32(), r.f32());
 
         let g = subfault_geometry(
-            xlonq, ylatq, slon, slat, azmq, dipangq, zm, astop, dx, dy, nx, nw,
+            GeoPoint { lat_deg: ylatq, lon_deg: xlonq },
+            GeoPoint { lat_deg: slat, lon_deg: slon },
+            azmq, dipangq, zm, astop, dx, dy, nx, nw,
         );
 
         // Driver dump order: ((dst,rl,th,ph,zet), j=1,nw), i=1,nx)
