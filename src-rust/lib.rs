@@ -36,6 +36,24 @@ use pyo3::prelude::*;
 /// `acc.len()` on every station rather than trusted.
 const COMPONENT_COUNT: usize = 3;
 
+/// `nl_skip`, fixed because there is nothing for a caller to choose.
+///
+/// A non-negative `nl_skip` routes the velocity model through `grandvel`, which is dead
+/// under the production deck and **not ported** — `sim.rs:300` asserts against it. So the
+/// only legal values are negative, and exposing the parameter could only offer callers a
+/// panic.
+///
+/// It is −99, production's value, and not −1, because of a sentinel-arithmetic hazard worth
+/// naming: `insert_air_layer` does `skip_layers + 1` when it prepends the air layer, which
+/// is right for a *count* of layers to skip and wrong for a *flag* meaning "off". Every
+/// production velocity model has a first layer thick enough to trigger the insertion, so
+/// `-1` becomes `0` and panics. −99 has room to absorb the shift.
+///
+/// The real fix is for this to be an `Option<usize>` so a flag cannot be incremented, but
+/// that changes `HfConfig` for the deck path too, and the deck path has to stay
+/// certifiable until §4.2. Revisit when `deck.rs` goes.
+const NO_VELOCITY_PERTURBATION: i32 = -99;
+
 /// One fault segment: geometry plus the three subfault grids.
 ///
 /// Grids are `(down_dip, along_strike)`, matching `source_modelling.stoch.StochFile`'s
@@ -236,7 +254,6 @@ impl PyVelocityModel {
     moment=None, vs_moho_km_s=None, fault_area_km2=None, target_magnitude=None,
     fourier_amplitude_sigma_1=0.0, fourier_amplitude_sigma_2=0.0,
     rupture_velocity_sigma=0.0, path_duration_model=0, stress_adjust_model=0,
-    layer_skip=-1,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _simulate_stations<'py>(
@@ -269,7 +286,6 @@ fn _simulate_stations<'py>(
     rupture_velocity_sigma: f32,
     path_duration_model: i32,
     stress_adjust_model: i32,
-    layer_skip: i32,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
     let (latitude, longitude, seeds) =
         (latitude_deg.as_slice()?, longitude_deg.as_slice()?, station_seed.as_slice()?);
@@ -313,7 +329,7 @@ fn _simulate_stations<'py>(
         moment,
         rupture_velocity_override,
         vs_moho: vs_moho_km_s,
-        nl_skip: layer_skip,
+        nl_skip: NO_VELOCITY_PERTURBATION,
         fa_sig1: fourier_amplitude_sigma_1,
         fa_sig2: fourier_amplitude_sigma_2,
         rv_sig1: rupture_velocity_sigma,
