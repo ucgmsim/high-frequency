@@ -1,7 +1,7 @@
-# Engineering rules — Stage 3 onward
+# Engineering rules
 
 `PORTING_RULES.md` governed the transliteration and is now archaeology: it explains why
-`hb_high_ref.f` does what it does, which is still needed for reading the oracle, but it
+`hb_high_ref.f` does what it does, which is still the fastest way to read the original, but it
 stopped describing this crate. **This document governs the crate.**
 
 The change in goal is the point. Stages 1–2 optimised for demonstrable fidelity to a
@@ -43,19 +43,22 @@ Extend the conventions already in force rather than inventing new ones:
 
 - No cryptic contractions. `flzero` became `remove_quadratic_trend`.
 - Three-character minimum, exempting coefficients and real coordinates (`x`, `y`, `z`),
-  `new`, `at`, and the deck readers where the name *is* the type (`f32`, `i32`).
+  `new` and `at`. The deck readers that used to be exempt — where the method name *was* the
+  type, `f32()`/`i32()` — went with `deck.rs` in §4.3.
 - Unit suffixes on public arguments — `_km`, `_s`, `_rad`, `_hz`. `dt` is exempt; its
   interpretation is unambiguous.
-- **Keep the provenance line.** Every ported routine's doc comment names its Fortran
-  original and `hb_high_ref.f:NNN`. That is what lets a reader trace back to the oracle we
-  still validate against, and it survives at 29 sites.
+- **Keep the provenance line.** Every ported routine's doc comment names its Fortran original
+  and `hb_high_ref.f:NNN`. §4.3 deleted `reference/`, which makes these *more* valuable rather
+  than less: they are now the only map from this code back to the original, and the original
+  is recoverable from git history when a question needs it.
 - Lints are `warn`, never `deny`, and a suppression is a targeted `#[allow]` **with the
   reason written next to it**. A crate-root blanket is how 28 warnings accumulated unseen.
 
 ## 4. Efficiency beats obedience
 
 Reassociation, vectorisation, hoisting, tabulation, changed draw counts, threading: all
-legal. **A measured win needs no fidelity justification** — only a long-tier verdict.
+legal. **A measured win needs no fidelity justification** — only a green snapshot, or, if it
+moves the snapshot, an argument for why the new numbers are right (see §6).
 
 Two things this specifically unblocks, both previously forbidden:
 
@@ -64,8 +67,8 @@ Two things this specifically unblocks, both previously forbidden:
   an order deliberately, measure it, record it* — and reassociation may well be **more**
   accurate, since pairwise summation beats a left-to-right `f32` fold over 16384 samples.
 - **Draw counts.** The number of random draws was a reproducibility contract with every
-  golden and CSV in the repo. Stage 3 breaks it deliberately, once, with the long tier
-  adjudicating.
+  golden and CSV in the repo. Stage 3 broke it deliberately, once, with the long tier
+  adjudicating; the long tier is gone, so a future break needs the reasoning written down.
 
 **Measure, do not assume.** This repo has a good record of measuring things that turned
 out the opposite way round: `lto = "fat"` is 1.2% *slower*, `overflow-checks = false` is
@@ -78,9 +81,10 @@ you have not measured.
 
 Short, and none of it is fidelity to the Fortran:
 
-- **The output format.** Raw little-endian `f32`, component index fastest, written at a
-  seek offset into a non-truncated file, plus the `(1x,f10.4)` distance on stderr.
-  `hf_sim.py` parses both.
+- **The component order** of the returned array — 090, 000, vertical. §4.3 deleted the raw
+  `f32`-at-a-seek-offset file and the `(1x,f10.4)` distance on stderr along with the CLI
+  driver, because a Python caller gets an array and a `PyErr`. What survives is the order the
+  three channels come in, which `hf_sim.py` labels and `bb_sim` consumes positionally.
 - **Same-version determinism.** One seed, one build, one answer. Free to change *across*
   versions — results are regenerable by pinning the commit — but never within one.
 - **`next_f32`'s 24-bit conversion.** Not fidelity: dividing a full `u32` by 2³² rounds
