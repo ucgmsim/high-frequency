@@ -39,7 +39,7 @@ use hb_high::config::{
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fort::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry, GeoPoint};
-use hb_high::input::{read_stoch, read_velocity_model, Station};
+use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::radiation::radiation_pattern;
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
@@ -756,20 +756,31 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 /// Render a `.stoch` file for the given segment shapes, with slip `1.0` everywhere.
-fn stoch_text(segments: &[(usize, usize, f32, f32)]) -> String {
-    let mut out = format!("{}\n", segments.len());
-    for &(along, down, length_km, width_km) in segments {
-        out.push_str(&format!("173.0 -43.0 {along} {down} {length_km} {width_km}\n"));
-        out.push_str("220.0 60.0 0.0 5.0 1.0 2.0\n");
-        for _block in 0..3 {
-            for _row in 0..down {
-                let row: Vec<String> = (0..along).map(|_| "1.0".to_string()).collect();
-                out.push_str(&row.join(" "));
-                out.push('\n');
-            }
-        }
-    }
-    out
+fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
+    let built = segments
+        .iter()
+        .map(|&(along, down, length_km, width_km)| {
+            Segment::builder()
+                .fault_lon_deg(173.0)
+                .fault_lat_deg(-43.0)
+                .along_strike_count(along)
+                .down_dip_count(down)
+                .subfault_length_km(length_km)
+                .subfault_width_km(width_km)
+                .strike_deg(220.0)
+                .dip_deg(60.0)
+                .rake_deg(0.0)
+                .top_depth_km(5.0)
+                .hypocentre_along_strike_km(1.0)
+                .hypocentre_down_dip_km(2.0)
+                .subfaults(vec![
+                    Subfault { slip: 1.0, rise_time_s: 1.0, rupture_time_s: 1.0 };
+                    along * down
+                ])
+                .build()
+        })
+        .collect();
+    StochModel::new(built, hb_high::config::DEG_TO_RAD)
 }
 
 proptest! {
@@ -782,8 +793,7 @@ proptest! {
             (1usize..6, 1usize..5, 0.5f32..3.0, 0.5f32..3.0), 1..4,
         ),
     ) {
-        let text = stoch_text(&shapes);
-        let model = read_stoch(&text, hb_high::config::DEG_TO_RAD).expect("valid stoch");
+        let model = slip_model(&shapes);
 
         prop_assert_eq!(model.segments.len(), shapes.len());
 
@@ -825,18 +835,27 @@ proptest! {
 
 /// A plausible layered velocity model: thin slow layers near the surface, thickening and
 /// speeding up with depth, zero-thickness base as the reader expects.
-fn velocity_model_text(layers: usize) -> String {
-    let mut out = format!("{layers}\n");
-    for k in 0..layers {
-        let frac = k as f64 / (layers - 1) as f64;
-        let thickness = if k == layers - 1 { 0.0 } else { 0.05 + 3.0 * frac };
-        let vsh = 0.5 + 4.1 * frac;
-        let vp = vsh * 1.75;
-        let density = 1.81 + 1.5 * frac;
-        let qs = 50.0 + 150.0 * frac;
-        out.push_str(&format!("{thickness} {vp} {vsh} {density} {} {qs}\n", 2.0 * qs));
-    }
-    out
+fn velocity_model(layers: usize) -> (hb_high::state::VelocityModelInput, usize) {
+    let built: Vec<hb_high::state::InputLayer> = (0..layers)
+        .map(|k| {
+            let frac = k as f64 / (layers - 1) as f64;
+            let vsh_km_s = 0.5 + 4.1 * frac;
+            let qs = 50.0 + 150.0 * frac;
+            hb_high::state::InputLayer {
+                // Derived by build_velocity_model, which accumulates it down the column.
+                depth_km: 0.0,
+                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                vp_km_s: vsh_km_s * 1.75,
+                vsh_km_s,
+                density_g_cm3: 1.81 + 1.5 * frac,
+                attenuation_p: (2.0 * qs) as f32,
+                attenuation_s: qs as f32,
+            }
+        })
+        .collect();
+    let mut vmod = hb_high::state::VelocityModelInput::new();
+    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
+    (vmod, count)
 }
 
 /// Production-shaped configuration, with the seed left to the caller.
@@ -874,11 +893,8 @@ fn config(seed: u64) -> HfConfig {
 
 /// Run one station through the whole simulation.
 fn run(seed: u64) -> hb_high::sim::Simulation {
-    let slip = read_stoch(&stoch_text(&[(4, 3, 1.5, 1.5)]), hb_high::config::DEG_TO_RAD)
-        .expect("valid stoch");
-    let mut vmod = hb_high::state::VelocityModelInput::new();
-    let layer_count = read_velocity_model(&velocity_model_text(20), &mut vmod, 999.9)
-        .expect("valid velocity model");
+    let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
+    let (vmod, layer_count) = velocity_model(20);
     let station = Station { stlon: 173.4, stlat: -43.1, cap: "TEST".to_string() };
     hb_high::sim::simulate(&config(seed), &slip, &vmod, layer_count, station)
         .expect("simulation should succeed")
