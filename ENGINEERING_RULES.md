@@ -130,9 +130,9 @@ draw structure — the campaign is recoverable from git history at `71d43c3` or 
 
 **It has been done once, so the recipe is known rather than hoped for.** In a worktree, restore
 `crates/im`, `crates/validate`, `reference/` and `harness/{build_ref,bench_vs_fortran,run_long}.sh`
-from `71d43c3`, add the two crates to the workspace members, and build the Fortran with
-`harness/build_ref.sh` plus the `-O2 -DUSE_FFTW` `hb_prod` leg. Four things have drifted since
-and must be patched, none of them deep:
+from `71d43c3`, add the two crates to the workspace members, restore `hb_high`'s `[[bin]]`
+section, and build the Fortran with `harness/build_ref.sh` plus the `-O2 -DUSE_FFTW` `hb_prod`
+leg. It has now been done twice; these are the drifts, none of them deep:
 
 - `crates/im` imports `hb_high::fort`, which §5.3 deleted — it is `hb_high::fft` now;
 - `validate` drives an executable that reads a deck on stdin and writes raw `f32`, so `deck.rs`,
@@ -141,6 +141,31 @@ and must be patched, none of them deep:
 - `Segment::subfaults` is private, so the restored reader needs `pub(crate)`;
 - `Simulation::d10_km` is gone. `validate` parses it from stderr as a CSV **label only** — it
   feeds no statistic and no verdict — so writing `NaN` costs the campaign nothing.
+
+Added after the second run, all from the Todoist sweep:
+
+- **`main.rs` must resolve the deck's default sentinels itself.** The Fortran reads any of
+  `rvfac`, `shal_rvfac`, `deep_rvfac`, `Czero`, `Calpha` below `-1.0` as "use the built-in
+  default", and `mkdeck.py` writes `CALPHA = -99.0`, so the campaign exercises it. That decode
+  used to live in `HfConfig`'s `Option` fields; the config takes concrete values now, so the
+  deck reader owns it. **Get this wrong and every non-strike-slip corner frequency is
+  negative** — see the same bug found live in the `workflow` repo's defaults.
+- **`VelocityModelInput::new()` compiles and means `Vec::new()`** — an empty model, not a
+  500-layer buffer. The restored `read_velocity_model` indexed into it and panicked
+  immediately. It must `resize` first and `truncate` at the Moho.
+- `Simulation::acc` is `(component, sample)` since §5.2. The Fortran's output format is
+  **interleaved**, component fastest, and `im::split_components` reads it back that way, so
+  `main.rs` writes the array's columns.
+- `HfConfig` no longer carries the seed, the site-amplification switch or `vs_moho`. The deck
+  still supplies all three, so the reader returns them alongside the config: the seed is an
+  argument to `Simulator::run`, site amplification is unconditional, and `vs_moho` belongs to
+  the velocity model. A deck that disables site amplification is now refused rather than
+  silently run with it on.
+- The options the sweep deleted — `mom`, `rupv`, `fa_sig1`/`fa_sig2`, the
+  `stress_parameter_adjustment_*` trio — are read and **checked against their inert values**
+  rather than ignored. `mkdeck.py` writes the inert value for every one, so the campaign is
+  unaffected; a deck that set one would be refused rather than quietly compared against a
+  program that cannot honour it.
 
 **Run it without `--baseline`.** That flag overwrites the certified CSVs, and a worktree shim is
 not what should be certifying anything.
