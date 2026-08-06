@@ -785,8 +785,6 @@ fn subfault_pass(
         let density_g_cm3 = vmod[source_layer].density_g_cm3 as f32;
 
         let base_rvf = rupture.factor(ray_geometry.depth_km);
-        // Capped, not floored: the ceiling is what stops the perturbation driving the rupture
-        // supershear.
         let rupture_fraction = if run.rupture_velocity_sigma > 0.0 {
             (base_rvf * (normal_deviate(rng) * run.rupture_velocity_sigma).exp())
                 .min(RUPTURE_VELOCITY_FRACTION_MAX)
@@ -928,13 +926,11 @@ fn subfault_pass(
                 );
             }
 
-            // Rupture time at this subfault, taken from the slip model.
-            let ratim = subfault.rupture_time_s;
-
             // Both terms truncate TOWARD ZERO, not toward negative infinity, so a negative
             // `window_start_s` makes `kst` smaller and possibly negative. `accumulate_subfault`
             // relies on that and clips; see `PORTING_RULES.md` §7.
-            let kst = (ratim / run.dt).trunc() as i32 + (window_start_s / run.dt).trunc() as i32;
+            let kst = (subfault.rupture_time_s / run.dt).trunc() as i32
+                + (window_start_s / run.dt).trunc() as i32;
 
             // ONE DRAW, AND IT MUST STAY. A sub-event loop here once drew a uniform and
             // turned it into a time offset, but the sub-event count was frozen at 1 and the
