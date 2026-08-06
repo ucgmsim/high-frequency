@@ -35,8 +35,9 @@ Graves & Pitarka**, and `stoc.rs` is Boore (1983) eq. 1–11 with Frankel's fini
 | `Anderson_Hough_1984_kappa_BSSA74.pdf` | Anderson, J. G. & Hough, S. E. (1984). A model for the shape of the Fourier amplitude spectrum of acceleration at high frequencies. *BSSA* **74**(5), 1969–1993. | user (paywalled) | **verified** — abstract, p. 1969 |
 | `Saragoni_Hart_1974_artificial_earthquakes_EESD2.pdf` | Saragoni, G. R. & Hart, G. C. (1974). Simulation of artificial earthquakes. *Earthq. Eng. Struct. Dyn.* **2**, 249–267. | user (paywalled) | identity verified p. 249; the parameterisation actually implemented is Boore (1983) eq. 7–11 |
 | `Boore_2003_stochastic_method_PAG160.pdf` | Boore, D. M. (2003). Simulation of ground motion using the stochastic method. *Pure appl. geophys.* **160**, 635–676. | daveboore.com (open) | identity verified p. 635; useful as the modern review, not as the source of any specific line |
-| `Boore_Thompson_2014_path_durations_BSSA104.pdf` | Boore, D. M. & Thompson, E. M. (2014). Path durations for use in the stochastic-method simulation of ground motions. *BSSA* **104**(5), 2541–2552. | daveboore.com (open) | held for `config.rs` path-duration model 11; **breakpoints not yet checked** |
+| `Boore_Thompson_2014_path_durations_BSSA104.pdf` | Boore, D. M. & Thompson, E. M. (2014). Path durations for use in the stochastic-method simulation of ground motions. *BSSA* **104**(5), 2541–2552. doi:10.1785/0120140058 | daveboore.com (open) | **verified** — Table 1, p. 2546: all six breakpoints exact, and the paper's linear interpolation is what the code does. Also confirms finding 7 |
 | `Boore_DiAlessandro_Abrahamson_2014_double_corner_BSSA104.pdf` | Boore, D. M., Di Alessandro, C. & Abrahamson, N. A. (2014). A generalization of the double-corner-frequency source spectral model… *BSSA* **104**(5), 2387–2398. | daveboore.com (open) | **verified** — eq. 4–7, p. 2388. Used to *rule out* a double-corner reading; see finding 4 |
+| `Boore_2015.pdf` | Boore, D. M. & Thompson, E. M. (2015). Revisions to some parameters used in stochastic-method simulations of ground motion. *BSSA* **105**(2A), 1029–1041. doi:10.1785/0120140281 | user | **verified** — Table 3, p. 1034: all eight breakpoints exact, and the 0.111 s/km tail slope agrees with the code to 0.05%. See finding 7 |
 | `Brune_1970_tectonic_stress_spectra_JGR75.pdf` | Brune, J. N. (1970). Tectonic stress and the spectra of seismic shear waves from earthquakes. *JGR* **75**(26), 4997–5009. | user (paywalled) | cited via Boore (1983) eq. 3 and 5; **Brune's own equations not read** |
 
 ## Not needed after all
@@ -73,6 +74,28 @@ and the finite-fault assembly is **Graves & Pitarka (2010) eq. 10–17**:
 | eq. 15 `q_k = a + b·β_k` | `qbar = R/(β·150)` | i.e. `a=0`, `b=150` |
 | eq. 16 `P(f) = exp(−πκf)` | the `kappa > 0` branch | Anderson & Hough (1984) |
 | eq. 17 `T_di = f_ci^{−1} + c₁R_i`, `c₁=0.063` | `PathDurationModel` default | **exact** |
+
+### Boore & Thompson (2014), Table 1 — path-duration model 11
+
+| paper | code | status |
+|---|---|---|
+| breakpoints `R` = 0, 7, 45, 125, 175, 270 km | `path_duration_table` | **exact** |
+| durations `D_P` = 0, 2.4, 8.4, 10.9, 17.4, 34.2 s | same | **exact** |
+| "linear interpolation of the tabulated values" | `from_breakpoints` differences consecutive pairs | **exact** |
+| "slope of last segment 0.156" s/km | copies the final segment's 0.177 | **DEVIATES** — see finding 7 |
+
+### Boore & Thompson (2015), Table 3 — path-duration model 12
+
+| paper | code | status |
+|---|---|---|
+| breakpoints `R_PS` = 0, 15, 35, 50, 125, 200, 392, 600 km | `path_duration_table` | **exact** |
+| durations `D_P` = 0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1 s | same | **exact** |
+| "linear interpolation … not logarithms of these quantities" | `from_breakpoints` | **exact** |
+| `D_P(R) = D_P(R_last) + 0.111(R − R_last)` | copies the final segment's 0.111058 | **agrees to 0.05%** |
+
+Model 12 does *not* have model 11's problem: here the paper's tail slope and the last
+tabulated segment's slope are the same number, so repeating the segment is right by
+coincidence rather than by construction.
 
 ## Findings
 
@@ -166,6 +189,61 @@ what showed the code is right.
   surrounding text.
 - `site.rs`'s quarter-wavelength amplification → **Boore & Joyner (1997)**, which is what G&P
   (2010) cite for it, *not* Boore (2003).
+
+### 7. Path-duration model 11 extrapolates past 270 km on the wrong slope
+
+Boore & Thompson (2014) Table 1 tabulates six `(R, D_P)` breakpoints and then gives, as a
+separate row, **"slope of last segment 0.156"** s/km — the rate to use beyond the last
+breakpoint. It is not the slope of the final tabulated segment, which is
+`(34.2 − 17.4)/(270 − 175) = 0.177` s/km.
+
+The code uses 0.177: `from_breakpoints` repeats the last tabulated slope, reproducing the
+original's `dpdr(ndur) = dpdr(ndur-1)`. So the deviation is **in the model as implemented
+upstream, not introduced by this port**, and it makes durations about 13% longer than the
+paper for ray paths past 270 km — a distance only the largest faults reach.
+
+**How much it matters.** The error is `(0.177 − 0.156)(R − 270) = 0.0208(R − 270)` seconds of
+path duration, and the record window is `2.12 ×` that:
+
+| `R` (km) | `D_P` paper | `D_P` code | error | | window |
+|---:|---:|---:|---:|---:|---:|
+| 300 | 38.9 s | 39.5 s | +0.63 s | +1.6% | +1.3 s |
+| 400 | 54.5 s | 57.2 s | +2.71 s | +5.0% | +5.7 s |
+| 500 | 70.1 s | 74.9 s | +4.79 s | +6.8% | +10.2 s |
+| 600 | 85.7 s | 92.6 s | +6.88 s | +8.0% | +14.6 s |
+
+**This is the operating regime, not an edge case.** The Alpine Fault fixture is a 411 km
+rupture striking 057°, and production domains run out to the lower North Island. Slant
+distances to the subfaults, and the resulting error:
+
+| station | min `R` | max `R` | subfaults > 270 km | mean `D_P` error | mean window | peak amp. |
+|---|---:|---:|---:|---:|---:|---:|
+| Hokitika | 30 km | 409 km | 34% | +1.4 s | +3.1 s | −1.6% |
+| Christchurch | 128 km | 482 km | 55% | +2.2 s | +4.6 s | −2.1% |
+| Nelson | 252 km | 659 km | 96% | +4.0 s | +8.5 s | −3.0% |
+| Wellington | 347 km | 756 km | **100%** | +5.8 s | +12.4 s | −3.6% |
+| Palmerston North | 465 km | 875 km | **100%** | +8.3 s | +17.6 s | −4.1% |
+| Napier | 611 km | 1021 km | **100%** | +11.4 s | +24.1 s | −4.4% |
+
+For anything past Cook Strait **every subfault is in the deviating regime**, so there is no
+near-field contribution to dilute it — the whole record is affected roughly uniformly. That is
+the opposite of the intuition that distant subfaults matter least, which only holds when the
+station is close to part of the rupture.
+
+The amplitude column is an estimate, not a measurement: the Saragoni–Hart envelope is
+normalised to unit squared area (Boore 1983 eq. 11), so spreading the same energy over a
+`k`-times-longer window scales peaks by about `1/√k`. Total energy is conserved, so **Arias
+intensity should be roughly unaffected while PGA and pSA run low and significant duration runs
+long.** Worth measuring rather than trusting this arithmetic.
+
+**−4% is twice the ±2% band this project certifies at.** It does not show up in the LONG
+campaign because that compares against the *Fortran*, which has the same behaviour — the port
+is faithful. The deviation is between the implemented model and Boore & Thompson (2014), and it
+is inherited, not introduced here.
+
+Left alone: correcting it would move every long-path waveform, which needs a domain judgement
+and a LONG-tier adjudication, not a tidy-up. The six breakpoints themselves are exact, and so
+is the linear interpolation between them.
 
 ## Not worth a paper hunt
 

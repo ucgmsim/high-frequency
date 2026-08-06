@@ -975,6 +975,26 @@ fn config() -> HfConfig {
     }
 }
 
+/// [`config`] at a chosen record length, for the tests that vary it.
+fn hf_config_with_duration(duration_s: f32) -> HfConfig {
+    HfConfig {
+        record: RecordParameters {
+            duration_s,
+            ..config().record
+        },
+        ..config()
+    }
+}
+
+/// A simulator over the given inputs, for the tests that run more than one.
+fn hf_simulator(
+    config: &HfConfig,
+    slip: &StochModel,
+    vmod: &hb_high::state::VelocityModelInput,
+) -> hb_high::sim::Simulator {
+    hb_high::sim::Simulator::new(config, slip, vmod).expect("the fixture slip model is consistent")
+}
+
 /// Run one station through the whole simulation.
 fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
@@ -1085,4 +1105,43 @@ fn a_source_below_the_model_stays_finite() {
             green.stime
         );
     }
+}
+
+/// A record too short to hold the arrivals says so.
+///
+/// Everything past `ndata` is discarded silently and mostly correctly — the envelope's
+/// decayed tail routinely falls off the end. What must not be silent is the arrival *peak*
+/// falling outside, which reads as a station that stopped shaking rather than a record that
+/// ran out. That is reachable in production: the window has no upper cap, so a long path can
+/// need a longer record than the domain asked for.
+#[test]
+fn a_record_too_short_for_the_arrivals_reports_clipping() {
+    let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
+    let vmod = velocity_model(20);
+    let station = Station {
+        // Far enough that the S arrival is tens of seconds in.
+        longitude: 176.0,
+        latitude: -40.0,
+        name: "FAR".to_string(),
+    };
+
+    let long_enough = hf_config_with_duration(300.0);
+    let complete = hf_simulator(&long_enough, &slip, &vmod).run(station.clone(), 42);
+    assert!(
+        complete.clipping.is_complete(),
+        "a 300 s record should hold this arrival, got {:?}",
+        complete.clipping
+    );
+
+    let far_too_short = hf_config_with_duration(2.0);
+    let cut = hf_simulator(&far_too_short, &slip, &vmod).run(station, 42);
+    assert!(
+        !cut.clipping.is_complete(),
+        "a 2 s record cannot hold an arrival tens of seconds in, but reported no clipping"
+    );
+    assert!(
+        cut.clipping.worst_overrun_s > 0.0,
+        "clipping reported without an overrun: {:?}",
+        cut.clipping
+    );
 }

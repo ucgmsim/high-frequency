@@ -71,6 +71,22 @@ impl SpectrumPlan {
     ///
     /// The factor of two is Boore (1983, p. 1869): the record is made about twice the duration
     /// of strong shaking, so that the windowed transient fits inside it with room to decay.
+    ///
+    /// # `np2` IS THE DRAW COUNT, so it is not a buffer size to tune
+    ///
+    /// [`stochastic_spectrum`] draws exactly `np2` normal deviates per call. Rounding to a
+    /// different length — a 5-smooth "fast" size, say, which for a 131 s window would be
+    /// 52488 against this 65536, a 20% saving — would change how many numbers come off
+    /// the shared generator, and therefore **every waveform computed after it**. It also
+    /// moves `df = 1/(np2·dt)`, the frequency axis the spectral shape is evaluated on.
+    ///
+    /// So this is physics wearing the costume of an allocation, and `PHYSICS.md` §9 and
+    /// `ENGINEERING_RULES` §5 both say the draw count is part of the answer. Changing it is
+    /// a LONG-tier question, not an optimisation.
+    ///
+    /// Nothing here needs a *power* of two in particular — the Hermitian mirror below only
+    /// needs `np2` even, and `rustfft` plans any length (mixed-radix, Bluestein for primes),
+    /// which is also why it offers no `next_fast_len` to delegate to.
     pub fn new(tmax_s: f32, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
         // At least 2 bins, so a degenerate `tmax_s` still gives a transform the rest of the
         // module can index. `next_power_of_two` is exact where the doubling loop was a search:

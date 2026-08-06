@@ -56,23 +56,60 @@ impl RayType {
 ///
 /// This is the `c₁·R` term of Graves & Pitarka (2010) eq. 17, `T_di = f_ci⁻¹ + c₁R_i`,
 /// generalised to a piecewise-linear table so that the Boore & Thompson models can be selected
-/// instead. See `PHYSICS.md` §7.
+/// instead. See `PHYSICS.md` §7 and `papers/README.md` for what has been checked against what.
+///
+/// # Sources
+///
+/// * Graves, R. W. & Pitarka, A. (2010). Broadband ground-motion simulation using a hybrid
+///   approach. *BSSA* **100**(5A), 2095–2123. doi:10.1785/0120100057 — eq. 17.
+/// * Boore, D. M. & Thompson, E. M. (2014). Path durations for use in the stochastic-method
+///   simulation of ground motions. *BSSA* **104**(5), 2541–2552. doi:10.1785/0120140058 —
+///   Table 1, "The New Path Duration Model".
+/// * Boore, D. M. & Thompson, E. M. (2015). Revisions to some parameters used in
+///   stochastic-method simulations of ground motion. *BSSA* **105**(2A), 1029–1041.
+///   doi:10.1785/0120140281 — Table 3, "The Path Duration Model for Stable Continental
+///   Regions".
 ///
 /// The wire encoding is a non-contiguous integer set (`0`/`1`/`2`/`11`/`12`) where every other
 /// value left the table uninitialised in the original. An enum makes that unrepresentable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathDurationModel {
     /// `<= 0` — Graves & Pitarka (2010) eq. 17, single segment, slope `c₁ = 0.063` s/km.
+    ///
+    /// Verified exact against the paper.
     Gp2010,
-    /// `1` — western US, slope 0.070.
+    /// `1` — western US, slope 0.070 s/km.
+    ///
+    /// **No published source.** The deck documents models 1 and 2 as "WUS/ENA modification
+    /// trial/error": they are the Graves & Pitarka slope adjusted by hand, not a model from
+    /// the literature, and nothing here should imply otherwise.
     Wus,
-    /// `2` — eastern North America, slope 0.100.
+    /// `2` — eastern North America, slope 0.100 s/km. Hand-adjusted like [`Self::Wus`], with
+    /// no published source.
     Ena,
-    /// `11` — Boore & Thompson (2014) Table 1, active crustal regions. Breakpoints at 0, 7, 45,
-    /// 125, 175 and 270 km. **See the note in [`crate::sim`] on the extrapolation beyond
-    /// 270 km, which does not match the paper.**
+    /// `11` — Boore & Thompson (2014) Table 1, active crustal regions.
+    ///
+    /// Breakpoints at 0, 7, 45, 125, 175 and 270 km, with durations 0, 2.4, 8.4, 10.9, 17.4
+    /// and 34.2 s, linearly interpolated between — **verified against Table 1**, which
+    /// specifies exactly that interpolation.
+    ///
+    /// **The extrapolation beyond 270 km does not match the paper**, which gives a tail slope
+    /// of 0.156 s/km against the 0.177 the table builder repeats — about 13% steeper.
+    ///
+    /// This is the model production runs, and 270 km is well inside its working range: an
+    /// Alpine Fault rupture recorded in the lower North Island has *every* subfault past that
+    /// distance. See finding 7 in `papers/README.md` for the measured effect per station.
     Bt2014Wus,
-    /// `12` — Boore & Thompson (2015), stable continental regions. Eight breakpoints.
+    /// `12` — Boore & Thompson (2015) Table 3, stable continental regions.
+    ///
+    /// Breakpoints at 0, 15, 35, 50, 125, 200, 392 and 600 km, with durations 0, 2.6, 17.5,
+    /// 25.1, 25.1, 28.5, 46.0 and 69.1 s — **verified against Table 3**, including its
+    /// "linear interpolation … not logarithms" and its `D_P(R) = D_P(R_last) + 0.111(R −
+    /// R_last)` tail.
+    ///
+    /// Unlike model 11 the tail is right, and by luck rather than design: the paper's 0.111
+    /// s/km happens to equal the final tabulated segment's slope, which is what the table
+    /// builder repeats.
     Bt2015Ena,
 }
 

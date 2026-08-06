@@ -163,6 +163,54 @@ pub struct Simulation {
     pub dt: f32,
     /// Ground motion, shaped `(n_components, ndata)`, rows ordered 090, 000, vertical.
     pub acc: Array2<f32>,
+    /// What did not fit in the record. See [`Clipping`].
+    pub clipping: Clipping,
+}
+
+/// Arrivals the record was too short to hold.
+///
+/// **Some clipping is normal and this does not report it.** Every subfault's envelope decays
+/// to a fraction of a percent of its peak well before the end of its own buffer, and that tail
+/// routinely falls past the end of the record; discarding it costs nothing.
+///
+/// What this counts is the case that is not normal: a subfault whose envelope **peak** lands
+/// beyond the record, meaning the arrival itself was cut rather than its tail. The record
+/// then understates the shaking, and looks like a station that stopped shaking early rather
+/// than one whose record ran out.
+///
+/// It is reported rather than refused because the right length is the caller's to choose, and
+/// a record deliberately cut short is a legitimate thing to ask for. The window has no upper
+/// cap, so at long path distances it can exceed the requested duration easily — see
+/// `papers/README.md` finding 7 for how far out that starts to bite.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Clipping {
+    /// Subfault-ray contributions whose envelope peak fell past the end of the record.
+    pub peaks_lost: usize,
+    /// How far past the end the latest of them fell, seconds. Zero when none were lost.
+    pub worst_overrun_s: f32,
+}
+
+impl Clipping {
+    /// True when every arrival landed inside the record.
+    pub fn is_complete(&self) -> bool {
+        self.peaks_lost == 0
+    }
+}
+
+impl std::ops::AddAssign for Clipping {
+    fn add_assign(&mut self, other: Self) {
+        self.peaks_lost += other.peaks_lost;
+        self.worst_overrun_s = self.worst_overrun_s.max(other.worst_overrun_s);
+    }
+}
+
+impl std::iter::Sum for Clipping {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |mut total, one| {
+            total += one;
+            total
+        })
+    }
 }
 
 /// Why a simulation could not be produced.
@@ -402,6 +450,7 @@ impl Simulator {
         let (mut rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);
         // One row per component, which is the shape this is returned in.
         let mut acc: Array2<f32> = Array2::zeros((Component::ALL.len(), self.run.ndata));
+        let mut clipping = Clipping::default();
 
         // ------------------------------------------------- the single station ---
         for ((seg, angles), weights) in self
@@ -454,7 +503,7 @@ impl Simulator {
                 self.run.window_end_fraction,
             );
 
-            subfault_pass(
+            clipping += subfault_pass(
                 &mut rng,
                 acc.view_mut(),
                 SegmentPass {
@@ -480,6 +529,7 @@ impl Simulator {
             ndata: self.run.ndata,
             dt: self.run.dt,
             acc,
+            clipping,
         }
     }
 }
@@ -732,7 +782,7 @@ fn subfault_pass(
     mut acc: ArrayViewMut2<'_, f32>,
     segment: SegmentPass<'_>,
     ctx: RunContext<'_>,
-) {
+) -> Clipping {
     let SegmentPass {
         seg,
         geom,
@@ -770,6 +820,7 @@ fn subfault_pass(
     let mut radiation: Array1<f32> = Array1::zeros(plan.fold_count);
     let mut siteamp_factors: Array1<f32> = Array1::zeros(run.site_table_len);
     let mut ray = RayState::default();
+    let mut clipping = Clipping::default();
 
     for (i, j) in seg.strike_major() {
         let subfault = seg.at(i, j);
@@ -942,11 +993,15 @@ fn subfault_pass(
             // program. See `PHYSICS.md` §9.
             let _stream_advance = rng.next_f32();
 
+            clipping += Clipping::for_arrival(kst, subfault_window_s, run);
+
             if let Some(at) = Placement::clip(kst, np2, run.ndata) {
                 accumulate_subfault(acc.view_mut(), subfault_acc.view(), weight, &at);
             }
         }
     }
+
+    clipping
 }
 
 /// Where a subfault's `np2`-sample window lands in the record, after clipping to it.
@@ -992,6 +1047,27 @@ impl Placement {
     }
 }
 
+impl Clipping {
+    /// Whether this arrival's envelope peak landed inside the record.
+    ///
+    /// The Saragoni–Hart envelope peaks at `window_peak_fraction` of the window after the
+    /// trace starts, so the peak sample is `start_sample + ε·window/dt`. Everything past
+    /// `ndata` is discarded by [`Placement::clip`], silently and correctly — this is the one
+    /// part of that discard worth telling the caller about.
+    fn for_arrival(start_sample: i32, window_s: f32, run: &RunScalars) -> Self {
+        let peak_sample = start_sample as f32 + run.window_peak_fraction * window_s / run.dt;
+        let overrun_samples = peak_sample - run.ndata as f32;
+        if overrun_samples > 0.0 {
+            Self {
+                peaks_lost: 1,
+                worst_overrun_s: overrun_samples * run.dt,
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
 /// Place one subfault's contribution into the station accumulator.
 ///
 /// Every index here is already known to be inside both buffers: [`Placement::clip`] did that,
@@ -1033,6 +1109,8 @@ struct DurationSegment {
 type PathDuration = Vec<DurationSegment>;
 
 /// Build the path-duration table.
+///
+/// See [`PathDurationModel`] for the sources of each model and what has been verified.
 fn path_duration_table(model: PathDurationModel) -> PathDuration {
     /// The single-segment models give their slope directly and have no breakpoints.
     fn constant_slope(slope_s_per_km: f32) -> PathDuration {
@@ -1076,20 +1154,29 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
         PathDurationModel::Gp2010 => constant_slope(0.063),
         PathDurationModel::Wus => constant_slope(0.07),
         PathDurationModel::Ena => constant_slope(0.1),
-        // Boore & Thompson (2014) Table 1, reproduced exactly: breakpoints at 0, 7, 45, 125,
-        // 175, 270 km with durations 0, 2.4, 8.4, 10.9, 17.4, 34.2 s.
+        // Boore & Thompson (2014) Table 1, "The New Path Duration Model", reproduced exactly:
+        // breakpoints at 0, 7, 45, 125, 175, 270 km with durations 0, 2.4, 8.4, 10.9, 17.4,
+        // 34.2 s. The paper specifies linear interpolation between them, which is what
+        // `from_breakpoints` does. Checked against the held PDF, p. 2546.
         //
-        // KNOWN DEVIATION FROM THE PAPER, BEYOND 270 km. Table 1 specifies a tail slope of
-        // 0.156 s/km for `R` past the last breakpoint. `from_breakpoints` instead copies the
-        // slope of the final tabulated segment, `(34.2 - 17.4)/(270 - 175) = 0.177` -- about
-        // 13% steeper. This reproduces the original faithfully (it did
+        // KNOWN DEVIATION FROM THE PAPER, BEYOND 270 km. Table 1 gives "slope of last
+        // segment 0.156" s/km for `R` past the last breakpoint. `from_breakpoints` instead
+        // copies the slope of the final tabulated segment, `(34.2 - 17.4)/(270 - 175) = 0.177`
+        // -- about 13% steeper. This reproduces the original faithfully (it did
         // `dpdr(ndur) = dpdr(ndur-1)`), so the deviation is in the model as implemented rather
-        // than in this port, and it only bites for ray paths longer than 270 km. Recorded in
-        // `papers/README.md`; not changed here, because it would move every long-path waveform.
+        // than in this port. IT IS NOT AN EDGE CASE: it bites past 270 km, and a 411 km Alpine
+        // Fault rupture recorded anywhere past Cook Strait has EVERY subfault beyond that --
+        // Palmerston North sits 465 to 875 km out, for a mean duration error of +8.3 s.
+        // Recorded with the numbers in `papers/README.md` finding 7; not changed here, because
+        // it would move every long-path waveform and wants a domain judgement.
         PathDurationModel::Bt2014Wus => from_breakpoints(
             [0.0, 7.0, 45.0, 125.0, 175.0, 270.0],
             [0.0, 2.4, 8.4, 10.9, 17.4, 34.2],
         ),
+        // Boore & Thompson (2015) Table 3, stable continental regions, checked against the
+        // held PDF p. 1034. The paper's tail is `D_P(R_last) + 0.111(R - R_last)`, and the
+        // final tabulated segment's slope is `(69.1 - 46.0)/(600 - 392) = 0.1111` -- so
+        // repeating it is correct here, where for model 11 above it is not.
         PathDurationModel::Bt2015Ena => from_breakpoints(
             [0.0, 15.0, 35.0, 50.0, 125.0, 200.0, 392.0, 600.0],
             [0.0, 2.6, 17.5, 25.1, 25.1, 28.5, 46.0, 69.1],
