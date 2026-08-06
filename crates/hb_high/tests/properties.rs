@@ -34,7 +34,8 @@
 //! genuine break fails.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust,
+    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
+    SiteParameters, SourceParameters,
 };
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fft::{Complex32, Complex64};
@@ -50,7 +51,11 @@ use proptest::prelude::*;
 /// Angular difference in degrees, folded into `[0, 180]`.
 fn angle_gap_deg(a: f32, b: f32) -> f32 {
     let d = (a - b).abs() % 360.0;
-    if d > 180.0 { 360.0 - d } else { d }
+    if d > 180.0 {
+        360.0 - d
+    } else {
+        d
+    }
 }
 
 /// A complex spectrum of `n` bins, filled deterministically from `seed`.
@@ -153,7 +158,16 @@ fn cardinal_azimuths_and_degree_scale() {
         (-1.0, 0.0, 180.0, "south"),
         (0.0, -1.0, 270.0, "west"),
     ] {
-        let g = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: dlat, lon_deg: dlon });
+        let g = distance_azimuth(
+            GeoPoint {
+                lat_deg: 0.0,
+                lon_deg: 0.0,
+            },
+            GeoPoint {
+                lat_deg: dlat,
+                lon_deg: dlon,
+            },
+        );
         assert!(
             angle_gap_deg(g.azesdg, want_az) < 0.01,
             "due {what}: azimuth {}, want {want_az}",
@@ -166,9 +180,32 @@ fn cardinal_azimuths_and_degree_scale() {
         );
     }
     // Flattening: a degree of latitude is the shorter of the two.
-    let lat_km = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: 1.0, lon_deg: 0.0 }).deltkm;
-    let lon_km = distance_azimuth(GeoPoint { lat_deg: 0.0, lon_deg: 0.0 }, GeoPoint { lat_deg: 0.0, lon_deg: 1.0 }).deltkm;
-    assert!(lat_km < lon_km, "lat {lat_km} should be < lon {lon_km} at the equator");
+    let lat_km = distance_azimuth(
+        GeoPoint {
+            lat_deg: 0.0,
+            lon_deg: 0.0,
+        },
+        GeoPoint {
+            lat_deg: 1.0,
+            lon_deg: 0.0,
+        },
+    )
+    .deltkm;
+    let lon_km = distance_azimuth(
+        GeoPoint {
+            lat_deg: 0.0,
+            lon_deg: 0.0,
+        },
+        GeoPoint {
+            lat_deg: 0.0,
+            lon_deg: 1.0,
+        },
+    )
+    .deltkm;
+    assert!(
+        lat_km < lon_km,
+        "lat {lat_km} should be < lon {lon_km} at the equator"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +378,10 @@ fn gamma_matches_factorials_and_the_half_integer_case() {
         (3.5, 1.875 * root_pi),
     ] {
         let got = gamma(x);
-        assert!((got / want - 1.0).abs() < 1e-12, "Gamma({x}) = {got}, want {want}");
+        assert!(
+            (got / want - 1.0).abs() < 1e-12,
+            "Gamma({x}) = {got}, want {want}"
+        );
     }
 }
 
@@ -728,10 +768,15 @@ proptest! {
         hypocentre_km in 0.0f32..40.0,
     ) {
         let taper = RuptureVelocity {
-            frac: Some(frac), shallow: Some(shallow), deep: Some(deep),
+            frac, shallow, deep, rv_sig1: 0.0,
         }
         .resolve(hypocentre_km);
-        for edge in [taper.shal_dmin, taper.shal_dmax, taper.deep_dmin, taper.deep_dmax] {
+        for edge in [
+            taper.shallow_top_km,
+            taper.shallow_base_km,
+            taper.deep_top_km,
+            taper.deep_base_km,
+        ] {
             let step = 1e-3;
             let below = taper.factor(edge - step);
             let above = taper.factor(edge + step);
@@ -753,7 +798,7 @@ proptest! {
         hypocentre_km in 0.0f32..40.0, depth_km in 0.0f32..120.0,
     ) {
         let taper = RuptureVelocity {
-            frac: Some(frac), shallow: Some(shallow), deep: Some(deep),
+            frac, shallow, deep, rv_sig1: 0.0,
         }
         .resolve(hypocentre_km);
         let got = taper.factor(depth_km);
@@ -790,13 +835,17 @@ fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
                 .hypocentre_along_strike_km(1.0)
                 .hypocentre_down_dip_km(2.0)
                 .subfaults(vec![
-                    Subfault { slip: 1.0, rise_time_s: 1.0, rupture_time_s: 1.0 };
+                    Subfault {
+                        slip: 1.0,
+                        rise_time_s: 1.0,
+                        rupture_time_s: 1.0
+                    };
                     along * down
                 ])
                 .build()
         })
         .collect();
-    StochModel::new(built, hb_high::config::DEG_TO_RAD)
+    StochModel::new(built)
 }
 
 proptest! {
@@ -860,7 +909,11 @@ fn velocity_model(layers: usize) -> (hb_high::state::VelocityModelInput, usize) 
             hb_high::state::InputLayer {
                 // Derived by build_velocity_model, which accumulates it down the column.
                 depth_km: 0.0,
-                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                thickness_km: if k == layers - 1 {
+                    0.0
+                } else {
+                    (0.05 + 3.0 * frac) as f32
+                },
                 vp_km_s: vsh_km_s * 1.75,
                 vsh_km_s,
                 density_g_cm3: 1.81 + 1.5 * frac,
@@ -874,36 +927,38 @@ fn velocity_model(layers: usize) -> (hb_high::state::VelocityModelInput, usize) 
     (vmod, count)
 }
 
-/// Production-shaped configuration, with the seed left to the caller.
-fn config(seed: u64) -> HfConfig {
+/// Production-shaped configuration.
+///
+/// Deliberately *not* all production values: `czero`, the two taper multipliers and the
+/// path-duration model differ, so that a property depending on a default rather than on the
+/// configured value shows up here.
+fn config() -> HfConfig {
     HfConfig {
-        stress_drop: 50.0,
-        rayset: vec![RayType(1)],
-        site_amp: true,
-        seed,
-        duration: 20.0,
-        dt: 0.005,
-        fmax: 10.0,
-        kappa: 0.045,
-        qfexp: 0.6,
-        rupture_velocity: RuptureVelocity {
-            frac: Some(0.8),
-            shallow: Some(0.7),
-            deep: Some(0.7),
+        source: SourceParameters {
+            stress_drop_bars: 50.0,
+            czero: 2.1,
+            calpha: 0.1,
+            rupture_velocity: RuptureVelocity {
+                frac: 0.8,
+                shallow: 0.7,
+                deep: 0.7,
+                rv_sig1: 0.1,
+            },
         },
-        czero: Some(2.1),
-        calpha: None,
-        moment: None,
-        rupture_velocity_override: None,
-        vs_moho: None,
-        nl_skip: -99,
-        fa_sig1: 0.0,
-        fa_sig2: 0.0,
-        rv_sig1: 0.1,
-        path_duration: PathDurationModel::Bt2014Wus,
-        stress_param_adjust: StressParamAdjust::None,
-        target_magnitude: None,
-        fault_area: None,
+        path: PathParameters {
+            rayset: vec![RayType(1)],
+            q_exponent: 0.6,
+            path_duration: PathDurationModel::Bt2014Wus,
+        },
+        site: SiteParameters {
+            apply_quarter_wavelength_site_amplification: true,
+            kappa_s: 0.045,
+            f_max_hz: 10.0,
+        },
+        record: RecordParameters {
+            duration_s: 20.0,
+            dt_s: 0.005,
+        },
     }
 }
 
@@ -911,8 +966,12 @@ fn config(seed: u64) -> HfConfig {
 fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
     let (vmod, layer_count) = velocity_model(20);
-    let station = Station { stlon: 173.4, stlat: -43.1, cap: "TEST".to_string() };
-    hb_high::sim::simulate(&config(seed), &slip, &vmod, layer_count, station)
+    let station = Station {
+        longitude: 173.4,
+        latitude: -43.1,
+        name: "TEST".to_string(),
+    };
+    hb_high::sim::simulate(&config(), &slip, &vmod, layer_count, station, seed)
         .expect("simulation should succeed")
 }
 
@@ -928,9 +987,15 @@ fn simulate_produces_a_record_of_the_requested_length() {
 #[test]
 fn simulate_produces_finite_non_zero_ground_motion() {
     let sim = run(123456789);
-    assert!(sim.acc.iter().all(|v| v.is_finite()), "every sample must be finite");
+    assert!(
+        sim.acc.iter().all(|v| v.is_finite()),
+        "every sample must be finite"
+    );
     let peak = sim.acc.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-    assert!(peak > 0.0, "the record is entirely zero -- nothing was simulated");
+    assert!(
+        peak > 0.0,
+        "the record is entirely zero -- nothing was simulated"
+    );
     // Every component carries signal, which a mis-indexed accumulation could break for
     // one and not the others.
     for component in 0..3 {
@@ -940,7 +1005,10 @@ fn simulate_produces_finite_non_zero_ground_motion() {
             .skip(component)
             .step_by(3)
             .fold(0.0f32, |a, v| a.max(v.abs()));
-        assert!(component_peak > 0.0, "component {component} is entirely zero");
+        assert!(
+            component_peak > 0.0,
+            "component {component} is entirely zero"
+        );
     }
 }
 
@@ -951,6 +1019,9 @@ fn simulate_is_deterministic_and_seed_dependent() {
     assert_eq!(first.acc, again.acc, "same seed must give the same record");
 
     let other = run(987654321);
-    assert_ne!(first.acc, other.acc, "a different seed must give a different record");
+    assert_ne!(
+        first.acc, other.acc,
+        "a different seed must give a different record"
+    );
     // Geometry is unchanged, so the closest-subfault distance must not move.
 }

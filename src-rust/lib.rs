@@ -1,25 +1,8 @@
 //! Python bindings for the `hb_high` stochastic high-frequency generator.
-//!
-//! # The split
-//!
-//! `site_calculation` is the model here: **Rust is a numeric kernel, Python is the API.**
-//! Everything below is `_`-prefixed and takes arrays or scalars. Defaults, docstrings,
-//! validation messages and the xarray assembly live in `hf_simulation/__init__.py`, because
-//! that is where they are cheapest to write and to change.
-//!
-//! Two things do get types on this side, because they carry arrays that must agree in shape
-//! with each other and are worth validating once rather than at every call: the slip model
-//! and the velocity model.
-//!
-//! # What the Fortran interface used to cost
-//!
-//! One process per station, two temp files per station, a 22-line text deck assembled by
-//! `str.format`, and the epicentral distance parsed back off stderr with
-//! `float(output.stderr.strip())`. All of that is replaced by one call that holds the parsed
-//! inputs in memory across the whole batch.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
+    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
+    SiteParameters, SourceParameters,
 };
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::sim::simulate;
@@ -30,34 +13,12 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 /// Components per station: 090, 000, vertical.
-///
-/// `hb_high` keeps its own `Component` enum private and describes `Simulation::acc` as
-/// `ndata * 3` interleaved, so this is the de-interleaving stride. Asserted against
-/// `acc.len()` on every station rather than trusted.
 const COMPONENT_COUNT: usize = 3;
-
-/// `nl_skip`, fixed because there is nothing for a caller to choose.
-///
-/// A non-negative `nl_skip` routes the velocity model through `grandvel`, which is dead
-/// under the production deck and **not ported** — `sim.rs:300` asserts against it. So the
-/// only legal values are negative, and exposing the parameter could only offer callers a
-/// panic.
-///
-/// It is −99, production's value, and not −1, because of a sentinel-arithmetic hazard worth
-/// naming: `insert_air_layer` does `skip_layers + 1` when it prepends the air layer, which
-/// is right for a *count* of layers to skip and wrong for a *flag* meaning "off". Every
-/// production velocity model has a first layer thick enough to trigger the insertion, so
-/// `-1` becomes `0` and panics. −99 has room to absorb the shift.
-///
-/// The real fix is for this to be an `Option<usize>` so a flag cannot be incremented, but
-/// that changes `HfConfig` for the deck path too, and the deck path has to stay
-/// certifiable until §4.2. Revisit when `deck.rs` goes.
-const NO_VELOCITY_PERTURBATION: i32 = -99;
 
 /// One fault segment: geometry plus the three subfault grids.
 ///
-/// Grids are `(down_dip, along_strike)`, matching `source_modelling.stoch.StochFile`'s
-/// `slip`/`rise`/`trup` and the row order the `.stoch` format itself uses.
+/// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup` and the row
+/// order the `.stoch` format itself uses.
 #[pyclass(frozen, name = "FaultSegment")]
 pub struct PyFaultSegment {
     inner: Segment,
@@ -86,8 +47,11 @@ impl PyFaultSegment {
         rise_time_s: PyReadonlyArray2<f32>,
         rupture_time_s: PyReadonlyArray2<f32>,
     ) -> PyResult<Self> {
-        let (slip, rise, rupture) =
-            (slip.as_array(), rise_time_s.as_array(), rupture_time_s.as_array());
+        let (slip, rise, rupture) = (
+            slip.as_array(),
+            rise_time_s.as_array(),
+            rupture_time_s.as_array(),
+        );
         // Keyword-only above, so the twelve scalars cannot be transposed positionally. The
         // grids still can be, which is what this checks.
         if slip.dim() != rise.dim() || slip.dim() != rupture.dim() {
@@ -149,13 +113,17 @@ impl PySlipModel {
     #[new]
     fn new(segments: Vec<PyRef<'_, PyFaultSegment>>) -> PyResult<Self> {
         if segments.is_empty() {
-            return Err(PyValueError::new_err("a slip model needs at least one segment"));
+            return Err(PyValueError::new_err(
+                "a slip model needs at least one segment",
+            ));
         }
         let segments = segments.iter().map(|s| s.inner.clone()).collect();
-        Ok(Self { inner: StochModel::new(segments, DEG_TO_RAD) })
+        Ok(Self {
+            inner: StochModel::new(segments),
+        })
     }
 
-    /// Total subfaults across all segments — the thing runtime is linear in.
+    /// Total subfaults across all segments
     #[getter]
     fn subfault_count(&self) -> usize {
         self.inner.subfault_count
@@ -183,17 +151,27 @@ impl PyVelocityModel {
         quality_factor_s: PyReadonlyArray1<f32>,
         vs_moho_km_s: f64,
     ) -> PyResult<Self> {
-        let (thickness, vp, vsh) =
-            (thickness_km.as_slice()?, vp_km_s.as_slice()?, vsh_km_s.as_slice()?);
+        let (thickness, vp, vsh) = (
+            thickness_km.as_slice()?,
+            vp_km_s.as_slice()?,
+            vsh_km_s.as_slice()?,
+        );
         let (density, qp, qs) = (
             density_g_cm3.as_slice()?,
             quality_factor_p.as_slice()?,
             quality_factor_s.as_slice()?,
         );
-        let lengths = [thickness.len(), vp.len(), vsh.len(), density.len(), qp.len(), qs.len()];
+        let lengths = [
+            thickness.len(),
+            vp.len(),
+            vsh.len(),
+            density.len(),
+            qp.len(),
+            qs.len(),
+        ];
         if lengths.iter().any(|&n| n != lengths[0]) {
             return Err(PyValueError::new_err(format!(
-                "every layer property must have one entry per layer; got lengths {lengths:?} \
+                "every layer property must have one entry per layer. Got lengths {lengths:?} \
                  for (thickness_km, vp_km_s, vsh_km_s, density_g_cm3, quality_factor_p, \
                  quality_factor_s)"
             )));
@@ -227,33 +205,18 @@ impl PyVelocityModel {
 
 /// Simulate a batch of stations against one source and one velocity model.
 ///
-/// Returns acceleration in cm/s², shaped `(3, n_station, n_time)` with components ordered
-/// 090/000/vertical — component-major because that is the shape `hf_sim.py` assembles into
-/// xarray, so no transpose is needed anywhere.
+/// Returns acceleration in cm/s^2, shaped `(3, n_station, n_time)` with components ordered
+/// 090/000/vertical.
 ///
-/// # Why there is no epicentral distance in the return
-///
-/// The Fortran wrote one to stderr because stderr was the only channel it had to say "I
-/// finished", and `hf_sim.py` parsed it back and then assigned `np.nan` over it. A `PyErr`
-/// reports failure now, so the value has no remaining job.
-///
-/// # Threading
-///
-/// The station loop runs inside `allow_threads`, so it holds the GIL for approximately none
-/// of its runtime and dask's thread pool scales across chunks. There is deliberately no
-/// internal thread pool: with dask on top, two schedulers would oversubscribe the cores.
 #[pyfunction]
 #[pyo3(signature = (
     slip_model, velocity_model, *,
     latitude_deg, longitude_deg, station_seed,
     duration_s, dt, stress_drop_bars, fmax_hz, kappa_s, q_frequency_exponent,
     rayset, site_amplification,
-    rupture_velocity_fraction=None, rupture_velocity_shallow=None,
-    rupture_velocity_deep=None, rupture_velocity_override=None,
-    corner_frequency_constant=None, corner_frequency_alpha=None,
-    moment=None, fault_area_km2=None, target_magnitude=None,
-    fourier_amplitude_sigma_1=0.0, fourier_amplitude_sigma_2=0.0,
-    rupture_velocity_sigma=0.0, path_duration_model=0, stress_adjust_model=0,
+    rupture_velocity_fraction, rupture_velocity_shallow, rupture_velocity_deep,
+    rupture_velocity_sigma, corner_frequency_constant, corner_frequency_alpha,
+    path_duration_model,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _simulate_stations<'py>(
@@ -271,23 +234,19 @@ fn _simulate_stations<'py>(
     q_frequency_exponent: f32,
     rayset: Vec<i32>,
     site_amplification: bool,
-    rupture_velocity_fraction: Option<f32>,
-    rupture_velocity_shallow: Option<f32>,
-    rupture_velocity_deep: Option<f32>,
-    rupture_velocity_override: Option<f32>,
-    corner_frequency_constant: Option<f32>,
-    corner_frequency_alpha: Option<f32>,
-    moment: Option<f32>,
-    fault_area_km2: Option<f32>,
-    target_magnitude: Option<f32>,
-    fourier_amplitude_sigma_1: f32,
-    fourier_amplitude_sigma_2: f32,
+    rupture_velocity_fraction: f32,
+    rupture_velocity_shallow: f32,
+    rupture_velocity_deep: f32,
     rupture_velocity_sigma: f32,
+    corner_frequency_constant: f32,
+    corner_frequency_alpha: f32,
     path_duration_model: i32,
-    stress_adjust_model: i32,
 ) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    let (latitude, longitude, seeds) =
-        (latitude_deg.as_slice()?, longitude_deg.as_slice()?, station_seed.as_slice()?);
+    let (latitude, longitude, seeds) = (
+        latitude_deg.as_slice()?,
+        longitude_deg.as_slice()?,
+        station_seed.as_slice()?,
+    );
     if latitude.len() != longitude.len() || latitude.len() != seeds.len() {
         return Err(PyValueError::new_err(format!(
             "latitude_deg ({}), longitude_deg ({}) and station_seed ({}) must have one \
@@ -298,7 +257,9 @@ fn _simulate_stations<'py>(
         )));
     }
     if rayset.is_empty() {
-        return Err(PyValueError::new_err("rayset must name at least one ray type"));
+        return Err(PyValueError::new_err(
+            "rayset must name at least one ray type",
+        ));
     }
     let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -308,44 +269,34 @@ fn _simulate_stations<'py>(
     })?;
 
     let config = HfConfig {
-        stress_drop: stress_drop_bars,
-        rayset: rayset.into_iter().map(RayType).collect(),
-        site_amp: site_amplification,
-        // Overwritten per station below; a batch has no single seed.
-        seed: 0,
-        duration: duration_s,
-        dt,
-        fmax: fmax_hz,
-        kappa: kappa_s,
-        qfexp: q_frequency_exponent,
-        rupture_velocity: RuptureVelocity {
-            frac: rupture_velocity_fraction,
-            shallow: rupture_velocity_shallow,
-            deep: rupture_velocity_deep,
+        source: SourceParameters {
+            stress_drop_bars,
+            czero: corner_frequency_constant,
+            calpha: corner_frequency_alpha,
+            rupture_velocity: RuptureVelocity {
+                frac: rupture_velocity_fraction,
+                shallow: rupture_velocity_shallow,
+                deep: rupture_velocity_deep,
+                rv_sig1: rupture_velocity_sigma,
+            },
         },
-        czero: corner_frequency_constant,
-        calpha: corner_frequency_alpha,
-        moment,
-        rupture_velocity_override,
-        // `vs_moho` belongs to VelocityModel1D, which truncated the model on
-        // construction, and `simulate` never reads this field -- only `main.rs` does, to
-        // feed `read_velocity_model`. Accepting it here as well would let a caller state
-        // the Moho velocity twice and have the two disagree, with the constructor's copy
-        // silently winning. Found by tests/test_stub.py on its first run.
-        vs_moho: None,
-        nl_skip: NO_VELOCITY_PERTURBATION,
-        fa_sig1: fourier_amplitude_sigma_1,
-        fa_sig2: fourier_amplitude_sigma_2,
-        rv_sig1: rupture_velocity_sigma,
-        path_duration,
-        stress_param_adjust: StressParamAdjust::from_deck(stress_adjust_model),
-        target_magnitude,
-        fault_area: fault_area_km2,
+        path: PathParameters {
+            rayset: rayset.into_iter().map(RayType).collect(),
+            q_exponent: q_frequency_exponent,
+            path_duration,
+        },
+        site: SiteParameters {
+            apply_quarter_wavelength_site_amplification: site_amplification,
+            kappa_s,
+            f_max_hz: fmax_hz,
+        },
+        record: RecordParameters {
+            duration_s,
+            dt_s: dt,
+        },
     };
 
     let station_count = latitude.len();
-    // `detach` is pyo3 0.29's name for what was `allow_threads`: release the GIL for the
-    // whole batch so dask's threads scale across chunks.
     let waveform: Array3<f32> = py.detach(|| {
         // One station first, to learn n_time before allocating the batch. Every station
         // shares the deck's duration and dt, so ndata is the same for all of them.
@@ -354,20 +305,23 @@ fn _simulate_stations<'py>(
         for (index, ((&stlat, &stlon), &seed)) in
             latitude.iter().zip(longitude).zip(seeds).enumerate()
         {
-            let station =
-                Station { stlat, stlon, cap: format!("station-{index}") };
+            let station = Station {
+                latitude: stlat,
+                longitude: stlon,
+                name: format!("station-{index}"),
+            };
             let sim = simulate(
-                &HfConfig { seed, ..config.clone() },
+                &config,
                 &slip_model.inner,
                 &velocity_model.input,
                 velocity_model.layer_count,
                 station,
+                seed,
             )
             .map_err(|e| PyRuntimeError::new_err(format!("station {index}: {e}")))?;
 
-            let out = waveform.get_or_insert_with(|| {
-                Array3::zeros((COMPONENT_COUNT, station_count, sim.ndata))
-            });
+            let out = waveform
+                .get_or_insert_with(|| Array3::zeros((COMPONENT_COUNT, station_count, sim.ndata)));
             if sim.ndata * COMPONENT_COUNT != sim.acc.len() {
                 return Err(PyRuntimeError::new_err(format!(
                     "station {index} returned {} samples for {} x {} expected",
@@ -377,9 +331,7 @@ fn _simulate_stations<'py>(
                 )));
             }
             // `acc` is interleaved component-fastest; this is the de-interleave.
-            for (sample, chunk) in
-                sim.acc.chunks_exact(COMPONENT_COUNT).enumerate()
-            {
+            for (sample, chunk) in sim.acc.chunks_exact(COMPONENT_COUNT).enumerate() {
                 for (component, &value) in chunk.iter().enumerate() {
                     out[[component, index, sample]] = value;
                 }

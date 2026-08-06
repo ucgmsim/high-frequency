@@ -7,12 +7,7 @@
 
 use ndarray::{azip, ArrayView1, ArrayViewMut1};
 
-/// Fault orientation and the ray's arrival direction — the five angles every radiation
-/// calculation takes, and takes in the same order.
-///
-/// They travelled as five positional `f32`s, which is exactly the shape a transposition
-/// hides in: `(strike, dip, rake, azimuth, takeoff)` are all radians, all plausible for
-/// each other, and a swap produces a wrong answer rather than a compile error.
+/// Fault orientation and the ray's arrival direction.
 pub struct RadiationAngles {
     pub strike_rad: f32,
     pub dip_rad: f32,
@@ -35,7 +30,13 @@ pub struct RadiationAngles {
 /// parenthesisation below says so explicitly.
 ///
 /// Double-angle identities would simplify these and are **not** bit-equivalent.
-pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_rad: f32, takeoff_rad: f32) -> (f32, f32) {
+pub fn radiation_pattern(
+    strike_rad: f32,
+    dip_rad: f32,
+    rake_rad: f32,
+    azimuth_rad: f32,
+    takeoff_rad: f32,
+) -> (f32, f32) {
     let sin_rake = rake_rad.sin();
     let cos_rake = rake_rad.cos();
     let sin_dip = dip_rad.sin();
@@ -45,10 +46,19 @@ pub fn radiation_pattern(strike_rad: f32, dip_rad: f32, rake_rad: f32, azimuth_r
     let sin_az = (azimuth_rad - strike_rad).sin();
     let cos_az = (azimuth_rad - strike_rad).cos();
 
-    let rdsv = sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * sin_az
+    let rdsv = sin_rake
+        * ((cos_dip * cos_dip) - (sin_dip * sin_dip))
+        * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff))
+        * sin_az
         - cos_rake * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * cos_az
         + cos_rake * sin_dip * sin_takeoff * cos_takeoff * 2.0 * sin_az * cos_az
-        - sin_rake * sin_dip * cos_dip * 2.0 * sin_takeoff * cos_takeoff * (1.0 + (sin_az * sin_az));
+        - sin_rake
+            * sin_dip
+            * cos_dip
+            * 2.0
+            * sin_takeoff
+            * cos_takeoff
+            * (1.0 + (sin_az * sin_az));
 
     let rdsh = cos_rake * cos_dip * cos_takeoff * sin_az
         + cos_rake * sin_dip * sin_takeoff * ((cos_az * cos_az) - (sin_az * sin_az))
@@ -95,7 +105,13 @@ pub fn horizontal_radiation_spectrum(
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
-    let &RadiationAngles { strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad } = angles;
+    let &RadiationAngles {
+        strike_rad,
+        dip_rad,
+        rake_rad,
+        azimuth_rad,
+        takeoff_rad,
+    } = angles;
     let pu = std::f32::consts::PI / 180.0;
 
     let fr1 = 0.5f32;
@@ -109,7 +125,8 @@ pub fn horizontal_radiation_spectrum(
     // Project SV and SH onto the requested horizontal component. The sum is formed BEFORE the
     // magnitude is taken (below), because taking it per-term lets a negative cos or sin
     // introduce an asymmetry that is not physical.
-    let mut rdx = rdsva * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
+    let mut rdx =
+        rdsva * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
 
     // Sign preserved, not discarded: polarity is carried separately and reapplied at the end.
     let mut polarity = 1.0f32;
@@ -119,10 +136,6 @@ pub fn horizontal_radiation_spectrum(
     }
 
     let range = 10.0f32;
-    // NOT an iterator chain, and not a `map(..).sum()`. Two invariants live here: the five
-    // draws happen in a fixed order per iteration, and `radv` is a LEFT-TO-RIGHT f32 fold.
-    // A `sum()` preserves both today but invites a later `rayon` or a reassociation that
-    // would not, and either would move every waveform.
     let mut radv = 0.0f32;
     for _k in 1..=sample_count {
         // Five draws, in this exact order. `9 * range * pu` is 90 degrees in radians, so each
@@ -168,14 +181,6 @@ pub fn horizontal_radiation_spectrum(
 /// The vertical needs no horizontal projection, so the pattern is just `RDSV * sin(takeoff)`,
 /// and the average is taken over take-off angle and azimuth only.
 ///
-/// # This routine draws NOTHING from the shared stream
-///
-/// It reads `uniform_a`/`uniform_b`, filled once per run, where
-/// [`horizontal_radiation_spectrum`] draws 5,000 numbers per call. **That asymmetry between the
-/// horizontals and the vertical is load-bearing** — it is why component order is fixed
-/// (`PHYSICS.md` §9), and why iterating the three components in any other order changes every
-/// waveform.
-///
 /// The take-off range is clamped to `[90°, 180°]`: only downgoing directions contribute.
 ///
 /// Like [`horizontal_radiation_spectrum`], the returned `fr1` is a value the original wrote
@@ -188,13 +193,20 @@ pub fn vertical_radiation_spectrum(
     sample_count: usize,
     radiation: &mut [f32],
 ) -> f32 {
-    let &RadiationAngles { strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad } = angles;
+    let &RadiationAngles {
+        strike_rad,
+        dip_rad,
+        rake_rad,
+        azimuth_rad,
+        takeoff_rad,
+    } = angles;
     let pu = std::f32::consts::PI / 180.0;
 
     let fr1 = 0.001f32;
     let fr2 = 0.01f32;
 
-    let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
+    let (_rdsha, rdsva) =
+        radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
     let rdx = rdsva * takeoff_rad.sin();
 
     let range = 40.0f32;

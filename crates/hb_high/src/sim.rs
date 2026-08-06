@@ -18,7 +18,7 @@
 //! **A multi-station run is not a concatenation of single-station runs**, at least not in the
 //! original: it shared one generator across its station loop, so each station's draws continued
 //! from wherever the previous one stopped. Here each station gets an independent stream seeded
-//! from `config.seed`, which makes a batch safe to reorder, subset or resume.
+//! from its own seed, which makes a batch safe to reorder, subset or resume.
 //!
 //! # Cost note
 //!
@@ -28,17 +28,20 @@
 //! step once a caller starts looping over many stations.
 
 use crate::config::{
-    HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, StressParamAdjust,
+    HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, RUPTURE_VELOCITY_FRACTION_MAX,
 };
 use ndarray::{s, Array1, ArrayView1, ArrayViewMut1};
+use std::f32::consts::PI;
 
 use crate::fft::Complex32;
 use crate::geom::{subfault_geometry, FaultPlane, GeoPoint, SubfaultGeometry};
 use crate::input::{insert_air_layer, Segment, StochModel};
-use crate::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, RadiationAngles};
+use crate::radiation::{
+    horizontal_radiation_spectrum, vertical_radiation_spectrum, RadiationAngles,
+};
 use crate::ray::green_function;
-use crate::rng::{fill_uniform_deviates, normal_deviate, Draws, DrawSource};
-use crate::site::{site_amplification_factors, apply_site_amplification};
+use crate::rng::{fill_uniform_deviates, normal_deviate, DrawSource, Draws};
+use crate::site::{apply_site_amplification, site_amplification_factors};
 use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::{radiate_and_invert, stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
 
@@ -139,9 +142,8 @@ pub fn simulate(
     vmod_in: &VelocityModelInput,
     j0_in: usize,
     station: crate::input::Station,
+    seed: u64,
 ) -> Result<Simulation, SimError> {
-    let (deg_to_rad, pi) = (crate::config::DEG_TO_RAD, crate::config::PI);
-
     // Boore (1983, p. 1869)'s own envelope-shape values, and the ones Graves & Pitarka (2010)
     // use: the peak sits at 0.2 of the duration, decayed to 0.05 of the peak by the end.
     let tw_eps = 0.2f32;
@@ -151,31 +153,28 @@ pub fn simulate(
     let nsfac = 20usize;
 
     let fn_hz: [f32; 20] = [
-        0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70,
-        1.00, 2.00, 3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
+        0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
+        10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    // The 20-entry site-amplification frequency table, log-transformed once. It is a FREQUENCY
-    // table, not a layer table -- sized by its own entry count, not by the velocity model.
     let siteamp_log_freq: Vec<f32> = fn_hz[..nsfac].iter().map(|hz| hz.ln()).collect();
 
-    // Resolved-default accessors are called once, here, so each default is applied in exactly
-    // one place.
-    let czero = config.czero();
-    let calpha = config.calpha();
-    let fcfac = config.fcfac();
-    let rvfmax = crate::config::defaults::RVFMAX;
-    let (duration, dt, fmx, akapp, qfexp) =
-        (config.duration, config.dt, config.fmax, config.kappa, config.qfexp);
-    let rvsig1 = config.rv_sig1;
-    let mut stress_average = config.stress_drop;
-    let irand = config.seed;
+    let czero = config.source.czero;
+    let calpha = config.source.calpha;
+    let (duration, dt, fmx, akapp, qfexp) = (
+        config.record.duration_s,
+        config.record.dt_s,
+        config.site.f_max_hz,
+        config.site.kappa_s,
+        config.path.q_exponent,
+    );
+    let rvsig1 = config.source.rupture_velocity.rv_sig1;
+    let stress_average = config.source.stress_drop_bars;
 
     // The slip model is normalised in place and the velocity model gains an air
     // layer, so both are worked on as copies.
     let mut stoch = slip.clone();
     let mut vmod_in = vmod_in.clone();
     let mut j0 = j0_in;
-    let mut nlskip = config.nl_skip;
 
     // Every segment must agree with the FIRST on subfault size, so the first is the
     // reference and the rest are the candidates -- `split_first` says that, where
@@ -187,48 +186,41 @@ pub fn simulate(
             if s.subfault_length_km != reference.subfault_length_km {
                 return Err(SimError::InconsistentSegments(format!(
                     "dx({}) = {} not equal to dx(1) = {}, exiting...",
-                    k + 2, s.subfault_length_km, reference.subfault_length_km
+                    k + 2,
+                    s.subfault_length_km,
+                    reference.subfault_length_km
                 )));
             }
             if s.subfault_width_km != reference.subfault_width_km {
                 return Err(SimError::InconsistentSegments(format!(
                     "dw({}) = {} not equal to dw(1) = {}, exiting...",
-                    k + 2, s.subfault_width_km, reference.subfault_width_km
+                    k + 2,
+                    s.subfault_width_km,
+                    reference.subfault_width_km
                 )));
             }
         }
     }
 
     // ------------------------------------------------- path duration model ---
-    let path_duration = path_duration_table(config.path_duration);
+    let path_duration = path_duration_table(config.path.path_duration);
 
     // ------------------------------------------------------- air layer -------
-    let (j0_air, nlskip_air) = insert_air_layer(&mut vmod_in, j0, nlskip);
-    j0 = j0_air;
-    nlskip = nlskip_air;
+    j0 = insert_air_layer(&mut vmod_in, j0);
 
     // Resolved here rather than at parse time: the deep transition depths depend on
     // the deepest hypocentre, which is only known once the slip model is read.
-    let rv = config.rupture_velocity.resolve(stoch.max_hypocentre_depth_km);
+    let rv = config
+        .source
+        .rupture_velocity
+        .resolve(stoch.max_hypocentre_depth_km);
 
     // ------------------------------------------------ source normalisation ---
-    let SourceScale { dlm, sm, subfault_count } =
-        normalise_source(&mut stoch, j0, &vmod_in, deg_to_rad, config.moment);
-
-    // ---------------------------------------- stress parameter adjustment ----
-    let targ_mag = config
-        .target_magnitude
-        .unwrap_or_else(|| 2.0 * (sm.ln() / 10.0f32.ln()) / 3.0 - 10.7);
-    let fault_area = config.fault_area.unwrap_or(stoch.fault_area_km2);
-    let mut spar_fac = match config.stress_param_adjust {
-        // Leonard (2010), active tectonic.
-        StressParamAdjust::LeonardActive => ((targ_mag - 3.99) * 10.0f32.ln()).exp() / fault_area,
-        // Leonard (2010), stable continent.
-        StressParamAdjust::LeonardStable => ((targ_mag - 4.19) * 10.0f32.ln()).exp() / fault_area,
-        StressParamAdjust::None => 1.0,
-    };
-    spar_fac = spar_fac.sqrt();
-    stress_average *= spar_fac;
+    let SourceScale {
+        dlm,
+        sm,
+        subfault_count,
+    } = normalise_source(&mut stoch, j0, &vmod_in);
 
     // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
     // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
@@ -263,9 +255,7 @@ pub fn simulate(
     // original clamped this to a compile-time maximum and SILENTLY TRUNCATED anything longer.
     let ndata = (duration / dt).trunc() as usize;
 
-    // The draw source and whether the rupture-time jitter applies are decided together,
-    // because under legacy seeding the jitter gate is a side effect of the seeding ritual.
-    let (mut rng, deviates) = seed_and_predraw(config, irand, nr, config.draws_normal_deviates());
+    let (mut rng, deviates) = seed_and_predraw(seed, nr);
 
     let mut vmod = VelocityModel::new();
     // Three separate component traces rather than one interleaved 2-D block. The interleaving
@@ -275,38 +265,38 @@ pub fn simulate(
     // Everything the two passes need that is constant for the whole run, gathered once
     // so the extracted functions take one reference instead of eighteen scalars.
     let run = RunScalars {
-        dt, fmax_hz: fmx, kappa_s: akapp, q_exponent: qfexp,
-        pi, deg_to_rad,
-        window_eps: tw_eps, window_eta: tw_eta,
-        corner_const: czero * (1.0 + fcfac),
+        dt,
+        fmax_hz: fmx,
+        kappa_s: akapp,
+        q_exponent: qfexp,
+        window_eps: tw_eps,
+        window_eta: tw_eta,
+        corner_const: czero,
         calpha,
-        rvfmax, rv_sig1: rvsig1,
+        rv_sig1: rvsig1,
         avg_subfault_km: dlm,
-        subevent_moment, moment_scale,
+        subevent_moment,
+        moment_scale,
         radv_sample_count: nr,
         site_table_len: nsfac,
         ndata,
         layer_count: j0,
-        jitter_enabled: deviates.jitter_enabled,
     };
 
     // ------------------------------------------------- the single station ---
-    // Starts at infinity so the first segment's value wins the `min` below.
-
-    // A non-negative `nl_skip` would route the model through `grandvel`, the
-    // velocity-model perturbation, which is dead under the production deck and not
-    // ported. Asserted rather than branched on, so the live path is not an `else`.
-    assert!(nlskip < 0, "grandvel is dead under the production deck (nl_skip < 0)");
     for k in 0..j0 {
         vmod[k] = vmod_in[k].into();
     }
 
     for seg in &stoch.segments {
-        let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const, deg_to_rad);
+        let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const);
 
         let geom = subfault_geometry(
             &FaultPlane {
-                origin: GeoPoint { lat_deg: seg.fault_lat_deg, lon_deg: seg.fault_lon_deg },
+                origin: GeoPoint {
+                    lat_deg: seg.fault_lat_deg,
+                    lon_deg: seg.fault_lon_deg,
+                },
                 strike_deg: seg.strike_deg,
                 dip_deg: seg.dip_deg,
                 top_depth_km: seg.top_depth_km,
@@ -316,7 +306,10 @@ pub fn simulate(
                 along_strike_count: seg.along_strike_count,
                 down_dip_count: seg.down_dip_count,
             },
-            GeoPoint { lat_deg: station.stlat, lon_deg: station.stlon },
+            GeoPoint {
+                lat_deg: station.latitude,
+                lon_deg: station.longitude,
+            },
         );
 
         let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
@@ -325,13 +318,24 @@ pub fn simulate(
         // segment -- invisible while every fixture was single-segment. Now the minimum,
         // which is what "closest subfault distance" means.
 
-        let plan =
-            SpectrumPlan::new(windows.tmax, dt, run.q_exponent, run.window_eps, run.window_eta);
+        let plan = SpectrumPlan::new(
+            windows.tmax,
+            dt,
+            run.q_exponent,
+            run.window_eps,
+            run.window_eta,
+        );
 
         subfault_pass(
             &mut rng,
             &mut acc,
-            SegmentPass { seg, geom: &geom, windows: &windows, plan: &plan, angles: &angles },
+            SegmentPass {
+                seg,
+                geom: &geom,
+                windows: &windows,
+                plan: &plan,
+                angles: &angles,
+            },
             RunContext {
                 vmod: &vmod,
                 rupture: &rv,
@@ -361,9 +365,12 @@ pub fn simulate(
         .collect();
     debug_assert_eq!(out.len(), ndata * 3);
 
-    Ok(Simulation { ndata, dt, acc: out })
+    Ok(Simulation {
+        ndata,
+        dt,
+        acc: out,
+    })
 }
-
 
 // ---------------------------------------------------------------------------
 // The pieces `simulate` is made of
@@ -380,17 +387,12 @@ struct RunScalars {
     fmax_hz: f32,
     kappa_s: f32,
     q_exponent: f32,
-    /// The source's own pi, and degrees-to-radians derived from it.
-    pi: f32,
-    deg_to_rad: f32,
     /// `tw_eps` / `tw_eta` — the Saragoni-Hart window shape.
     window_eps: f32,
     window_eta: f32,
-    /// `czero * (1 + fcfac)` — the numerator of the corner-frequency coefficient.
+    /// `c₀` — the numerator of the corner-frequency coefficient.
     corner_const: f32,
     calpha: f32,
-    /// Ceiling on the perturbed rupture-velocity factor.
-    rvfmax: f32,
     /// Rupture-velocity randomisation sigma. Zero disables the perturbation *and* its
     /// deviate consumption.
     rv_sig1: f32,
@@ -406,12 +408,6 @@ struct RunScalars {
     /// Layer count. Also read as an INDEX where a source sits below the model — see
     /// [`source_layer_for`], which is where that case is resolved.
     layer_count: usize,
-    /// Whether the rupture-time jitter draw happens.
-    ///
-    /// Under legacy seeding this is a sign test on the seed *after* the seeding ritual has
-    /// advanced it by 8, i.e. really `seed > -8`. Decided once, at the seeding site, so that
-    /// eight-off comparison does not look like a plain seed test at the point of use.
-    jitter_enabled: bool,
 }
 
 /// Per-segment angles, plus the corner-frequency coefficient hoisted out of the subfault
@@ -430,11 +426,11 @@ struct SegmentAngles {
 }
 
 impl SegmentAngles {
-    fn for_segment(seg: &Segment, calpha: f32, corner_const: f32, deg_to_rad: f32) -> Self {
+    fn for_segment(seg: &Segment, calpha: f32, corner_const: f32) -> Self {
         Self {
-            strike_rad: seg.strike_deg * deg_to_rad,
-            dip_rad: seg.dip_deg * deg_to_rad,
-            rake_rad: seg.rake_deg * deg_to_rad,
+            strike_rad: seg.strike_deg.to_radians(),
+            dip_rad: seg.dip_deg.to_radians(),
+            rake_rad: seg.rake_deg.to_radians(),
             corner_coeff: corner_const / alpha_t(seg.dip_deg, seg.rake_deg, calpha),
         }
     }
@@ -443,16 +439,12 @@ impl SegmentAngles {
 /// The generator and the pre-drawn blocks. **The fill order is the draw order**, and the draw
 /// order is part of the answer.
 struct Deviates {
-    /// Whether the rupture-time jitter draw happens. Under modern seeding it always does;
-    /// legacy reproduces the old `seed + 8 > 0` sign test.
-    jitter_enabled: bool,
-
     /// `rna` / `rnb` — the vertical component's uniforms.
     radv_uniform_a: Vec<f32>,
     radv_uniform_b: Vec<f32>,
 }
 
-/// Seed, then make the three pre-draws.
+/// Seed, then make the two pre-draws.
 ///
 /// **The order and the counts are the contract, not an implementation detail.** Seed,
 /// then `nr` uniforms into `a`, then `nr` uniforms into `b`. Changing either moves every
@@ -461,13 +453,8 @@ struct Deviates {
 ///
 /// The two uniform blocks must stay two sequential fills. Interleaving them into one pass
 /// would put different deviates in different slots and change every vertical component.
-fn seed_and_predraw(
-    config: &HfConfig,
-    seed: u64,
-    radv_sample_count: usize,
-    draw_normals: bool,
-) -> (DrawSource, Deviates) {
-    let (mut rng, jitter_enabled) = DrawSource::for_station(seed);
+fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviates) {
+    let mut rng = DrawSource::for_station(seed);
 
     // Exactly `radv_sample_count` values, which is what `vertical_radiation_spectrum` reads.
     // Filled by two SEPARATE sequential passes -- see the note there on why they must not be
@@ -477,22 +464,13 @@ fn seed_and_predraw(
     fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_a);
     fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_b);
 
-    // The `MMV` block is GONE. It drew 262,144 normal deviates per station into a buffer
-    // with exactly ONE read site, and `irandcnt` advanced once per surviving subfault:
-    // 4 reads on the mini fault, 2,827 on the alpine -- 0.0015% and 1.1% of what was
-    // drawn. It cost 3.0 ms and 1.0 MiB resident per process, which is 27% of total
-    // runtime on the mini fault, and the mini fault is the common case when a 1000-station
-    // run gives every station its own process.
-    //
-    // It also carried a subtler defect. `fill_normal_deviates` renormalises the whole
-    // block so its sum of squares equals its length, so the handful of values actually
-    // used were scaled by a factor derived from ~262,140 values that were never read.
-    // That factor is not physics; it is an artifact of a buffer size.
-    //
-    // The perturbation now draws on demand, at its point of use. See `subfault_pass`.
-    let _ = (draw_normals, config);
-
-    (rng, Deviates { jitter_enabled, radv_uniform_a, radv_uniform_b })
+    (
+        rng,
+        Deviates {
+            radv_uniform_a,
+            radv_uniform_b,
+        },
+    )
 }
 
 /// The velocity-model layer a source at `depth_km` sits in.
@@ -570,13 +548,16 @@ fn time_window_pass(
             .take_while(|s| ray.slant_km > s.start_km)
             .last()
             .copied()
-            .unwrap_or(DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km: 0.0 });
+            .unwrap_or(DurationSegment {
+                start_km: 0.0,
+                duration_s: 0.0,
+                slope_s_per_km: 0.0,
+            });
 
         // Graves & Pitarka (2010) eq. 13: `f_ci = c0 * V_Ri / (alpha_tau * pi * dl)`, with
         // `corner_coeff` carrying `c0 / alpha_tau` and `rvf * beta` being the local rupture
         // speed `V_Ri`.
-        let fce = angles.corner_coeff * rvf * shear_velocity_km_s
-            / (run.avg_subfault_km * run.pi);
+        let fce = angles.corner_coeff * rvf * shear_velocity_km_s / (run.avg_subfault_km * PI);
         // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
         // term. Two details worth stating:
         //
@@ -639,11 +620,21 @@ fn subfault_pass(
     segment: SegmentPass<'_>,
     ctx: RunContext<'_>,
 ) {
-    // Destructured immediately so the body below reads exactly as it did when these were
-    // thirteen positional parameters. The bundles exist to make the CALL safe, not to be
-    // threaded through the body field by field.
-    let SegmentPass { seg, geom, windows, plan, angles } = segment;
-    let RunContext { vmod, rupture, run, config, deviates, siteamp_log_freq } = ctx;
+    let SegmentPass {
+        seg,
+        geom,
+        windows,
+        plan,
+        angles,
+    } = segment;
+    let RunContext {
+        vmod,
+        rupture,
+        run,
+        config,
+        deviates,
+        siteamp_log_freq,
+    } = ctx;
 
     let np2 = plan.np2;
     // Fixed for the whole run, so it is built once here rather than per call. Six of
@@ -687,20 +678,18 @@ fn subfault_pass(
         let density_g_cm3 = vmod[ksrc].density_g_cm3 as f32;
 
         let base_rvf = rupture.factor(ray_geometry.depth_km);
-        let mut rvf = base_rvf;
-        if run.rv_sig1 > 0.0 {
-            // Drawn here rather than read from a pre-filled block. One deviate per
-            // surviving subfault is what was ever used; `irandcnt` existed only to index
-            // into 262,144 of them.
-            rvf = base_rvf * (normal_deviate(rng) * run.rv_sig1).exp();
-            if rvf > run.rvfmax {
-                rvf = run.rvfmax;
-            }
-        }
+        // Capped, not floored: the ceiling is what stops the perturbation driving the rupture
+        // supershear.
+        let rvf = if run.rv_sig1 > 0.0 {
+            (base_rvf * (normal_deviate(rng) * run.rv_sig1).exp())
+                .min(RUPTURE_VELOCITY_FRACTION_MAX)
+        } else {
+            base_rvf
+        };
 
-        let fce = angles.corner_coeff * rvf * shear_velocity_km_s / run.avg_subfault_km / run.pi;
+        let fce = angles.corner_coeff * rvf * shear_velocity_km_s / run.avg_subfault_km / PI;
 
-        for &ray_type in &config.rayset {
+        for &ray_type in &config.path.rayset {
             let kind = ray_type.kind();
 
             // The tracing runs even for a straight ray -- type 0 borrows type 1's tracing and
@@ -708,8 +697,13 @@ fn subfault_pass(
             // tracer also advances no random state, so removing it is safe only if you are
             // sure of that.
             let g = green_function(
-                &mut ray, vmod, run.layer_count, ray_geometry.depth_km,
-                ray_geometry.horiz_km, ray_type.trace_type(), WaveMode::Sh,
+                &mut ray,
+                vmod,
+                run.layer_count,
+                ray_geometry.depth_km,
+                ray_geometry.horiz_km,
+                ray_type.trace_type(),
+                WaveMode::Sh,
             );
             let mut stime = g.stime;
             let mut rpath = g.rpath;
@@ -743,15 +737,15 @@ fn subfault_pass(
                 ));
             }
 
-            if config.site_amp {
-                site_amplification_factors(
-                    vmod, ksrc, siteamp_log_freq, &mut siteamp_factors,
-                );
+            if config.site.apply_quarter_wavelength_site_amplification {
+                site_amplification_factors(vmod, ksrc, siteamp_log_freq, &mut siteamp_factors);
                 for spec in &mut spectrum {
                     apply_site_amplification(
                         spec.as_slice_mut().expect("an owned Array1 is contiguous"),
-                        &plan.log_frequency_hz, run.site_table_len,
-                        siteamp_log_freq, &siteamp_factors,
+                        &plan.log_frequency_hz,
+                        run.site_table_len,
+                        siteamp_log_freq,
+                        &siteamp_factors,
                     );
                 }
             }
@@ -760,7 +754,7 @@ fn subfault_pass(
             // Incidence angle from the ray parameter: sin(i)/vs = p0.
             let p0 = g.rp0;
             let incidence = if shear_velocity_km_s * p0 > 1.0 {
-                0.5 * run.pi
+                0.5 * PI
             } else {
                 (shear_velocity_km_s * p0).asin()
             };
@@ -768,7 +762,7 @@ fn subfault_pass(
                 // The straight-ray approximation ignores the traced ray parameter and
                 // uses the geometric take-off angle.
                 RayKind::StraightRay => ray_geometry.takeoff_rad,
-                RayKind::Upgoing => run.pi - incidence,
+                RayKind::Upgoing => PI - incidence,
                 RayKind::Downgoing => incidence,
             };
             let pa = ray_geometry.azimuth_rad;
@@ -789,13 +783,20 @@ fn subfault_pass(
             for (component, spec) in Component::ALL.into_iter().zip(spectrum.drain(..)) {
                 match component.azimuth_offset_deg() {
                     Some(offset_deg) => horizontal_radiation_spectrum(
-                        rng, &arrival, &plan.frequency_hz, offset_deg * run.deg_to_rad,
-                        run.radv_sample_count, &mut radiation,
+                        rng,
+                        &arrival,
+                        &plan.frequency_hz,
+                        offset_deg.to_radians(),
+                        run.radv_sample_count,
+                        &mut radiation,
                     ),
                     None => vertical_radiation_spectrum(
-                        &arrival, &plan.frequency_hz,
-                        &deviates.radv_uniform_a, &deviates.radv_uniform_b,
-                        run.radv_sample_count, &mut radiation,
+                        &arrival,
+                        &plan.frequency_hz,
+                        &deviates.radv_uniform_a,
+                        &deviates.radv_uniform_b,
+                        run.radv_sample_count,
+                        &mut radiation,
                     ),
                 };
                 // The spectrum moves: out of the Vec, into `radiate_and_invert`, which
@@ -805,30 +806,15 @@ fn subfault_pass(
                     radiate_and_invert(spec, ArrayView1::from(&radiation[..]));
             }
 
-            // Rupture time at this subfault.
-            let ratim = match config.rupture_velocity_override {
-                Some(vr) => {
-                    let along_strike_centre = 0.5 * (seg.along_strike_count as f32 + 1.0);
-                    let xra = seg.hypocentre_along_strike_km
-                        - (i as f32 - along_strike_centre) * seg.subfault_length_km;
-                    let yra =
-                        seg.hypocentre_down_dip_km - (j as f32 - 0.5) * seg.subfault_width_km;
-                    let mut t = (xra * xra + yra * yra).sqrt() / vr;
-                    if run.jitter_enabled {
-                        t += (rng.next_f32() - 0.5) * 0.1 * t;
-                    }
-                    t
-                }
-                None => subfault.rupture_time_s,
-            };
+            // Rupture time at this subfault, taken from the slip model. A constant-rupture-
+            // velocity override used to live here, computing the time from the hypocentre
+            // distance instead and optionally jittering it; nothing set it, and it was the only
+            // reachable jitter site.
+            let ratim = subfault.rupture_time_s;
 
             // Both terms truncate TOWARD ZERO, not toward negative infinity, so a negative
             // `sub_tstart` makes `kst` smaller and possibly negative. `accumulate_subfault`
             // relies on that and clips; see `PORTING_RULES.md` §7.
-            //
-            // `trunc()` is written explicitly even though `as i32` alone would round the
-            // same way, because it is the rounding MODE that is load-bearing here and a bare
-            // cast does not say so.
             let kst = (ratim / run.dt).trunc() as i32 + (sub_tstart / run.dt).trunc() as i32;
 
             // ONE DRAW, AND IT MUST STAY. A sub-event loop here once drew a uniform and
@@ -915,14 +901,14 @@ struct DurationSegment {
 type PathDuration = Vec<DurationSegment>;
 
 /// Build the path-duration table.
-///
-/// Total by construction, now that the model is an enum: there is no way to reach an
-/// uninitialised table, and rejecting a bad selector happens once, in
-/// [`PathDurationModel::from_deck`].
 fn path_duration_table(model: PathDurationModel) -> PathDuration {
     /// The single-segment models give their slope directly and have no breakpoints.
     fn constant_slope(slope_s_per_km: f32) -> PathDuration {
-        vec![DurationSegment { start_km: 0.0, duration_s: 0.0, slope_s_per_km }]
+        vec![DurationSegment {
+            start_km: 0.0,
+            duration_s: 0.0,
+            slope_s_per_km,
+        }]
     }
 
     /// The multi-segment models give (distance, duration) breakpoints; the slopes are
@@ -941,7 +927,9 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
                 slope_s_per_km: (d[1] - d[0]) / (r[1] - r[0]),
             })
             .collect();
-        let last_slope = table.last().expect("a breakpoint table has at least two entries")
+        let last_slope = table
+            .last()
+            .expect("a breakpoint table has at least two entries")
             .slope_s_per_km;
         table.push(DurationSegment {
             start_km: start_km[N - 1],
@@ -977,13 +965,11 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
     }
 }
 
-
 /// Scalars derived from the slip model before any station is simulated.
 struct SourceScale {
     /// Average subfault dimension `sqrt(length * width)`, averaged over segments, km.
     dlm: f32,
-    /// Total seismic moment. Derived from the summed subfault moments when the
-    /// deck asked for it with a negative value.
+    /// Total seismic moment, summed from the subfault moments.
     sm: f32,
     /// Count of subfaults whose relative moment exceeds 0.001 — the same
     /// threshold the subfault pass uses to skip a subfault entirely.
@@ -1007,8 +993,6 @@ fn normalise_source(
     stoch: &mut StochModel,
     layer_count: usize,
     vmod_in: &VelocityModelInput,
-    deg_to_rad: f32,
-    moment: Option<f32>,
 ) -> SourceScale {
     let nevnt = stoch.segments.len();
 
@@ -1039,13 +1023,15 @@ fn normalise_source(
     let mut xsum = 0.0f32;
 
     for segment in &mut stoch.segments {
-        let dwdj = segment.subfault_width_km * (segment.dip_deg * deg_to_rad).sin();
+        let dwdj = segment.subfault_width_km * segment.dip_deg.to_radians().sin();
         let top_depth_km = segment.top_depth_km;
         // THE WHOLE PRODUCT BELOW IS COMPUTED IN f64 and narrows only on assignment to `xmu`.
         // Narrowing earlier -- for instance by keeping the dimensions in `f32` -- shifts every
         // subfault moment by an ulp or two.
-        let (length_km, width_km) =
-            (segment.subfault_length_km as f64, segment.subfault_width_km as f64);
+        let (length_km, width_km) = (
+            segment.subfault_length_km as f64,
+            segment.subfault_width_km as f64,
+        );
 
         // Depth-major, which is storage order, so `xsum` accumulates without index arithmetic.
         // Rigidity is per depth row, not per subfault, which is why the row is the unit.
@@ -1054,8 +1040,12 @@ fn normalise_source(
             // Layer lookup. FALLS THROUGH to `layer_count` -- one past the model -- when the
             // depth is below every layer, and that index is then used. The fall-through is
             // load-bearing, not an error path.
-            let k = (0..layer_count).find(|&kk| zdep <= vmod_in[kk].depth_km).unwrap_or(layer_count);
-            let xmu = (vmod_in[k].vsh_km_s * vmod_in[k].vsh_km_s * vmod_in[k].density_g_cm3
+            let k = (0..layer_count)
+                .find(|&kk| zdep <= vmod_in[kk].depth_km)
+                .unwrap_or(layer_count);
+            let xmu = (vmod_in[k].vsh_km_s
+                * vmod_in[k].vsh_km_s
+                * vmod_in[k].density_g_cm3
                 * length_km
                 * width_km) as f32;
 
@@ -1066,9 +1056,9 @@ fn normalise_source(
         }
     }
 
-    // `None` means the deck asked for the moment to be derived from the summed
-    // subfault moments.
-    let sm = moment.unwrap_or(1.0e+20 * xsum);
+    // Always derived from the summed subfault moments. A caller-supplied total used to be able
+    // to override this; nothing supplied one.
+    let sm = 1.0e+20 * xsum;
 
     // --- pass 3: normalise relative moments to average weight unity -----------
     let mut wsum = 0.0f32;
@@ -1089,7 +1079,11 @@ fn normalise_source(
         }
     }
 
-    SourceScale { dlm, sm, subfault_count }
+    SourceScale {
+        dlm,
+        sm,
+        subfault_count,
+    }
 }
 
 /// `α_τ`, the dip-and-rake corner-frequency and rise-time adjustment.
@@ -1103,7 +1097,8 @@ fn normalise_source(
 ///
 /// Graves & Pitarka (2010) eq. 9 parameterised this on **dip alone**, piecewise — 1 above 60°,
 /// 0.82 below 45°. The continuous dip-and-rake form below is the 2015 revision, and is another
-/// marker that this code tracks the later method (see [`crate::config::defaults::CZERO`]).
+/// marker that this code tracks the later method — as does the default `c₀` of 2.0 rather than
+/// the 2010 paper's 2.1. See `papers/README.md` finding 5.
 ///
 /// `fD` tapers with dip above 45 degrees; `fR` peaks at a rake of 90 degrees. The rake is first
 /// wrapped into
@@ -1126,8 +1121,7 @@ fn alpha_t(avgdip: f32, rake_deg: f32, calpha: f32) -> f32 {
 
     let mut fr = 0.0f32;
     if (0.0..=180.0).contains(&avgrak) {
-        // `sqrt(x*x)` rather than `abs(x)`: kept because the two can differ in the last bit.
-        fr = 1.0 - ((avgrak - 90.0) * (avgrak - 90.0)).sqrt() / 90.0;
+        fr = 1.0 - (avgrak - 90.0).abs() / 90.0;
     }
 
     1.0 / (1.0 + fd * fr * calpha)

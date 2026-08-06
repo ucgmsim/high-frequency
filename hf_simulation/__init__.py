@@ -131,14 +131,7 @@ def station_seeds(
 
     Notes
     -----
-    This replaces ``int32(root) ^ stable_hash(name)``. That was a bare XOR, which is not
-    mixing at all: every structural property of the hash survived into the seed, and half
-    the results were negative. ``SeedSequence`` runs the pair through a proper avalanche,
-    and ``uint64`` makes a negative seed unrepresentable.
-
-    For *realisations* rather than stations, use ``SeedSequence(root).spawn(n)`` instead.
-    Spawning is positional, which is correct there because a realisation's index is its
-    identity — whereas a station's identity is its name, which is why this function exists.
+    If you are running several realisations of the same station, use ``SeedSequence(root_seed).spawn(n)`` instead.
     """
     if root_seed < 0:
         raise ValueError(
@@ -160,9 +153,11 @@ def station_seeds(
 class HfConfig:
     """Physical configuration for a high-frequency run.
 
-    Every field is keyword-only and named for what it is. Fields left ``None`` are
-    resolved to the built-in defaults inside the simulation, in one place, rather than
-    being spelled out as out-of-band sentinel values the way the deck required.
+    Every field is keyword-only and named for what it is.
+
+    **These defaults are the single source of truth.** The Rust core takes concrete
+    values for all of them and has no defaults of its own, so what is written here is
+    what runs -- there is no second copy to drift out of step.
     """
 
     duration_s: float
@@ -170,45 +165,47 @@ class HfConfig:
     dt: float = 0.005
     """Sample interval, seconds."""
     stress_drop_bars: float = 50.0
-    """Average stress drop."""
+    """Average stress drop. Graves and Pitarka use 50 bars."""
     fmax_hz: float = 10.0
     """High-frequency cutoff."""
     kappa_s: float = 0.045
-    """Near-surface attenuation."""
+    """Near-surface attenuation, seconds. Anderson and Hough (1984)."""
     q_frequency_exponent: float = 0.6
     """Frequency exponent of Q."""
     rayset: tuple[int, ...] = (1,)
     """Ray types to sum. 1 is the direct ray; 2 adds the Moho reflection."""
     site_amplification: bool = True
     """Apply the Boore-Joyner 1997 site amplification factors."""
-    rupture_velocity_fraction: float | None = None
-    """Rupture velocity as a fraction of shear velocity (default 0.8)."""
-    rupture_velocity_shallow: float | None = None
-    """Multiplier at the shallow end of the taper (default 0.6)."""
-    rupture_velocity_deep: float | None = None
-    """Multiplier at the deep end of the taper (default 0.6)."""
-    rupture_velocity_override: float | None = None
-    """Constant rupture velocity. ``None`` takes rupture times from the slip model."""
+    rupture_velocity_fraction: float = 0.8
+    """Rupture velocity as a fraction of shear velocity.
+
+    Graves and Pitarka (2010) set the average rupture speed at 80% of the local
+    shear-wave velocity.
+    """
+    rupture_velocity_shallow: float = 0.6
+    """Multiplier at the shallow end of the depth taper.
+
+    **Not the published value.** Graves and Pitarka (2010) give 70% for the shallow weak
+    zone; 0.6 is the locally calibrated value this pipeline has always run.
+    """
+    rupture_velocity_deep: float = 0.6
+    """Multiplier at the deep end of the depth taper.
+
+    **Not the published value** either: Graves and Pitarka (2015) give a 30% reduction
+    for the deep weak zone.
+    """
     rupture_velocity_sigma: float = 0.1
     """Log-normal scatter on the rupture-velocity factor. Live in production."""
-    corner_frequency_constant: float | None = None
-    """The C0 coefficient (default 2.0)."""
-    corner_frequency_alpha: float | None = None
-    """The Ca coefficient (default 0.1)."""
-    moment: float | None = None
-    """Total seismic moment. ``None`` derives it from the slip model."""
-    fault_area_km2: float | None = None
-    """``None`` derives it from the slip model."""
-    target_magnitude: float | None = None
-    """For the stress-parameter adjustment. ``None`` derives it from the moment."""
-    fourier_amplitude_sigma_1: float = 0.0
-    """Fourier-amplitude scatter. Zero in production, which makes that path dead."""
-    fourier_amplitude_sigma_2: float = 0.0
-    """Fourier-amplitude scatter. Zero in production."""
+    corner_frequency_constant: float = 2.0
+    """The c0 coefficient of Graves and Pitarka (2010) eq. 13 / (2015) eq. 1.
+
+    **2.0 is the 2015 value; the 2010 paper used 2.1.** This is a version marker: the
+    code tracks the later parameterisation. See ``papers/README.md`` finding 5.
+    """
+    corner_frequency_alpha: float = 0.1
+    """The c_alpha coefficient of the dip-and-rake corner-frequency adjustment."""
     path_duration_model: int = 0
     """0 Graves-Pitarka 2010, 1 WUS, 2 ENA, 11 Boore-Thompson 2014, 12 BT 2015."""
-    stress_adjust_model: int = 0
-    """0 none, 1 Leonard active, 2 Leonard stable."""
 
 
 def simulate_stations(
@@ -240,7 +237,7 @@ def simulate_stations(
     Returns
     -------
     npt.NDArray[np.float32]
-        Acceleration in cm/s², shaped ``(3, n_station, n_time)`` with the first axis
+        Acceleration in cm/s^2, shaped ``(3, n_station, n_time)`` with the first axis
         ordered as :data:`COMPONENTS`.
 
     Notes

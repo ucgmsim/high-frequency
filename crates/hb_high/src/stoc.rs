@@ -10,10 +10,10 @@
 //! *amplitude* spectrum from seismology and pair it with a *random phase* spectrum. See
 //! `PHYSICS.md` §1 and §6; `papers/README.md` records the equation-by-equation verification.
 
-use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
+use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
 
 /// `Gamma(x)`.
 ///
@@ -79,8 +79,10 @@ impl SpectrumPlan {
         let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
 
         let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
-        let path_exponent: Vec<f32> =
-            frequency_hz.iter().map(|f| f.powf(1.0 - q_exponent)).collect();
+        let path_exponent: Vec<f32> = frequency_hz
+            .iter()
+            .map(|f| f.powf(1.0 - q_exponent))
+            .collect();
 
         // Boore (1983) eq. 8, the envelope shape parameter, from the window shape alone.
         // Duplicated in `stochastic_spectrum`, which needs `b` again to form `c`.
@@ -188,8 +190,14 @@ pub fn stochastic_spectrum(
 ) -> Array1<Complex32> {
     // Destructured so that the arithmetic below reads as arithmetic, under the names the
     // derivation uses.
-    let &SourceModel { dt, window_eps, window_eta, subevent_moment, kappa_s, moment_scale } =
-        model;
+    let &SourceModel {
+        dt,
+        window_eps,
+        window_eta,
+        subevent_moment,
+        kappa_s,
+        moment_scale,
+    } = model;
     let &RayPath {
         distance_km,
         window_s,
@@ -199,7 +207,14 @@ pub fn stochastic_spectrum(
         fmax_hz,
         qbar,
     } = path;
-    let SpectrumPlan { np2, fold_count, frequency_hz, path_exponent, envelope_power, .. } = plan;
+    let SpectrumPlan {
+        np2,
+        fold_count,
+        frequency_hz,
+        path_exponent,
+        envelope_power,
+        ..
+    } = plan;
     let (np2, fold_count) = (*np2, *fold_count);
 
     let pai = std::f32::consts::PI;
@@ -338,7 +353,6 @@ pub fn stochastic_spectrum(
         *shape = a1 * a2a3 * frank as f64;
     });
 
-
     // The random phase spectrum. `remove_quadratic_trend` removes the quadratic acceleration
     // trend so that final velocity and displacement come out at zero.
     let mut a = vec![0.0f32; np2];
@@ -359,10 +373,6 @@ pub fn stochastic_spectrum(
     // Measure the realised average power of the noise spectrum, so it can be normalised out.
     // `norm_sqr()` is `re² + im²` -- the same quantity as `|z|²` without the `hypot` and the
     // squaring that undoes it, which was 4.5% of total runtime.
-    //
-    // `Sum for f32` FOLDS LEFT TO RIGHT AND MUST CONTINUE TO. This is a reduction, not an
-    // element-wise operation: any reassociating form -- chunked, pairwise, parallel -- gives a
-    // different answer and moves every waveform in the program.
     let fsa: f32 = ac[..fold_count].iter().map(Complex32::norm_sqr).sum();
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
@@ -450,7 +460,11 @@ pub fn radiate_and_invert(
         *bin *= gain
     );
 
-    inverse(spectrum.as_slice_mut().expect("an owned Array1 is contiguous"));
+    inverse(
+        spectrum
+            .as_slice_mut()
+            .expect("an owned Array1 is contiguous"),
+    );
 
     let scale = 1.0 / (RADIATION_NORM * PARTITION_FACTOR * np2 as f32);
     let mut samples = spectrum.mapv(|bin| scale * bin.re);
@@ -460,8 +474,7 @@ pub fn radiate_and_invert(
     // taper reach zero.
     let taper_len = np2 / 10;
     let step = std::f32::consts::PI / taper_len as f32;
-    let taper =
-        Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
+    let taper = Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
     let mut tail = samples.slice_mut(s![np2 - taper_len..]);
     tail *= &taper;
 

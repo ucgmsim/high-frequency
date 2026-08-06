@@ -1,26 +1,4 @@
 //! Random number generation.
-//!
-//! `Pcg32` mirrored `reference/pcg32.f` line for line until §4.3 deleted that file; the
-//! original is recoverable from git history. `normal_deviates` and `uniform_deviates` are transliterations
-//! of the Fortran routines at `hb_high_ref.f:4033` and `:2428`, unchanged from
-//! the original — they are algorithm, not generator.
-//!
-//! The entire output of the program depends on the draw sequence, so the
-//! *number* of draws each routine consumes matters as much as their values.
-//! See `PORTING_RULES.md` §5 on iteration order.
-//!
-//! # This module WAS deliberately left un-tidied, and no longer is
-//!
-//! §2.8 skipped this file's four index loops and recorded the decision as a module-level
-//! `#![allow(clippy::needless_range_loop, clippy::assign_op_pattern)]`. The reason given
-//! was that `REFACTOR.md` §2.7 would replace the whole module with `rand_pcg`, so the one
-//! thing worth preserving was a line-for-line diff against `reference/pcg32.f`.
-//!
-//! **Both halves of that reason have expired.** §4.3 deleted `reference/`, so there is no
-//! file left to diff against; and §2.7 has not happened. What remained was a blanket
-//! suppression on a module nobody was about to delete — which `ENGINEERING_RULES` §3 names
-//! as exactly how 28 warnings once accumulated unseen. §5.6 removed it, and the loops it
-//! was covering are iterators now.
 
 use ndarray::ArrayViewMut1;
 
@@ -84,7 +62,10 @@ impl Pcg32 {
                 .wrapping_add(irand as i64 as u64);
             irand += 1;
         }
-        let mut g = Self { state, inc: PCG_INC_DEFAULT };
+        let mut g = Self {
+            state,
+            inc: PCG_INC_DEFAULT,
+        };
         // Two discarded draws, matching pcg32.f.
         g.next_u32();
         g.next_u32();
@@ -151,7 +132,9 @@ impl FixtureDraws {
     /// The deck's seed is folded in so different seeds still give different runs — the
     /// gate compares two binaries at matched seeds, not one binary against a constant.
     pub fn seed(irand: i32) -> Self {
-        Self { state: (irand as i64 as u64) ^ 0x9E37_79B9_7F4A_7C15 }
+        Self {
+            state: (irand as i64 as u64) ^ 0x9E37_79B9_7F4A_7C15,
+        }
     }
 }
 
@@ -184,7 +167,7 @@ pub enum DrawSource {
 }
 
 impl DrawSource {
-    /// Build the run's draw source, and say whether the rupture-time jitter applies.
+    /// Build the run's draw source.
     ///
     /// # What was wrong with the old seeding
     ///
@@ -213,21 +196,11 @@ impl DrawSource {
     /// rather than different offsets in one. That is what `rand` provides and what the
     /// Fortran never had.
     ///
-    /// # The jitter gate
-    ///
-    /// The Fortran gates rupture-time jitter on the *mutated* seed, `irand + 8 > 0`,
-    /// which is an artifact of `init_random_seed` mutating its argument in place. It is a
-    /// live footgun: `hf_sim.py` derives per-station seeds as `int32(root) ^ hash(name)`,
-    /// so about **half of them are negative** and would silently lose jitter based on the
-    /// sign of a name hash. (Dormant in production only because `rupv` defaults to -1, so
-    /// the branch is unreachable.) Under modern seeding the jitter is simply on; legacy
-    /// reproduces the sign test exactly.
     /// # Why the seed is a `u64`, and why widening it changed nothing
     ///
     /// A station's seed is its identity, and identities should not be a scarce resource.
     /// The deck could only express `i32`, which is what forced `hf_sim.py` to derive station
     /// seeds as `int32(root) ^ stable_hash(name)` — landing about half of them negative and
-    /// arming the `irand + 8 > 0` jitter gate against the sign of a name hash.
     ///
     /// The widening is **bit-exact for every deck-sourced seed**, deliberately, because §4.2
     /// certifies this against the Fortran and a certification is worthless if the stream
@@ -239,16 +212,14 @@ impl DrawSource {
     ///
     /// What the wider type buys is the other 2⁶⁴ − 2³² seeds, which is the space
     /// `numpy.random.SeedSequence` draws station seeds from on the Python side.
-    pub fn for_station(seed: u64) -> (Self, bool) {
+    pub fn for_station(seed: u64) -> Self {
         if std::env::var_os("HB_FIXTURE_RNG").is_some() {
-            (Self::Fixture(FixtureDraws::seed(seed as i32)), true)
+            Self::Fixture(FixtureDraws::seed(seed as i32))
         } else if std::env::var_os("HB_LEGACY_SEEDING").is_some() {
-            let (rng, seeded) = Pcg32::seed(seed as i32);
-            (Self::Legacy(rng), seeded > 0)
+            Self::Legacy(Pcg32::seed(seed as i32).0)
         } else {
             use rand_core::SeedableRng;
-            let g = rand_pcg::Pcg32::seed_from_u64(seed);
-            (Self::Modern(g), true)
+            Self::Modern(rand_pcg::Pcg32::seed_from_u64(seed))
         }
     }
 }
@@ -305,7 +276,11 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
     // numerical decision, not a buffer property. Inferring it would mean a future
     // resize of the buffer silently moved every waveform, which is the §2.6b trap in a
     // new costume. Asserted rather than assumed:
-    assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
+    assert!(
+        count <= out.len(),
+        "draw count {count} exceeds buffer {}",
+        out.len()
+    );
     // x1 and x2 persist across iterations: the odd-numbered draw computes the
     // pair and returns the cosine component, the even-numbered one returns the
     // sine component from the *same* pair. In the Fortran they are ordinary
@@ -390,10 +365,16 @@ pub fn normal_deviate<R: Draws>(rng: &mut R) -> f32 {
 /// `subroutine RANU2(NRR,RN)` — `hb_high_ref.f:2428`. Uniform deviates.
 pub fn fill_uniform_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]) {
     // Explicit `count` for the same reason as `fill_normal_deviates`.
-    assert!(count <= out.len(), "draw count {count} exceeds buffer {}", out.len());
+    assert!(
+        count <= out.len(),
+        "draw count {count} exceeds buffer {}",
+        out.len()
+    );
     // Sequential by necessity -- each slot takes the next draw, and the order IS the
     // stream. `for_each` over the slice rather than an index loop; nothing else changes.
-    out[..count].iter_mut().for_each(|slot| *slot = rng.next_f32());
+    out[..count]
+        .iter_mut()
+        .for_each(|slot| *slot = rng.next_f32());
 }
 
 #[cfg(test)]
@@ -406,8 +387,11 @@ mod tests {
         let (_, irand) = Pcg32::seed(0);
         assert_eq!(irand, SEED_WORDS);
         let (_, irand) = Pcg32::seed(-3);
-        assert_eq!(irand, 5, "a small negative seed becomes positive, \
-                              which flips the line-1366 jitter branch");
+        assert_eq!(
+            irand, 5,
+            "a small negative seed becomes positive, \
+                              which flips the line-1366 jitter branch"
+        );
     }
 
     #[test]
@@ -427,8 +411,10 @@ mod tests {
             fill_normal_deviates(&mut g, nr, &mut a);
             let ss: f32 = a.iter().map(|v| v * v).sum();
             // Renormalised so sum of squares == nr, to f32 rounding.
-            assert!((ss / nr as f32 - 1.0).abs() < 1e-4,
-                    "nr={nr}: sum of squares {ss} != {nr}");
+            assert!(
+                (ss / nr as f32 - 1.0).abs() < 1e-4,
+                "nr={nr}: sum of squares {ss} != {nr}"
+            );
         }
     }
 
@@ -446,8 +432,11 @@ mod tests {
             for _ in 0..2 * nr.div_ceil(2) {
                 b.next_f32();
             }
-            assert_eq!(a.next_u32(), b.next_u32(),
-                       "nr={nr}: stream position diverged");
+            assert_eq!(
+                a.next_u32(),
+                b.next_u32(),
+                "nr={nr}: stream position diverged"
+            );
         }
     }
 }

@@ -1,24 +1,9 @@
-//! Ray theory. `cagniard_time`, `cagniard_time_derivative`, `stationary_ray_parameter`, `travel_time` and `green_function` follow in
-//! tiers 2-4.
-
+//! Ray theoretical calculations.
 use crate::fft::Complex64;
-use crate::state::{Direction, Interaction, Rays, RayState, VelocityModel, WaveMode};
+use crate::state::{Direction, Interaction, RayState, Rays, VelocityModel, WaveMode};
 
 /// `function vertical_slowness(ray_parameter,velocity_km_s)` — `hb_high_ref.f:3349`. Complex vertical slowness
 /// `eta = sqrt(1/velocity_km_s^2 - ray_parameter^2)`, with an explicit branch-cut choice.
-///
-/// This is the numerically delicate heart of the ray code. It evaluates the
-/// square root in polar form rather than algebraically so the branch can be
-/// selected deliberately, and the selection at labels 12/13 must be
-/// transliterated literally — see `PORTING_RULES.md` §2.
-///
-/// Two traps in the original worth naming:
-///
-/// * `pr = ray_parameter` assigns a `complex*16` to a `real*8`, which silently takes the
-///   real part. It is not a typo for `dreal(ray_parameter)`.
-/// * the local named `pi` is `dimag(ray_parameter)`, the **imaginary part of ray_parameter**, not
-///   3.14159. The actual pi appears separately, as the Fortran's truncated 10-digit
-///   literal `3.141592654d0`; it is `std::f64::consts::PI` here.
 pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Complex64 {
     let t1 = 1.0e-08f64;
     let rsq = 1.0f64 / (velocity_km_s * velocity_km_s);
@@ -32,7 +17,11 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     // Near the real axis the phase is forced to 0 or pi rather than taken from
     // atan2, which would be ill-conditioned there.
     let phi = if pi.abs() < t1 {
-        if a < 0.0 { std::f64::consts::PI } else { 0.0 }
+        if a < 0.0 {
+            std::f64::consts::PI
+        } else {
+            0.0
+        }
     } else {
         b.atan2(a)
     };
@@ -54,34 +43,28 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     Complex64::new(a, b)
 }
 
-/// `subroutine build_ray_path(ir,source_depth_km,receiver_depth_km)` — `hb_high_ref.f:3507`.
-///
-/// Builds the per-layer path multipliers for one ray. Sole writer of
-/// `/travel/` (`alp`, `als`, `ndeep`, `nup`), `/coff/` (`it`, `nup1`) and
-/// `/rmode/` (`love`); reads `/rays/` and `/vmod/thickness_km`.
+/// Builds the per-layer path multipliers for one ray `hb_high_ref.f:3507`.
 ///
 /// `source_depth_km` is the source depth, `receiver_depth_km` the receiver depth.
-///
-/// The Fortran's `ir` argument is gone. `/rays/` has a degenerate leading dimension of
-/// 1 and every routine hardwired the index to 1; `PORTING_RULES.md` §6 said to keep the
-/// argument "during transliteration" and drop it in Phase 3, which is here. `state.rs`
-/// dropped the dimension itself back in §2.3.
-///
-/// # A Fortran bug, fixed in §3.4
-///
-/// The original zeroes `alp(1:100)` while the arrays are `nlaymax = 500`, so layers
-/// above 100 keep multipliers from the *previous ray*. Harmless at the ~34 layers
-/// production uses, which is why it went unnoticed; wrong for any deeper model. Now
-/// zeroed in full.
-pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_km: f64, receiver_depth_km: f64) {
-
-    // `/rmode/love`: 2 for SH, 1 otherwise. Written here, read by nothing live.
-    state.love = if state.rays.nm[0] == WaveMode::Sh { 2 } else { 1 };
+pub fn build_ray_path(
+    state: &mut RayState,
+    vmod: &VelocityModel,
+    source_depth_km: f64,
+    receiver_depth_km: f64,
+) {
+    state.love = if state.rays.nm[0] == WaveMode::Sh {
+        2
+    } else {
+        1
+    };
     let n = state.rays.nd as usize;
     // The n == 0 case the doc comment describes would underflow every `n - 1` below.
     // The Fortran read past the array start instead; both are broken, but a named panic
     // beats an index arithmetic overflow.
-    assert!(n >= 1, "build_ray_path needs at least one ray segment, got nd = 0");
+    assert!(
+        n >= 1,
+        "build_ray_path needs at least one ray segment, got nd = 0"
+    );
 
     // FIXED (§3.4). The Fortran zeroes `alp(1:100)` while the arrays are dimensioned
     // `nlaymax = 500`, so a model deeper than 100 layers inherits multipliers from the
@@ -95,8 +78,6 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
     for (&layer, &mode) in state.rays.nh[..n].iter().zip(&state.rays.nm[..n]) {
         let h = layer as usize;
-        // Note these are two independent `if`s in the Fortran, not an if/else: a mode
-        // outside {3,4,5} would increment neither. The enum makes that unrepresentable.
         if mode == WaveMode::P {
             state.travel.alp[h] += 1.0;
         }
@@ -111,7 +92,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     let lis = state.rays.nh[0] as usize;
     let lir = state.rays.nh[n - 1] as usize;
     // Starts at 1, not 0: the Fortran's `nl = 1` before the count.
-    let nl = 1 + state.rays.nh[..n].iter().filter(|&&h| h as usize == lis).count() as i32;
+    let nl = 1 + state.rays.nh[..n]
+        .iter()
+        .filter(|&&h| h as usize == lis)
+        .count() as i32;
     // `(-1)**nl` in the Fortran -- integer exponentiation extracting a parity bit.
     let mut nup = Direction::from_parity(nl);
     if lir > lis {
@@ -133,11 +117,11 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
             let k = state.rays.nh[i];
             let m = state.rays.nh[i + 1];
             // Consecutive segments in the same layer means the ray turned around.
-            state.coff.it[i] = if m == k { Interaction::Reflection } else { Interaction::Transmission };
-            // A reflection flips the direction, a transmission keeps it. The Fortran
-            // writes this as four independent IFs over (nup1, it) pairs with no else,
-            // which needed a `panic!` arm here to cover the combinations that cannot
-            // arise. With both operands enums the match is total and the arm is gone.
+            state.coff.it[i] = if m == k {
+                Interaction::Reflection
+            } else {
+                Interaction::Transmission
+            };
             state.coff.nup1[i + 1] = match state.coff.it[i] {
                 Interaction::Reflection => state.coff.nup1[i].flipped(),
                 Interaction::Transmission | Interaction::Direct => state.coff.nup1[i],
@@ -149,18 +133,16 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     }
 
     // Receiver position within its layer: total thickness of everything above it.
-    // The Fortran sums layers 1..lir-1, which 0-based is indices 0..lir-1 -- so `0..lir`,
-    // NOT `1..=lir - 1`. Getting this wrong drops the air layer from the sum and moves the
-    // receiver, which is exactly the kind of silent one-layer error §2.3 is prone to.
-    // `Sum for f64` folds left to right, matching `thtot = th(i) + thtot`. (Operand order
-    // within each add differs and cannot matter -- IEEE addition is commutative.)
     let thtot: f64 = vmod.layers()[..lir].iter().map(|l| l.thickness_km).sum();
     let hrl = receiver_depth_km - thtot;
     let a1 = hrl / vmod[lir].thickness_km;
     let a2 = (vmod[lir].thickness_km - hrl) / vmod[lir].thickness_km;
     let nupa = state.coff.nup1[n - 1];
     // Labels 23/24: a shear mode takes the S multiplier, anything else the P one.
-    let trim = match nupa { Direction::Up => a1, Direction::Down => a2 };
+    let trim = match nupa {
+        Direction::Up => a1,
+        Direction::Down => a2,
+    };
     let multiplier = if state.rays.nm[n - 1].is_shear() {
         &mut state.travel.als
     } else {
@@ -176,7 +158,10 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     // Note the a1/a2 roles are SWAPPED relative to the receiver block above: `Up`
     // subtracts a2 here but a1 there. That is what the Fortran does, and it is the one
     // asymmetry that makes these two blocks not quite the same function.
-    let trim = match nup { Direction::Up => a2, Direction::Down => a1 };
+    let trim = match nup {
+        Direction::Up => a2,
+        Direction::Down => a1,
+    };
     let multiplier = if state.rays.nm[0].is_shear() {
         &mut state.travel.als
     } else {
@@ -190,27 +175,9 @@ pub fn build_ray_path(state: &mut RayState, vmod: &VelocityModel, source_depth_k
     state.travel.ndeep = state.rays.nh[..n].iter().copied().fold(0i32, i32::max);
 }
 
-/// `subroutine geometric_spreading(source_depth_km,ray_parameter,ray_type,rp,qb)` — `hb_high_ref.f:3918`.
-///
 /// Returns `(rp, qb)`: total ray path length in km, and the path-integrated
 /// attenuation operator `sum(t_i / Qs_i)`.
-///
-/// Takes only the take-off direction, not the whole `itype`: the parity is the only
-/// thing it ever read. The source comments call this "hardwired to direct and 1
-/// down-going Moho".
-///
-/// # Precision
-///
-/// `qb` is `real*4` while every other local is `real*8` under
-/// `implicit real*8 (a-h,o-z)`, so **the attenuation sum accumulates in single
-/// precision**: each `qb = qb + ti/attenuation_s(...)` promotes, adds in double, and
-/// narrows straight back. Accumulating in `f64` and narrowing once at the end
-/// would be more accurate and would not match.
-///
-/// Both magic literals are unsuffixed in the Fortran, so they carry only `f32`
-/// precision even in this `real*8` routine — see `PORTING_RULES.md` §1b. This
-/// is why they are written `0.999999f32 as f64` rather than as plain `f64`
-/// literals; the difference shows up around the 30th bit.
+/// `subroutine geometric_spreading(source_depth_km,ray_parameter,ray_type,rp,qb)` — `hb_high_ref.f:3918`.
 pub fn geometric_spreading(
     state: &RayState,
     vmod: &VelocityModel,
@@ -225,9 +192,6 @@ pub fn geometric_spreading(
     // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
     let dep: f64 = vmod.layers()[1..nh1].iter().map(|l| l.thickness_km).sum();
 
-    // The Fortran has two IFs and no else here, so a negative odd `itype` left `th1`
-    // undefined and the port needed a `panic!` to say so. Taking the direction instead of
-    // the raw integer makes that case unrepresentable.
     let th1 = match takeoff {
         Takeoff::Up => source_depth_km - dep,
         Takeoff::Down => dep + vmod[nh1].thickness_km - source_depth_km,
@@ -274,15 +238,16 @@ pub fn geometric_spreading(
 /// Cagniard complex travel time as a function of complex ray parameter:
 /// `tau(ray_parameter) = ray_parameter*range_km + sum_i [eta_p(i)*alp(i)*th(i) + eta_s(i)*als(i)*th(i)]`.
 ///
-/// The loop bound is `/travel/` slot 3, which `build_ray_path` writes as `ndeep` and this
-/// routine declares as `nd`. It is **not** `/rays/nd`, which this routine also
-/// has in scope. See `PORTING_RULES.md` §6.
-///
 /// Note the guard is `alp(i) > 0`, whereas [`cagniard_time_derivative`] uses `alp(i) /= 0`. `alp`
 /// can be negative after `build_ray_path`'s source- and receiver-layer adjustments, so
 /// the two routines genuinely disagree about negative multipliers: `cagniard_time`
 /// skips them, `cagniard_time_derivative` does not. Preserved as-is.
-pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, range_km: f64) -> Complex64 {
+pub fn cagniard_time(
+    state: &RayState,
+    vmod: &VelocityModel,
+    ray_parameter: Complex64,
+    range_km: f64,
+) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 0..=state.travel.ndeep as usize {
         let mut ea = Complex64::ZERO;
@@ -293,8 +258,9 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
         if state.travel.als[i] > 0.0 {
             eb = vertical_slowness(ray_parameter, vmod[i].vsh_km_s);
         }
-        a = a + ea * (state.travel.alp[i] as f64) * vmod[i].thickness_km
-              + eb * (state.travel.als[i] as f64) * vmod[i].thickness_km;
+        a = a
+            + ea * (state.travel.alp[i] as f64) * vmod[i].thickness_km
+            + eb * (state.travel.als[i] as f64) * vmod[i].thickness_km;
     }
     ray_parameter * range_km + a
 }
@@ -308,7 +274,12 @@ pub fn cagniard_time(state: &RayState, vmod: &VelocityModel, ray_parameter: Comp
 /// algorithm, not `(ac+bd)/(c^2+d^2)`. See [`crate::fft::Complex`]'s `Div`.
 ///
 /// The guard here is `/= 0` rather than `> 0`; see [`cagniard_time`].
-pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_parameter: Complex64, range_km: f64) -> Complex64 {
+pub fn cagniard_time_derivative(
+    state: &RayState,
+    vmod: &VelocityModel,
+    ray_parameter: Complex64,
+    range_km: f64,
+) -> Complex64 {
     let mut a = Complex64::ZERO;
     for i in 0..=state.travel.ndeep as usize {
         let mut b = Complex64::ZERO;
@@ -335,36 +306,11 @@ pub fn cagniard_time_derivative(state: &RayState, vmod: &VelocityModel, ray_para
 /// the layers the ray actually traverses) and, if `dtau/dp` is negative there,
 /// bisect down towards zero until `|dtau/dp| <= 0.01` or 40 iterations.
 ///
-/// # Silent real-part extraction, three times
-///
-/// `a`, `pn`, `p0` and `t0` are all `real*8` under `implicit real*8 (a-h,o-z)`
-/// while `cagniard_time_derivative` and `cagniard_time` return `complex*16`. Fortran assigns the real part
-/// without comment. These are not typos for `dreal(...)` — they are the
-/// intended behaviour, and the `.re` accesses below are the same operation made
-/// visible.
-///
-/// # The `222` loop is a rounding workaround, not a physical one
-///
-/// `eps` is set to `1.0d-20` and then immediately `1.0d-10`. The loop then grows
-/// it by factors of ten until `(ptest - eps)*v` is genuinely below 1, and a
-/// final factor of ten is applied on top — the source comment says
-/// "add another factor of 10 just to be sure-> problems on Linux". Reproduced
-/// exactly, including the redundant first assignment.
-///
-/// The `> 0` guard on `alp`/`als` matches [`cagniard_time`], not [`cagniard_time_derivative`]. That
-/// mismatch has a consequence: `v` is the largest velocity among layers with a
-/// *positive* multiplier, while `cagniard_time_derivative` sums over every layer with a *nonzero*
-/// one. So the layer defining `v` is always in `cagniard_time_derivative`'s sum, and as `p`
-/// approaches `1/v` that layer's `eta` approaches zero and its term diverges.
-///
-/// # The immediate-return path is unreachable
-///
-/// Consequently `a` is always large and negative at the starting point and the
-/// bisection always runs — `if(a.lt.0.) go to 11` is effectively unconditional.
-/// Measured over 72 cases with `range_km` from 0.5 to 400 km, the largest `a` seen was
-/// -2106. Every case also exits on the `|a| <= 0.01` tolerance; the
-/// 40-iteration cap never fires. Both facts are pinned in `tier3_golden.rs`.
-pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km: f64) -> (f64, f64) {
+pub fn stationary_ray_parameter(
+    state: &RayState,
+    vmod: &VelocityModel,
+    range_km: f64,
+) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
     let mut v = 0.0f64;
     for i in 0..=state.travel.ndeep as usize {
@@ -376,13 +322,9 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
         }
     }
 
-    // The Fortran sets this to 1.0d-20 and then immediately to 1.0d-10; only the second
-    // is ever read.
     let mut eps = 1.0e-10f64;
     let ptest = 1.0 / v;
 
-    // Label 222: grow eps until backing off from the cut actually lands below
-    // it in floating point.
     loop {
         let rp = (ptest - eps) * v;
         if rp >= 1.0 {
@@ -394,11 +336,9 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
 
     let mut p = Complex64::from(ptest - 10.0 * eps);
 
-    // Real part of a complex*16, assigned to a real*8.
     let mut a = cagniard_time_derivative(state, vmod, p, range_km).re;
 
     if a < 0.0 {
-        // Label 11: bisect between pn (where dtau/dp < 0) and pp.
         let mut k = 0;
         let mut pn = p.re;
         let mut pp = 0.0f64;
@@ -423,13 +363,7 @@ pub fn stationary_ray_parameter(state: &RayState, vmod: &VelocityModel, range_km
     (p0, t.re)
 }
 
-
 /// Take-off direction from the source — the parity of the Fortran's `itype`.
-///
-/// The only thing [`geometric_spreading`] reads out of `itype`, which is why it takes
-/// this rather than the whole integer. That narrowing deletes a `panic!`: the Fortran
-/// has two `IF`s and no `else`, so a *negative odd* `itype` would leave `th1` undefined,
-/// and the port had to guard it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Takeoff {
     /// Odd `itype` — the ray leaves the source upward.
@@ -442,16 +376,19 @@ impl Takeoff {
     /// Every call site passes `itype >= 1`; a negative value is what the Fortran leaves
     /// undefined, so it is rejected at the boundary rather than deep inside a formula.
     pub fn from_ray_type(ray_type: i32) -> Self {
-        assert!(ray_type >= 0, "ray type {ray_type} is negative; th1 would be undefined");
-        if ray_type % 2 == 1 { Self::Up } else { Self::Down }
+        assert!(
+            ray_type >= 0,
+            "ray type {ray_type} is negative; th1 would be undefined"
+        );
+        if ray_type % 2 == 1 {
+            Self::Up
+        } else {
+            Self::Down
+        }
     }
 }
 
 /// The ray topology `green_function` builds.
-///
-/// The Fortran encodes two independent facts in one integer: the *parity* is the take-off
-/// direction, and the *magnitude* is how many Moho bounces to add on top. That is why
-/// `geometric_spreading` used to take the whole integer in order to read one bit of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RayShape {
     /// Odd. `multiples = (itype - 1) / 2`.
@@ -463,8 +400,12 @@ enum RayShape {
 impl RayShape {
     fn from_ray_type(ray_type: i32) -> Self {
         match Takeoff::from_ray_type(ray_type) {
-            Takeoff::Up => Self::Upgoing { multiples: (ray_type - 1) / 2 },
-            Takeoff::Down => Self::DownToMoho { multiples: (ray_type - 2) / 2 },
+            Takeoff::Up => Self::Upgoing {
+                multiples: (ray_type - 1) / 2,
+            },
+            Takeoff::Down => Self::DownToMoho {
+                multiples: (ray_type - 2) / 2,
+            },
         }
     }
 }
@@ -494,11 +435,6 @@ impl<'a> RayPath<'a> {
     }
 
     /// Segments from `from` up to `receiver` inclusive, shallowing.
-    ///
-    /// The Fortran spells this `j = from; while (j >= receiver) ... j = j - 1`, which the
-    /// port carried as an `i64` counter purely so it could go negative at the bottom.
-    /// A reversed inclusive range needs no such thing, and yields nothing when
-    /// `from < receiver` — the same as the while loop failing its first test.
     fn ascend_to(&mut self, from: usize, receiver: usize) {
         for layer in (receiver..=from).rev() {
             self.push(layer);
@@ -531,13 +467,11 @@ impl<'a> RayPath<'a> {
         last + 1
     }
 
-    /// One Moho bounce: down from the receiver layer, then back up to it.
     fn moho_multiple(&mut self, vmod: &VelocityModel, receiver: usize, bottom_layer: usize) {
         let kbot = self.descend_to_moho(vmod, receiver, bottom_layer);
         self.ascend_to(kbot, receiver);
     }
 
-    /// Segment count, for `/rays/nd`.
     fn finish(self) -> usize {
         self.len
     }
@@ -556,11 +490,11 @@ pub struct GreenFunction {
     pub qbar: f32,
 }
 
-/// `subroutine green_function(...)` — `hb_high_ref.f:3174`.
-///
 /// Builds the ray segment description for a given source depth and ray type,
 /// then drives [`build_ray_path`], [`stationary_ray_parameter`], [`travel_time`] and [`geometric_spreading`] to return ray
 /// parameter, travel time, path length and path attenuation.
+/// `subroutine green_function(...)` — `hb_high_ref.f:3174`.
+///
 ///
 /// Sole writer of `/rays/`. Production passes [`WaveMode::Sh`]. `ray_type` odd means an upgoing ray, even means
 /// down-going then Moho-reflected, and values above 2 add Moho multiples —
@@ -658,13 +592,7 @@ pub fn green_function(
 
     build_ray_path(state, vmod, hs, hr);
     let (p0, t0) = stationary_ray_parameter(state, vmod, rr);
-    // The Fortran calls `travel_time` here and discards both outputs. It writes no common
-    // block, so the call is side-effect-free and was kept only to keep the two sources
-    // line-comparable. §3.4 drops it: `travel_time` is still exercised directly by the
-    // tier-3 golden, so deleting the dead call loses no coverage.
-
-    let (rpd, qbar) =
-        geometric_spreading(state, vmod, hs, p0, Takeoff::from_ray_type(ray_type));
+    let (rpd, qbar) = geometric_spreading(state, vmod, hs, p0, Takeoff::from_ray_type(ray_type));
 
     GreenFunction {
         rp0: p0 as f32,
@@ -672,76 +600,4 @@ pub fn green_function(
         rpath: rpd as f32,
         qbar,
     }
-}
-
-
-/// `subroutine travel_time(ir,ray_parameter,t0,p1,t1,range_km)` — `hb_high_ref.f:3610`.
-///
-/// Clamps the ray parameter to the smallest `1/v` over every segment and both
-/// sides of each reflecting interface, then evaluates the travel time there.
-/// Returns `(p1, t1)`.
-///
-/// # Both outputs are discarded by the only caller
-///
-/// `green_function` passes `p1`/`t1` at `:3313` and never reads them. The call is
-/// side-effect-free — `travel_time` writes no common block — so it could be elided
-/// entirely. It is kept so the two sources stay line-comparable, and because
-/// removing it would be a behaviour-neutral change that still deserves to be
-/// recorded rather than assumed. See `PORTING_RULES.md` §7.
-///
-/// The `t0` argument is likewise never read by the Fortran.
-///
-/// # Mostly inert under the production ray
-///
-/// The interface clamp only runs where `it(i) == 1`, i.e. a reflection, which
-/// `build_ray_path` sets only when consecutive segments share a layer. The production ray
-/// is strictly descending (`nh` running `ksrc` down to 2), so `it` is 0
-/// throughout and only the first clamp applies. The branch matters for the
-/// Moho-multiple ray shapes.
-///
-/// Note `nm(ir,1)` — the mode of the *first* segment governs whether P
-/// velocities are considered, for every segment.
-pub fn travel_time(
-    state: &RayState,
-    vmod: &VelocityModel,
-    ray_parameter: f64,
-    _time_guess: f64,
-    range_km: f64,
-) -> (f64, f64) {
-    let n = state.rays.nd as usize;
-    let mut p1 = ray_parameter;
-
-    for i in 0..n {
-        let nup = state.coff.nup1[i];
-        let nhi = state.rays.nh[i] as usize;
-
-        let mut vb = vmod[nhi].vsh_km_s;
-        let mut va = vb;
-        if state.rays.nm[0] != WaveMode::Sh {
-            va = vmod[nhi].vp_km_s;
-        }
-        p1 = p1.min(1.0 / va).min(1.0 / vb);
-
-        // The last segment has no interface below it.
-        if i == n - 1 {
-            continue;
-        }
-        // Transmission needs no second clamp; only reflections do.
-        if state.coff.it[i] == Interaction::Transmission {
-            continue;
-        }
-
-        // Label 10 for upgoing, otherwise the layer below.
-        let k = nup.step_from(nhi);
-        vb = vmod[k].vsh_km_s;
-        va = vb;
-        if state.rays.nm[0] != WaveMode::Sh {
-            va = vmod[k].vp_km_s;
-        }
-        p1 = p1.min(1.0 / va).min(1.0 / vb);
-    }
-
-    let p = Complex64::from(p1);
-    let t = cagniard_time(state, vmod, p, range_km);
-    (p1, t.re)
 }

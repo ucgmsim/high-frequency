@@ -5,12 +5,6 @@ Kept in its own module, and ``xarray`` is deliberately **not** a dependency of
 plumbing to its callers, and the same split is worth having here: the batch API is usable
 from a notebook, a test, or a script that just wants an array, without pulling in xarray,
 dask and h5netcdf. Importing this module is the opt-in.
-
-Notes
------
-The module is named ``dataset`` rather than ``xarray`` on purpose. A module named
-``xarray`` inside the package reads as though it shadows the real one — it would not, since
-Python 3 resolves ``import xarray`` absolutely, but a reader has to know that to be sure.
 """
 
 from collections.abc import Sequence
@@ -38,7 +32,7 @@ def to_dataset(
     Parameters
     ----------
     waveform : npt.NDArray[np.float32]
-        Acceleration in cm/s², shaped ``(3, n_station, n_time)`` as returned by
+        Acceleration in cm/s^2, shaped ``(3, n_station, n_time)`` as returned by
         :func:`hf_simulation.simulate_stations`.
     station_names : Sequence of str
         One name per station, in the order the waveforms were simulated.
@@ -62,14 +56,6 @@ def to_dataset(
     ------
     ValueError
         If the array's shape and the metadata lengths disagree.
-
-    Notes
-    -----
-    The ``component`` coordinate is labelled ``090``/``000``/``ver``, which is what those
-    three channels physically are. ``hf_sim.py`` has always labelled them ``x``/``y``/``z``,
-    which is not what they are — and nothing downstream depends on the labels, because
-    ``bb_sim`` indexes that axis positionally and relabels its own output. Fixing the names
-    here costs nothing and stops the next reader having to work it out.
     """
     if waveform.ndim != 3 or waveform.shape[0] != len(COMPONENTS):
         raise ValueError(

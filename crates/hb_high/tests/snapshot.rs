@@ -35,7 +35,8 @@
 //! once the science has been adjudicated, and put the adjudication in the commit message.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
+    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
+    SiteParameters, SourceParameters,
 };
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::sim::simulate;
@@ -48,14 +49,25 @@ const COMPONENT_COUNT: usize = 3;
 fn summarise(acc: &[f32], ndata: usize) -> String {
     let mut fields = Vec::new();
     for component in 0..COMPONENT_COUNT {
-        let samples: Vec<f32> =
-            acc.iter().skip(component).step_by(COMPONENT_COUNT).copied().collect();
+        let samples: Vec<f32> = acc
+            .iter()
+            .skip(component)
+            .step_by(COMPONENT_COUNT)
+            .copied()
+            .collect();
         assert_eq!(samples.len(), ndata);
 
-        let (argmax, peak) = samples.iter().enumerate().fold(
-            (0usize, 0.0f32),
-            |(at, best), (i, v)| if v.abs() > best { (i, v.abs()) } else { (at, best) },
-        );
+        let (argmax, peak) =
+            samples
+                .iter()
+                .enumerate()
+                .fold((0usize, 0.0f32), |(at, best), (i, v)| {
+                    if v.abs() > best {
+                        (i, v.abs())
+                    } else {
+                        (at, best)
+                    }
+                });
         // f64 accumulation: these are measuring instruments, not part of the port, and
         // there is no reason for the yardstick to carry f32 rounding.
         let energy = samples.iter().map(|v| *v as f64 * *v as f64).sum::<f64>();
@@ -90,11 +102,15 @@ fn uniform_fault(along: usize, down: usize) -> StochModel {
         .hypocentre_along_strike_km(0.0)
         .hypocentre_down_dip_km(1.5)
         .subfaults(vec![
-            Subfault { slip: 50.0, rise_time_s: 0.5, rupture_time_s: 0.0 };
+            Subfault {
+                slip: 50.0,
+                rise_time_s: 0.5,
+                rupture_time_s: 0.0
+            };
             along * down
         ])
         .build();
-    StochModel::new(vec![segment], DEG_TO_RAD)
+    StochModel::new(vec![segment])
 }
 
 /// A smoothly graded crustal model with a thin near-surface layer, so `insert_air_layer`
@@ -107,7 +123,11 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
             let qs = 50.0 + 150.0 * frac;
             hb_high::state::InputLayer {
                 depth_km: 0.0,
-                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                thickness_km: if k == layers - 1 {
+                    0.0
+                } else {
+                    (0.05 + 3.0 * frac) as f32
+                },
                 vp_km_s: vsh_km_s * 1.75,
                 vsh_km_s,
                 density_g_cm3: 1.81 + 1.5 * frac,
@@ -121,31 +141,33 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
     (vmod, count)
 }
 
-fn production_config(seed: u64, duration: f32) -> HfConfig {
+fn production_config(duration: f32) -> HfConfig {
     HfConfig {
-        stress_drop: 50.0,
-        rayset: vec![RayType(1)],
-        site_amp: true,
-        seed,
-        duration,
-        dt: 0.005,
-        fmax: 10.0,
-        kappa: 0.045,
-        qfexp: 0.6,
-        rupture_velocity: RuptureVelocity { frac: None, shallow: None, deep: None },
-        czero: None,
-        calpha: None,
-        moment: None,
-        rupture_velocity_override: None,
-        vs_moho: None,
-        nl_skip: -99,
-        fa_sig1: 0.0,
-        fa_sig2: 0.0,
-        rv_sig1: 0.1,
-        path_duration: PathDurationModel::Gp2010,
-        stress_param_adjust: StressParamAdjust::None,
-        target_magnitude: None,
-        fault_area: None,
+        source: SourceParameters {
+            stress_drop_bars: 50.0,
+            czero: 2.0,
+            calpha: 0.1,
+            rupture_velocity: RuptureVelocity {
+                frac: 0.8,
+                shallow: 0.6,
+                deep: 0.6,
+                rv_sig1: 0.1,
+            },
+        },
+        path: PathParameters {
+            rayset: vec![RayType(1)],
+            q_exponent: 0.6,
+            path_duration: PathDurationModel::Gp2010,
+        },
+        site: SiteParameters {
+            apply_quarter_wavelength_site_amplification: true,
+            kappa_s: 0.045,
+            f_max_hz: 10.0,
+        },
+        record: RecordParameters {
+            duration_s: duration,
+            dt_s: 0.005,
+        },
     }
 }
 
@@ -168,12 +190,19 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
 
         for (seed, duration) in [(12345u64, 40.0f32), (987654321, 60.0)] {
             let station = Station {
-                stlon: origin.fault_lon_deg + 0.3,
-                stlat: origin.fault_lat_deg + 0.3,
-                cap: "TEST".to_string(),
+                longitude: origin.fault_lon_deg + 0.3,
+                latitude: origin.fault_lat_deg + 0.3,
+                name: "TEST".to_string(),
             };
-            let sim = simulate(&production_config(seed, duration), &slip, &vmod, layer_count, station)
-                .expect("simulation succeeds");
+            let sim = simulate(
+                &production_config(duration),
+                &slip,
+                &vmod,
+                layer_count,
+                station,
+                seed,
+            )
+            .expect("simulation succeeds");
 
             // Silence compares equal to silence, so a snapshot of an all-zero record is a
             // gate that cannot fail. This has caught a too-short record twice already.
@@ -183,7 +212,10 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
                 "{label} seed {seed} at {duration} s produced silence -- snapshotting \
                  zeros would pin nothing"
             );
-            lines.push(format!("{label} {seed} {duration} {}", summarise(&sim.acc, sim.ndata)));
+            lines.push(format!(
+                "{label} {seed} {duration} {}",
+                summarise(&sim.acc, sim.ndata)
+            ));
         }
     }
     let produced = lines.join("\n") + "\n";
@@ -194,9 +226,8 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
         return;
     }
 
-    let recorded = std::fs::read_to_string(GOLDEN).unwrap_or_else(|e| {
-        panic!("cannot read {GOLDEN}: {e}\nrecord it with UPDATE_SNAPSHOT=1")
-    });
+    let recorded = std::fs::read_to_string(GOLDEN)
+        .unwrap_or_else(|e| panic!("cannot read {GOLDEN}: {e}\nrecord it with UPDATE_SNAPSHOT=1"));
     if recorded != produced {
         // Line-by-line, because "one of 4 cases moved" is the first thing to know and a
         // whole-string diff buries it.

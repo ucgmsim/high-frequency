@@ -43,13 +43,6 @@
 //! | [`fft`] | the transform, and the baseline correction that shares its callers |
 //! | [`rng`] | the generators, and the draw-count contract |
 //!
-//! # What this is gated on
-//!
-//! **Scientific equivalence, not bit-identity.** The distributions of intensity measures must
-//! match the reference implementation within ±2%, roughly 0.04 of a typical
-//! ground-motion-model aleatory sigma. `ENGINEERING_RULES.md` says what may and may not change;
-//! `REFACTOR.md` records how the port got here.
-//!
 //! # Three things that cannot move
 //!
 //! * **Component order** — 090, 000, vertical, interleaved component-fastest. Callers consume

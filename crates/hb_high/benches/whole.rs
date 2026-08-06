@@ -21,15 +21,15 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, RayType, RuptureVelocity, StressParamAdjust, DEG_TO_RAD,
+    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
+    SiteParameters, SourceParameters,
 };
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
 use hb_high::state::{InputLayer, VelocityModelInput};
 
 /// Grid shapes spanning three orders of magnitude in subfault count. The alpine-scale case is
 /// seconds per iteration, so it stays opt-in via `HB_BENCH_SLOW=1`.
-const FAULTS: &[(&str, usize, usize)] =
-    &[("mini", 4, 1), ("medium", 14, 8), ("alpine", 257, 11)];
+const FAULTS: &[(&str, usize, usize)] = &[("mini", 4, 1), ("medium", 14, 8), ("alpine", 257, 11)];
 
 fn uniform_fault(along: usize, down: usize) -> StochModel {
     let segment = Segment::builder()
@@ -46,11 +46,15 @@ fn uniform_fault(along: usize, down: usize) -> StochModel {
         .hypocentre_along_strike_km(0.0)
         .hypocentre_down_dip_km(1.5)
         .subfaults(vec![
-            Subfault { slip: 50.0, rise_time_s: 0.5, rupture_time_s: 0.0 };
+            Subfault {
+                slip: 50.0,
+                rise_time_s: 0.5,
+                rupture_time_s: 0.0
+            };
             along * down
         ])
         .build();
-    StochModel::new(vec![segment], DEG_TO_RAD)
+    StochModel::new(vec![segment])
 }
 
 fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
@@ -61,7 +65,11 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
             let qs = 50.0 + 150.0 * frac;
             InputLayer {
                 depth_km: 0.0,
-                thickness_km: if k == layers - 1 { 0.0 } else { (0.05 + 3.0 * frac) as f32 },
+                thickness_km: if k == layers - 1 {
+                    0.0
+                } else {
+                    (0.05 + 3.0 * frac) as f32
+                },
                 vp_km_s: vsh_km_s * 1.75,
                 vsh_km_s,
                 density_g_cm3: 1.81 + 1.5 * frac,
@@ -77,29 +85,31 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
 
 fn production_config() -> HfConfig {
     HfConfig {
-        stress_drop: 50.0,
-        rayset: vec![RayType(1)],
-        site_amp: true,
-        seed: 12345,
-        duration: 40.0,
-        dt: 0.005,
-        fmax: 10.0,
-        kappa: 0.045,
-        qfexp: 0.6,
-        rupture_velocity: RuptureVelocity { frac: None, shallow: None, deep: None },
-        czero: None,
-        calpha: None,
-        moment: None,
-        rupture_velocity_override: None,
-        vs_moho: None,
-        nl_skip: -99,
-        fa_sig1: 0.0,
-        fa_sig2: 0.0,
-        rv_sig1: 0.1,
-        path_duration: PathDurationModel::Gp2010,
-        stress_param_adjust: StressParamAdjust::None,
-        target_magnitude: None,
-        fault_area: None,
+        source: SourceParameters {
+            stress_drop_bars: 50.0,
+            czero: 2.0,
+            calpha: 0.1,
+            rupture_velocity: RuptureVelocity {
+                frac: 0.8,
+                shallow: 0.6,
+                deep: 0.6,
+                rv_sig1: 0.1,
+            },
+        },
+        path: PathParameters {
+            rayset: vec![RayType(1)],
+            q_exponent: 0.6,
+            path_duration: PathDurationModel::Gp2010,
+        },
+        site: SiteParameters {
+            apply_quarter_wavelength_site_amplification: true,
+            kappa_s: 0.045,
+            f_max_hz: 10.0,
+        },
+        record: RecordParameters {
+            duration_s: 40.0,
+            dt_s: 0.005,
+        },
     }
 }
 
@@ -119,21 +129,19 @@ fn bench_whole(c: &mut Criterion) {
             continue;
         }
         let slip = uniform_fault(along, down);
-        let station = Station { stlon: 173.3, stlat: -42.7, cap: "BENCH".to_string() };
+        let station = Station {
+            longitude: 173.3,
+            latitude: -42.7,
+            name: "BENCH".to_string(),
+        };
         group.bench_with_input(
             BenchmarkId::new(name, slip.subfault_count),
             &slip,
             |b, slip| {
                 b.iter(|| {
                     black_box(
-                        hb_high::sim::simulate(
-                            &config,
-                            slip,
-                            &vmod,
-                            layer_count,
-                            station.clone(),
-                        )
-                        .expect("simulation succeeds"),
+                        hb_high::sim::simulate(&config, slip, &vmod, layer_count, station.clone(), 12345)
+                            .expect("simulation succeeds"),
                     )
                 })
             },

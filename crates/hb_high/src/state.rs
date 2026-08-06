@@ -80,7 +80,9 @@ impl Default for VelocityModel {
 
 impl VelocityModel {
     pub fn new() -> Self {
-        Self { layers: vec![Layer::default(); NLAYMAX] }
+        Self {
+            layers: vec![Layer::default(); NLAYMAX],
+        }
     }
 
     /// The layers as a slice, for the reductions that want a range rather than one index.
@@ -138,10 +140,6 @@ pub struct InputLayer {
 #[derive(Clone, Debug)]
 pub struct VelocityModelInput {
     layers: Vec<InputLayer>,
-    // `grand`/`gr` -- 3000 floats of RNG scratch for `grandvel` -- lived here until
-    // §2.8. `grandvel` is dead under the production deck (`nl_skip < 0`) and is not
-    // ported, so nothing ever read the field, but `simulate` deep-cloned it once per
-    // call to carry it.
 }
 
 impl Default for VelocityModelInput {
@@ -152,7 +150,9 @@ impl Default for VelocityModelInput {
 
 impl VelocityModelInput {
     pub fn new() -> Self {
-        Self { layers: vec![InputLayer::default(); NLAYMAX] }
+        Self {
+            layers: vec![InputLayer::default(); NLAYMAX],
+        }
     }
 }
 
@@ -190,17 +190,11 @@ impl std::ops::IndexMut<usize> for VelocityModelInput {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // The three-valued and two-valued quantities the Fortran spells as integers
 // ---------------------------------------------------------------------------
 
 /// Wave mode of a ray segment — the Fortran's `nm`.
-///
-/// Never added, subtracted, ordered or used as a magnitude; only ever compared against
-/// the literals 3, 4 and 5 at six sites. The `md` in every golden driver takes exactly
-/// these three values, so the enum is total over the test corpus as well as production
-/// (which is hardwired to SH).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaveMode {
     /// `3` — vertically polarised shear.
@@ -264,7 +258,6 @@ pub enum Interaction {
 }
 
 impl Interaction {
-
     pub fn as_fortran(self) -> i32 {
         match self {
             Self::Transmission => 0,
@@ -292,7 +285,11 @@ impl Direction {
     /// The Fortran's `(-1)**nl`: an even count gives `+1` (up), an odd count `-1`.
     #[inline]
     pub fn from_parity(crossings: i32) -> Self {
-        if crossings % 2 == 0 { Self::Up } else { Self::Down }
+        if crossings % 2 == 0 {
+            Self::Up
+        } else {
+            Self::Down
+        }
     }
 
     #[inline]
@@ -315,7 +312,6 @@ impl Direction {
             Self::Down => layer + 1,
         }
     }
-
 
     pub fn as_fortran(self) -> i32 {
         match self {

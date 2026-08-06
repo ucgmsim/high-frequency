@@ -26,7 +26,7 @@ use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{subfault_geometry, FaultPlane, GeoPoint};
 use hb_high::stoc::{radiate_and_invert, RayPath, SourceModel, SpectrumPlan};
 use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern, RadiationAngles};
-use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, travel_time, Takeoff};
+use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, Takeoff};
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::{site_amplification_factors, apply_site_amplification};
 use hb_high::state::{params, RayState, VelocityModel};
@@ -292,9 +292,6 @@ fn bench_ray(c: &mut Criterion) {
     });
     group.bench_function("stationary_ray_parameter", |b| {
         b.iter(|| black_box(stationary_ray_parameter(&st, &v, black_box(60.0))))
-    });
-    group.bench_function("travel_time", |b| {
-        b.iter(|| black_box(travel_time(&st, &v, black_box(0.15), 0.0, black_box(60.0))))
     });
     group.bench_function("geometric_spreading", |b| {
         b.iter(|| black_box(geometric_spreading(&st, &v, black_box(30.0), black_box(0.15), Takeoff::Up)))

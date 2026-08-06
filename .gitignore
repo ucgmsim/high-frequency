@@ -23,3 +23,4 @@ harness/science_*_n*.csv
 # citation, source and verification status for each; the PDFs themselves are ~10 MB of
 # publisher-copyright material and do not belong in git history.
 papers/*.pdf
+__pycache__/
