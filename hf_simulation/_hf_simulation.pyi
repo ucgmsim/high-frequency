@@ -2,11 +2,11 @@
 
 Hand-written, and `pyo3-stub-gen` was considered and rejected. It would derive this file
 from the annotations, which is worth real money when a stub can drift — but this one cannot:
-pyo3 raises ``TypeError`` on an unknown or missing keyword argument, so
-``simulate_stations``'s ``**dataclasses.asdict`` splat fails on the first test the moment
-``HfConfig`` and ``_simulate_stations`` disagree. ``tests/test_stub.py`` makes that failure
-explicit and named rather than incidental. Generating the file would have added a TOML-parser
-dependency tree to type-check a surface a test already keeps honest.
+pyo3 raises ``TypeError`` on an unknown or missing keyword argument, so ``HfConfig._to_rust``
+fails on the first test the moment the dataclass and these constructors disagree.
+``tests/test_stub.py`` makes that failure explicit and named rather than incidental.
+Generating the file would have added a TOML-parser dependency tree to type-check a surface a
+test already keeps honest.
 """
 
 import numpy as np
@@ -62,25 +62,67 @@ class VelocityModel1D:
     @property
     def layer_count(self) -> int: ...
 
-def _simulate_stations(
-    slip_model: SlipModel,
-    velocity_model: VelocityModel1D,
-    *,
-    latitude_deg: FloatArray1D,
-    longitude_deg: FloatArray1D,
-    station_seed: SeedArray,
-    duration_s: float,
-    dt: float,
-    stress_drop_bars: float,
-    fmax_hz: float,
-    kappa_s: float,
-    q_frequency_exponent: float,
-    rayset: list[int],
-    rupture_velocity_fraction: float,
-    rupture_velocity_shallow: float,
-    rupture_velocity_deep: float,
-    rupture_velocity_sigma: float,
-    corner_frequency_constant: float,
-    corner_frequency_alpha: float,
-    path_duration_model: int,
-) -> FloatArray3D: ...
+class SourceParameters:
+    """The earthquake source: radiation strength and rupture speed."""
+
+    def __init__(
+        self,
+        *,
+        stress_drop_bars: float,
+        corner_frequency_constant: float,
+        corner_frequency_alpha: float,
+        rupture_velocity_fraction: float,
+        rupture_velocity_shallow: float,
+        rupture_velocity_deep: float,
+        rupture_velocity_sigma: float,
+    ) -> None: ...
+
+class PathParameters:
+    """The path from source to site."""
+
+    def __init__(
+        self,
+        *,
+        rayset: list[int],
+        q_frequency_exponent: float,
+        path_duration_model: int,
+    ) -> None: ...
+
+class SiteParameters:
+    """The near-surface."""
+
+    def __init__(self, *, kappa_s: float, fmax_hz: float) -> None: ...
+
+class RecordParameters:
+    """The shape of the record to produce."""
+
+    def __init__(self, *, duration_s: float, dt: float) -> None: ...
+
+class HfConfig:
+    """Everything needed to simulate."""
+
+    def __init__(
+        self,
+        *,
+        source: SourceParameters,
+        path: PathParameters,
+        site: SiteParameters,
+        record: RecordParameters,
+    ) -> None: ...
+
+class Simulator:
+    """A configured simulation, ready to run stations against."""
+
+    def __init__(
+        self,
+        config: HfConfig,
+        slip_model: SlipModel,
+        velocity_model: VelocityModel1D,
+    ) -> None: ...
+    def run_stations(
+        self,
+        *,
+        latitude_deg: FloatArray1D,
+        longitude_deg: FloatArray1D,
+        station_seed: SeedArray,
+    ) -> FloatArray3D: ...

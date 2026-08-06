@@ -33,7 +33,7 @@ def to_dataset(
     ----------
     waveform : npt.NDArray[np.float32]
         Acceleration in cm/s^2, shaped ``(3, n_station, n_time)`` as returned by
-        :func:`hf_simulation.simulate_stations`.
+        :meth:`hf_simulation.Simulator.run_stations`.
     station_names : Sequence of str
         One name per station, in the order the waveforms were simulated.
     latitude_deg : npt.NDArray[np.float32]

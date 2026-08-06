@@ -404,6 +404,11 @@ impl Simulator {
         })
     }
 
+    /// Samples per component in every record this produces.
+    pub fn ndata(&self) -> usize {
+        self.run.ndata
+    }
+
     /// Simulate one station.
     pub fn run(&self, station: crate::input::Station, seed: u64) -> Simulation {
         let (mut rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);

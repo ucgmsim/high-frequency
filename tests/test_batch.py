@@ -22,9 +22,9 @@ from hf_simulation import (
     COMPONENTS,
     FaultSegment,
     HfConfig,
+    Simulator,
     SlipModel,
     VelocityModel1D,
-    simulate_stations,
     station_seeds,
 )
 
@@ -110,10 +110,10 @@ def simulate(
     np.ndarray
         Waveforms, shaped ``(3, len(indices), n_time)``.
     """
-    return simulate_stations(
-        slip_model,
-        velocity_model,
-        HfConfig(duration_s=RECORD_DURATION_S),
+    simulator = Simulator(
+        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+    )
+    return simulator.run_stations(
         latitude_deg=STATION_LATITUDE[list(indices)],
         longitude_deg=STATION_LONGITUDE[list(indices)],
         station_seed=station_seeds(1234, [STATION_NAMES[i] for i in indices]),
@@ -218,11 +218,11 @@ def test_an_empty_batch_is_an_error(
 ) -> None:
     """Zero stations cannot yield an array of unknown time length."""
     empty32 = np.array([], np.float32)
+    simulator = Simulator(
+        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+    )
     with pytest.raises(ValueError, match="nothing to simulate"):
-        simulate_stations(
-            slip_model,
-            velocity_model,
-            HfConfig(duration_s=RECORD_DURATION_S),
+        simulator.run_stations(
             latitude_deg=empty32,
             longitude_deg=empty32,
             station_seed=np.array([], np.uint64),
@@ -233,11 +233,11 @@ def test_mismatched_station_arrays_are_rejected(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
     """One entry per station, in every array, or an error naming all three lengths."""
+    simulator = Simulator(
+        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+    )
     with pytest.raises(ValueError, match="one entry per station"):
-        simulate_stations(
-            slip_model,
-            velocity_model,
-            HfConfig(duration_s=RECORD_DURATION_S),
+        simulator.run_stations(
             latitude_deg=STATION_LATITUDE,
             longitude_deg=STATION_LONGITUDE[:2],
             station_seed=station_seeds(1234, STATION_NAMES),

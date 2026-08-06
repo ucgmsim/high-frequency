@@ -201,140 +201,219 @@ impl PyVelocityModel {
     }
 }
 
-/// Simulate a batch of stations against one source and one velocity model.
-///
-/// Returns acceleration in cm/s^2, shaped `(3, n_station, n_time)` with components ordered
-/// 090/000/vertical.
-///
-#[pyfunction]
-#[pyo3(signature = (
-    slip_model, velocity_model, *,
-    latitude_deg, longitude_deg, station_seed,
-    duration_s, dt, stress_drop_bars, fmax_hz, kappa_s, q_frequency_exponent,
-    rayset,
-    rupture_velocity_fraction, rupture_velocity_shallow, rupture_velocity_deep,
-    rupture_velocity_sigma, corner_frequency_constant, corner_frequency_alpha,
-    path_duration_model,
-))]
-#[allow(clippy::too_many_arguments)]
-fn _simulate_stations<'py>(
-    py: Python<'py>,
-    slip_model: &PySlipModel,
-    velocity_model: &PyVelocityModel,
-    latitude_deg: PyReadonlyArray1<f32>,
-    longitude_deg: PyReadonlyArray1<f32>,
-    station_seed: PyReadonlyArray1<u64>,
-    duration_s: f32,
-    dt: f32,
-    stress_drop_bars: f32,
-    fmax_hz: f32,
-    kappa_s: f32,
-    q_frequency_exponent: f32,
-    rayset: Vec<i32>,
-    rupture_velocity_fraction: f32,
-    rupture_velocity_shallow: f32,
-    rupture_velocity_deep: f32,
-    rupture_velocity_sigma: f32,
-    corner_frequency_constant: f32,
-    corner_frequency_alpha: f32,
-    path_duration_model: i32,
-) -> PyResult<Bound<'py, PyArray3<f32>>> {
-    let (latitude, longitude, seeds) = (
-        latitude_deg.as_slice()?,
-        longitude_deg.as_slice()?,
-        station_seed.as_slice()?,
-    );
-    if latitude.len() != longitude.len() || latitude.len() != seeds.len() {
-        return Err(PyValueError::new_err(format!(
-            "latitude_deg ({}), longitude_deg ({}) and station_seed ({}) must have one \
-             entry per station",
-            latitude.len(),
-            longitude.len(),
-            seeds.len()
-        )));
-    }
-    if rayset.is_empty() {
-        return Err(PyValueError::new_err(
-            "rayset must name at least one ray type",
-        ));
-    }
-    let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
-        PyValueError::new_err(format!(
-            "path_duration_model {path_duration_model} is not one of 0, 1, 2, 11, 12 -- \
-             the Fortran left `ndur` undefined for every other value"
-        ))
-    })?;
+/// The earthquake source: how strong the high-frequency radiation is, and how fast the
+/// rupture travels.
+#[pyclass(frozen, name = "SourceParameters")]
+pub struct PySourceParameters {
+    inner: SourceParameters,
+}
 
-    let config = HfConfig {
-        source: SourceParameters {
-            stress_drop_bars,
-            czero: corner_frequency_constant,
-            calpha: corner_frequency_alpha,
-            rupture_velocity: RuptureVelocity {
-                frac: rupture_velocity_fraction,
-                shallow: rupture_velocity_shallow,
-                deep: rupture_velocity_deep,
-                rv_sig1: rupture_velocity_sigma,
-            },
-        },
-        path: PathParameters {
-            rayset: rayset.into_iter().map(RayType).collect(),
-            q_exponent: q_frequency_exponent,
-            path_duration,
-        },
-        site: SiteParameters {
-            kappa_s,
-            f_max_hz: fmax_hz,
-        },
-        record: RecordParameters {
-            duration_s,
-            dt_s: dt,
-        },
-    };
-
-    let station_count = latitude.len();
-    if station_count == 0 {
-        return Err(PyValueError::new_err(
-            "no stations given, so there is nothing to simulate",
-        ));
-    }
-
-    // Built ONCE for the whole batch. Everything station-independent -- the air layer, the
-    // slip-model normalisation, the moment scaling, the per-segment angles -- happens here
-    // rather than per station.
-    let simulator = Simulator::new(&config, &slip_model.inner, &velocity_model.input)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let waveform: Array3<f32> = py.detach(|| {
-        // One station first, to learn n_time before allocating the batch. Every station
-        // shares the duration and dt, so ndata is the same for all of them.
-        let mut waveform: Option<Array3<f32>> = None;
-
-        for (index, ((&stlat, &stlon), &seed)) in
-            latitude.iter().zip(longitude).zip(seeds).enumerate()
-        {
-            let sim = simulator.run(
-                Station {
-                    latitude: stlat,
-                    longitude: stlon,
-                    name: format!("station-{index}"),
+#[pymethods]
+impl PySourceParameters {
+    #[new]
+    #[pyo3(signature = (*, stress_drop_bars, corner_frequency_constant, corner_frequency_alpha,
+                        rupture_velocity_fraction, rupture_velocity_shallow,
+                        rupture_velocity_deep, rupture_velocity_sigma))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        stress_drop_bars: f32,
+        corner_frequency_constant: f32,
+        corner_frequency_alpha: f32,
+        rupture_velocity_fraction: f32,
+        rupture_velocity_shallow: f32,
+        rupture_velocity_deep: f32,
+        rupture_velocity_sigma: f32,
+    ) -> Self {
+        Self {
+            inner: SourceParameters {
+                stress_drop_bars,
+                czero: corner_frequency_constant,
+                calpha: corner_frequency_alpha,
+                rupture_velocity: RuptureVelocity {
+                    frac: rupture_velocity_fraction,
+                    shallow: rupture_velocity_shallow,
+                    deep: rupture_velocity_deep,
+                    rv_sig1: rupture_velocity_sigma,
                 },
-                seed,
-            );
-
-            let out = waveform
-                .get_or_insert_with(|| Array3::zeros((COMPONENT_COUNT, station_count, sim.ndata)));
-            // `sim.acc` is already (n_components, n_time); this is a row copy per component
-            // into the batch's station slot, where it used to be a de-interleave.
-            for (component, trace) in sim.acc.rows().into_iter().enumerate() {
-                out.slice_mut(s![component, index, ..]).assign(&trace);
-            }
+            },
         }
+    }
+}
 
-        waveform.expect("the batch is non-empty, checked above")
-    });
+/// The path from source to site: which rays, and how the medium attenuates along them.
+#[pyclass(frozen, name = "PathParameters")]
+pub struct PyPathParameters {
+    inner: PathParameters,
+}
 
-    Ok(waveform.into_pyarray(py))
+#[pymethods]
+impl PyPathParameters {
+    #[new]
+    #[pyo3(signature = (*, rayset, q_frequency_exponent, path_duration_model))]
+    fn new(rayset: Vec<i32>, q_frequency_exponent: f32, path_duration_model: i32) -> PyResult<Self> {
+        // Only the checks Python cannot make for itself: this one decodes a non-contiguous
+        // integer set that the Rust enum owns.
+        let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "path_duration_model {path_duration_model} is not one of 0, 1, 2, 11, 12"
+            ))
+        })?;
+        Ok(Self {
+            inner: PathParameters {
+                rayset: rayset.into_iter().map(RayType).collect(),
+                q_exponent: q_frequency_exponent,
+                path_duration,
+            },
+        })
+    }
+}
+
+/// The near-surface: what happens in the last few hundred metres.
+///
+/// Quarter-wavelength site amplification is always applied and is not a field here.
+#[pyclass(frozen, name = "SiteParameters")]
+pub struct PySiteParameters {
+    inner: SiteParameters,
+}
+
+#[pymethods]
+impl PySiteParameters {
+    #[new]
+    #[pyo3(signature = (*, kappa_s, fmax_hz))]
+    fn new(kappa_s: f32, fmax_hz: f32) -> Self {
+        Self {
+            inner: SiteParameters {
+                kappa_s,
+                f_max_hz: fmax_hz,
+            },
+        }
+    }
+}
+
+/// The shape of the record to produce.
+#[pyclass(frozen, name = "RecordParameters")]
+pub struct PyRecordParameters {
+    inner: RecordParameters,
+}
+
+#[pymethods]
+impl PyRecordParameters {
+    #[new]
+    #[pyo3(signature = (*, duration_s, dt))]
+    fn new(duration_s: f32, dt: f32) -> Self {
+        Self {
+            inner: RecordParameters {
+                duration_s,
+                dt_s: dt,
+            },
+        }
+    }
+}
+
+/// Everything needed to simulate, with nothing about where the inputs came from.
+#[pyclass(frozen, name = "HfConfig")]
+pub struct PyHfConfig {
+    inner: HfConfig,
+}
+
+#[pymethods]
+impl PyHfConfig {
+    #[new]
+    #[pyo3(signature = (*, source, path, site, record))]
+    fn new(
+        source: &PySourceParameters,
+        path: &PyPathParameters,
+        site: &PySiteParameters,
+        record: &PyRecordParameters,
+    ) -> Self {
+        Self {
+            inner: HfConfig {
+                source: source.inner.clone(),
+                path: path.inner.clone(),
+                site: site.inner.clone(),
+                record: record.inner.clone(),
+            },
+        }
+    }
+}
+
+/// A configured simulation, ready to run stations against.
+///
+/// Built once per source; the station-independent work — the air layer, the slip-model
+/// normalisation, the moment scaling — happens here rather than per station.
+///
+/// # Threads, not processes
+///
+/// `run_stations` releases the GIL and takes `&self`, so one of these can be shared across a
+/// **dask thread pool**. It is deliberately not picklable: `dask.distributed` would need to
+/// send it between processes, and a silent re-normalisation on the far side is a worse
+/// failure than a loud one here.
+#[pyclass(frozen, name = "Simulator")]
+pub struct PySimulator {
+    inner: Simulator,
+}
+
+#[pymethods]
+impl PySimulator {
+    #[new]
+    #[pyo3(signature = (config, slip_model, velocity_model))]
+    fn new(
+        config: &PyHfConfig,
+        slip_model: &PySlipModel,
+        velocity_model: &PyVelocityModel,
+    ) -> PyResult<Self> {
+        Simulator::new(&config.inner, &slip_model.inner, &velocity_model.input)
+            .map(|inner| Self { inner })
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Simulate a batch of stations.
+    ///
+    /// Returns acceleration in cm/s^2, shaped `(3, n_station, n_time)` with components
+    /// ordered 090/000/vertical.
+    #[pyo3(signature = (*, latitude_deg, longitude_deg, station_seed))]
+    fn run_stations<'py>(
+        &self,
+        py: Python<'py>,
+        latitude_deg: PyReadonlyArray1<f32>,
+        longitude_deg: PyReadonlyArray1<f32>,
+        station_seed: PyReadonlyArray1<u64>,
+    ) -> PyResult<Bound<'py, PyArray3<f32>>> {
+        // `as_slice` is the one check Rust must own: it fails for a non-contiguous array,
+        // which Python cannot see from the outside.
+        let (latitude, longitude, seeds) = (
+            latitude_deg.as_slice()?,
+            longitude_deg.as_slice()?,
+            station_seed.as_slice()?,
+        );
+
+        let station_count = latitude.len();
+        let waveform: Array3<f32> = py.detach(|| {
+            let ndata = self.inner.ndata();
+            let mut waveform = Array3::zeros((COMPONENT_COUNT, station_count, ndata));
+
+            for (index, ((&stlat, &stlon), &seed)) in
+                latitude.iter().zip(longitude).zip(seeds).enumerate()
+            {
+                let sim = self.inner.run(
+                    Station {
+                        latitude: stlat,
+                        longitude: stlon,
+                        name: format!("station-{index}"),
+                    },
+                    seed,
+                );
+                // `sim.acc` is already (n_components, n_time), so this is a row copy per
+                // component into the batch's station slot.
+                for (component, trace) in sim.acc.rows().into_iter().enumerate() {
+                    waveform.slice_mut(s![component, index, ..]).assign(&trace);
+                }
+            }
+
+            waveform
+        });
+        Ok(waveform.into_pyarray(py))
+    }
 }
 
 #[pymodule]
@@ -343,6 +422,11 @@ fn hf_simulation(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFaultSegment>()?;
     m.add_class::<PySlipModel>()?;
     m.add_class::<PyVelocityModel>()?;
-    m.add_function(wrap_pyfunction!(_simulate_stations, m)?)?;
+    m.add_class::<PySourceParameters>()?;
+    m.add_class::<PyPathParameters>()?;
+    m.add_class::<PySiteParameters>()?;
+    m.add_class::<PyRecordParameters>()?;
+    m.add_class::<PyHfConfig>()?;
+    m.add_class::<PySimulator>()?;
     Ok(())
 }

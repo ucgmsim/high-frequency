@@ -27,7 +27,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run --extra test pytest --cov=hf_simulation --cov-report=html tests
+          uv run --extra test pytest --doctest-modules --cov=hf_simulation --cov-report=html tests hf_simulation
 
       - name: Combine coverage and fail it it’s under 100 %
         run: |
