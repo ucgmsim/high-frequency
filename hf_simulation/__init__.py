@@ -14,7 +14,7 @@ Examples
 --------
 >>> import numpy as np
 >>> from hf_simulation import FaultSegment, HfConfig, SlipModel, VelocityModel1D
->>> from hf_simulation import Simulator, station_seeds
+>>> from hf_simulation import RecordParameters, Simulator, station_seeds
 >>> segment = FaultSegment(
 ...     longitude_deg=173.0, latitude_deg=-43.0,
 ...     strike_deg=220.0, dip_deg=70.0, rake_deg=160.0,
@@ -35,7 +35,7 @@ Examples
 ...         quality_factor_s=np.array([50.0, 100.0, 200.0], np.float32),
 ...         vs_moho_km_s=999.9,
 ...     ),
-...     HfConfig(duration_s=10.0),
+...     HfConfig(record=RecordParameters(duration_s=10.0)),
 ... )
 >>> waveform = simulator.run_stations(
 ...     latitude_deg=np.array([-43.4], np.float32),
@@ -84,9 +84,14 @@ __all__ = [
     "FaultSegment",
     "HfConfig",
     "PathDurationModel",
+    "PathParameters",
     "Ray",
+    "RecordParameters",
+    "RuptureVelocity",
     "Simulator",
+    "SiteParameters",
     "SlipModel",
+    "SourceParameters",
     "VelocityModel1D",
     "station_seeds",
 ]
@@ -208,76 +213,112 @@ def station_seeds(
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class HfConfig:
-    """Physical configuration for a high-frequency run.
+class RuptureVelocity:
+    """The depth-dependent rupture-velocity taper.
 
-    Every field is keyword-only and named for what it is.
-
-    **These defaults are the single source of truth.** The Rust core takes concrete
-    values for all of them and has no defaults of its own, so what is written here is
-    what runs -- there is no second copy to drift out of step.
+    Rupture propagates more slowly near the surface. Graves and Pitarka (2010) model that
+    as a "shallow weak zone" above 5 km; the 2015 paper added an analogous deep one. The
+    transition depths are not settable -- they track the deepest hypocentre -- but these
+    three multipliers are.
     """
 
-    duration_s: float
-    """Record length, seconds."""
-    dt: float = 0.005
-    """Sample interval, seconds."""
-    stress_drop_bars: float = 50.0
-    """Average stress drop. Graves and Pitarka use 50 bars."""
-    fmax_hz: float = 10.0
-    """High-frequency cutoff."""
-    kappa_s: float = 0.045
-    """Near-surface attenuation, seconds. Anderson and Hough (1984)."""
-    q_frequency_exponent: float = 0.6
-    """Frequency exponent of Q."""
-    rayset: tuple[Ray, ...] = (Ray.DIRECT,)
-    """Ray paths to sum over."""
-    rupture_velocity_fraction: float = 0.8
-    """Rupture velocity as a fraction of shear velocity.
+    fraction: float = 0.8
+    """Rupture velocity as a fraction of the local shear-wave velocity.
 
-    Graves and Pitarka (2010) set the average rupture speed at 80% of the local
-    shear-wave velocity.
+    Graves and Pitarka (2010) set the average rupture speed at 80% of it.
     """
-    rupture_velocity_shallow: float = 0.6
-    """Multiplier at the shallow end of the depth taper.
+    shallow: float = 0.6
+    """Multiplier at the shallow end of the taper.
 
     **Not the published value.** Graves and Pitarka (2010) give 70% for the shallow weak
     zone; 0.6 is the locally calibrated value this pipeline has always run.
     """
-    rupture_velocity_deep: float = 0.6
-    """Multiplier at the deep end of the depth taper.
+    deep: float = 0.6
+    """Multiplier at the deep end of the taper.
 
-    **Not the published value** either: Graves and Pitarka (2015) give a 30% reduction
-    for the deep weak zone.
+    **Not the published value** either: Graves and Pitarka (2015) give a 30% reduction.
     """
-    rupture_velocity_sigma: float = 0.1
-    """Log-normal scatter on the rupture-velocity factor. Live in production."""
+    sigma: float = 0.1
+    """Log-normal scatter on the factor. Live in production, unlike the two multipliers."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SourceParameters:
+    """The earthquake source: radiation strength and how fast the rupture travels."""
+
+    stress_drop_bars: float = 50.0
+    """Brune stress parameter. Graves and Pitarka use 50 bars.
+
+    Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
+    parameter controlling the strength of the high-frequency radiation, not as a measured
+    static stress drop".
+    """
     corner_frequency_constant: float = 2.0
     """The c0 coefficient of Graves and Pitarka (2010) eq. 13 / (2015) eq. 1.
 
-    **2.0 is the 2015 value; the 2010 paper used 2.1.** This is a version marker: the
-    code tracks the later parameterisation. See ``papers/README.md`` finding 5.
+    **2.0 is the 2015 value; the 2010 paper used 2.1.** This is a version marker: the code
+    tracks the later parameterisation. See ``papers/README.md`` finding 5.
     """
     corner_frequency_alpha: float = 0.1
     """The c_alpha coefficient of the dip-and-rake corner-frequency adjustment."""
+    rupture_velocity: RuptureVelocity = dataclasses.field(
+        default_factory=RuptureVelocity
+    )
+    """The depth-dependent rupture-velocity taper."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PathParameters:
+    """The path from source to site: which rays, and how the medium attenuates."""
+
+    rayset: tuple[Ray, ...] = (Ray.DIRECT,)
+    """Ray paths to sum over."""
+    q_frequency_exponent: float = 0.6
+    """The x in Q(f) = Q0 * f^x."""
     path_duration_model: PathDurationModel = PathDurationModel.GRAVES_PITARKA_2010
     """How record duration grows with distance."""
 
-    def __post_init__(self) -> None:
-        """Reject values that would produce a silently wrong record.
 
-        Raises
-        ------
-        ValueError
-            If a duration, sample interval or stress drop is not positive, or ``rayset``
-            is empty.
-        """
-        for name in ("duration_s", "dt", "stress_drop_bars", "fmax_hz"):
-            value = getattr(self, name)
-            if not value > 0:
-                raise ValueError(f"{name} must be positive, got {value}")
-        if not self.rayset:
-            raise ValueError("rayset must name at least one ray path")
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SiteParameters:
+    """The near-surface: what happens in the last few hundred metres.
+
+    Quarter-wavelength site amplification is always applied and is not a field here.
+    """
+
+    kappa_s: float = 0.045
+    """Near-surface attenuation, seconds. Anderson and Hough (1984)."""
+    fmax_hz: float = 10.0
+    """High-frequency cutoff."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class RecordParameters:
+    """The shape of the record to produce."""
+
+    duration_s: float
+    """Record length, seconds. No default: it is a property of the run, not of the physics."""
+    dt: float = 0.005
+    """Sample interval, seconds."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class HfConfig:
+    """Physical configuration for a high-frequency run.
+
+    The four groups mirror the simulation core's own decomposition exactly, field for
+    field, so that a configuration written down elsewhere -- a workflow realisation, say --
+    can be deserialised straight into this rather than translated into it.
+
+    **These defaults are the single source of truth.** The core takes concrete values for
+    all of them and has no defaults of its own, so what is written here is what runs.
+    """
+
+    record: RecordParameters
+    """Duration and sample interval. Required, because `duration_s` has no default."""
+    source: SourceParameters = dataclasses.field(default_factory=SourceParameters)
+    path: PathParameters = dataclasses.field(default_factory=PathParameters)
+    site: SiteParameters = dataclasses.field(default_factory=SiteParameters)
 
     def _to_rust(self) -> _RustHfConfig:
         """Build the Rust configuration objects this dataclass describes.
@@ -285,25 +326,29 @@ class HfConfig:
         Returns
         -------
         _RustHfConfig
-            The same values, grouped the way the simulation core wants them.
+            The same values, as the types the simulation core takes.
         """
         return _RustHfConfig(
             source=_RustSourceParameters(
-                stress_drop_bars=self.stress_drop_bars,
-                corner_frequency_constant=self.corner_frequency_constant,
-                corner_frequency_alpha=self.corner_frequency_alpha,
-                rupture_velocity_fraction=self.rupture_velocity_fraction,
-                rupture_velocity_shallow=self.rupture_velocity_shallow,
-                rupture_velocity_deep=self.rupture_velocity_deep,
-                rupture_velocity_sigma=self.rupture_velocity_sigma,
+                stress_drop_bars=self.source.stress_drop_bars,
+                corner_frequency_constant=self.source.corner_frequency_constant,
+                corner_frequency_alpha=self.source.corner_frequency_alpha,
+                rupture_velocity_fraction=self.source.rupture_velocity.fraction,
+                rupture_velocity_shallow=self.source.rupture_velocity.shallow,
+                rupture_velocity_deep=self.source.rupture_velocity.deep,
+                rupture_velocity_sigma=self.source.rupture_velocity.sigma,
             ),
             path=_RustPathParameters(
-                rayset=[int(ray) for ray in self.rayset],
-                q_frequency_exponent=self.q_frequency_exponent,
-                path_duration_model=int(self.path_duration_model),
+                rayset=[int(ray) for ray in self.path.rayset],
+                q_frequency_exponent=self.path.q_frequency_exponent,
+                path_duration_model=int(self.path.path_duration_model),
             ),
-            site=_RustSiteParameters(kappa_s=self.kappa_s, fmax_hz=self.fmax_hz),
-            record=_RustRecordParameters(duration_s=self.duration_s, dt=self.dt),
+            site=_RustSiteParameters(
+                kappa_s=self.site.kappa_s, fmax_hz=self.site.fmax_hz
+            ),
+            record=_RustRecordParameters(
+                duration_s=self.record.duration_s, dt=self.record.dt
+            ),
         )
 
 

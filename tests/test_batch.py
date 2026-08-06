@@ -22,6 +22,7 @@ from hf_simulation import (
     COMPONENTS,
     FaultSegment,
     HfConfig,
+    RecordParameters,
     Simulator,
     SlipModel,
     VelocityModel1D,
@@ -111,7 +112,9 @@ def simulate(
         Waveforms, shaped ``(3, len(indices), n_time)``.
     """
     simulator = Simulator(
-        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
     )
     return simulator.run_stations(
         latitude_deg=STATION_LATITUDE[list(indices)],
@@ -145,7 +148,7 @@ def test_shape_and_components(
     assert waveform.shape == (
         len(COMPONENTS),
         4,
-        int(RECORD_DURATION_S / HfConfig(duration_s=RECORD_DURATION_S).dt),
+        int(RECORD_DURATION_S / RecordParameters(duration_s=RECORD_DURATION_S).dt),
     )
     assert waveform.dtype == np.float32
     assert_not_silent(waveform)
@@ -219,7 +222,9 @@ def test_an_empty_batch_is_an_error(
     """Zero stations cannot yield an array of unknown time length."""
     empty32 = np.array([], np.float32)
     simulator = Simulator(
-        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
     )
     with pytest.raises(ValueError, match="nothing to simulate"):
         simulator.run_stations(
@@ -234,7 +239,9 @@ def test_mismatched_station_arrays_are_rejected(
 ) -> None:
     """One entry per station, in every array, or an error naming all three lengths."""
     simulator = Simulator(
-        slip_model, velocity_model, HfConfig(duration_s=RECORD_DURATION_S)
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
     )
     with pytest.raises(ValueError, match="one entry per station"):
         simulator.run_stations(

@@ -6,14 +6,17 @@ Stochastic high-frequency seismogram generation: a Rust port of EMOD3D's
 ```python
 import numpy as np
 from hf_simulation import (
-    FaultSegment, HfConfig, SlipModel, Simulator, VelocityModel1D,
-    station_seeds,
+    FaultSegment, HfConfig, RecordParameters, SlipModel, Simulator,
+    VelocityModel1D, station_seeds,
 )
+
+# The four groups mirror the simulation core's own decomposition, so a
+# configuration written down elsewhere deserialises straight into this.
+config = HfConfig(record=RecordParameters(duration_s=40.0))
 
 # Built once per source: the air layer, the slip-model normalisation and the
 # moment scaling do not depend on where the receiver is.
-simulator = Simulator(SlipModel([segment]), velocity_model,
-                      HfConfig(duration_s=40.0))
+simulator = Simulator(SlipModel([segment]), velocity_model, config)
 
 waveform = simulator.run_stations(         # (3, n_station, n_time), cm/s²
     latitude_deg=latitudes, longitude_deg=longitudes,
