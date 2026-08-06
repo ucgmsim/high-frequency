@@ -1025,3 +1025,54 @@ fn simulate_is_deterministic_and_seed_dependent() {
     );
     // Geometry is unchanged, so the closest-subfault distance must not move.
 }
+
+/// A source below the whole velocity model must still produce a finite ray.
+///
+/// This is the case `ray::source_layer` now returns `None` for. It used to fall out of the
+/// search loop as `layer_count` — one past the last layer — and be used as an index anyway,
+/// which read a zeroed layer with zero velocity and zero density and put NaNs into the
+/// travel time. It did not trap only because the arrays were sized to a compile-time ceiling
+/// rather than to the model.
+///
+/// Reachable in production: truncating the velocity model at the Moho can leave subfaults
+/// beneath the deepest layer.
+#[test]
+fn a_source_below_the_model_stays_finite() {
+    let (vmod, layer_count) = velocity_model(12);
+    let model_bottom_km: f32 = (0..layer_count).map(|k| vmod[k].thickness_km).sum();
+
+    let mut state = hb_high::state::RayState::default();
+    for depth_km in [model_bottom_km + 1.0, model_bottom_km * 2.0, 500.0] {
+        let green = hb_high::ray::green_function(
+            &mut state,
+            &{
+                let mut v = hb_high::state::VelocityModel::new();
+                for k in 0..layer_count {
+                    v[k] = vmod[k].into();
+                }
+                v
+            },
+            layer_count,
+            depth_km,
+            60.0,
+            1,
+            hb_high::state::WaveMode::Sh,
+        );
+        for (name, value) in [
+            ("rp0", green.rp0),
+            ("stime", green.stime),
+            ("rpath", green.rpath),
+            ("qbar", green.qbar),
+        ] {
+            assert!(
+                value.is_finite(),
+                "source at {depth_km} km, below the {model_bottom_km} km model: {name} = {value}"
+            );
+        }
+        assert!(
+            green.stime > 0.0,
+            "source at {depth_km} km: travel time {} should be positive",
+            green.stime
+        );
+    }
+}

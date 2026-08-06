@@ -477,6 +477,69 @@ impl<'a> RayPath<'a> {
     }
 }
 
+/// How far a source is nudged clear of a layer interface, km.
+///
+/// A ray starting exactly on a boundary is ambiguous about which layer it is in, so the
+/// source depth is moved to one side. Unsuffixed literal in an `implicit real*8` routine, so
+/// it carries only `f32` precision — `PORTING_RULES.md` §1b.
+const INTERFACE_CLEARANCE_KM: f64 = 0.02f32 as f64;
+
+/// Which layer a source at `depth_km` sits in, and the depth nudged clear of any interface.
+///
+/// `None` means the source is below every layer, i.e. in the half-space. That is a real case:
+/// truncating the velocity model at the Moho can leave subfaults beneath the deepest layer.
+///
+/// # This used to be an out-of-range index
+///
+/// The search is a `DO ksrc = 1, layer_count` exiting early via `goto`. Run to completion it
+/// leaves the loop variable at `layer_count + 1`, and the original **read it in that state**,
+/// making it the first ray segment's layer index. That index then reached the travel-time
+/// accumulator and the velocity lookup. It did not trap, because the arrays were dimensioned
+/// to a compile-time ceiling rather than to the model, so it quietly read a zeroed layer —
+/// zero velocity, zero density — and produced garbage travel times for those subfaults.
+///
+/// An `Option` makes the case nameable, and the caller resolves it to the bottom layer.
+fn source_layer(
+    vmod: &VelocityModel,
+    layer_count: usize,
+    mut depth_km: f64,
+) -> (Option<usize>, f64) {
+    let mut interface_km = 0.0f64;
+    for layer in 0..layer_count {
+        interface_km += vmod[layer].thickness_km;
+        // Resting on the interface from above: push down past it.
+        if depth_km >= interface_km && (depth_km - interface_km) < INTERFACE_CLEARANCE_KM {
+            depth_km = interface_km + INTERFACE_CLEARANCE_KM;
+        }
+        if depth_km < interface_km {
+            // Sitting just under it: pull back up.
+            if (interface_km - depth_km) < INTERFACE_CLEARANCE_KM {
+                depth_km = interface_km - INTERFACE_CLEARANCE_KM;
+            }
+            return (Some(layer), depth_km);
+        }
+    }
+    (None, depth_km)
+}
+
+/// The deepest layer a source can be placed in, and the depth of its base.
+///
+/// Not simply the last layer: `build_velocity_model` forces the bottom layer to zero
+/// thickness as a half-space marker, and [`build_ray_path`] places a source within its layer
+/// by dividing by that thickness. Putting a source in the zero-thickness layer divides by
+/// zero and NaNs the travel time.
+fn deepest_layer_with_thickness(vmod: &VelocityModel, layer_count: usize) -> (usize, f64) {
+    let mut base_km = 0.0f64;
+    let mut deepest = 0usize;
+    for layer in 0..layer_count {
+        if vmod[layer].thickness_km > 0.0 {
+            deepest = layer;
+            base_km += vmod[layer].thickness_km;
+        }
+    }
+    (deepest, base_km)
+}
+
 /// Outputs of [`green_function`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GreenFunction {
@@ -506,22 +569,11 @@ pub struct GreenFunction {
 /// The Moho is taken to be above the first layer of zero thickness, or the
 /// deepest layer if none is zero.
 ///
-/// # `ksrc` can come out as `layer_count + 1`
+/// A source below the whole model is in the half-space, which is the bottom layer — see
+/// [`source_layer`].
 ///
-/// The source-layer search is a `DO ksrc = 1, layer_count` that exits early via `goto`
-/// once the accumulated depth passes `hs`. If it never does — a source below the
-/// whole model — the loop runs to completion and Fortran leaves the loop variable
-/// at `layer_count + 1`, which then becomes the first ray segment's layer index. That is
-/// a latent out-of-range read in the original. It is reproduced rather than
-/// clamped; in Rust it surfaces as a bounds panic instead of silently reading
-/// past the model. See `PORTING_RULES.md` §7.
-///
-/// Note also that if `ksrc < krec` (a source shallower than layer 2) the upgoing
-/// segment loop produces zero segments and `nd` is 0, which `build_ray_path` is not
-/// written to handle.
-///
-/// `hs_tol = 0.02` is an unsuffixed literal in an `implicit real*8` routine, so
-/// it carries only `f32` precision — see `PORTING_RULES.md` §1b.
+/// Note that if the source layer is shallower than `krec` (layer 2) the upgoing segment loop
+/// produces zero segments and `nd` is 0, which [`build_ray_path`] is not written to handle.
 pub fn green_function(
     state: &mut RayState,
     vmod: &VelocityModel,
@@ -540,34 +592,19 @@ pub fn green_function(
 
     state.rays.ndeg = 1;
     let hr = vmod[0].thickness_km;
-    let mut hs = src_depth as f64;
     let rr = range as f64;
 
-    // Find the source layer, nudging hs off an interface by hs_tol either way
-    // so the ray does not start exactly on a boundary.
-    let hs_tol = 0.02f32 as f64;
-    let mut dep = 0.0f64;
-    // Loop-completion value. The Fortran's DO ksrc = 1, layer_count leaves layer_count+1;
-    // 0-based that is `layer_count`, one past the last layer. It is READ in that state --
-    // see the doc comment -- which is why the arrays stay NLAYMAX-sized.
-    // The Fortran's `DO ksrc = 1, layer_count` leaves the loop variable at
-    // `layer_count + 1` when it runs to completion; 0-based that is `layer_count`, one
-    // past the last layer. It is READ in that state -- see the doc comment -- which is
-    // why the arrays stay NLAYMAX-sized.
-    let mut ksrc = layer_count;
-    for k in 0..layer_count {
-        dep += vmod[k].thickness_km;
-        if hs >= dep && (hs - dep) < hs_tol {
-            hs = dep + hs_tol;
+    // A source below every layer is in the half-space. `sim::source_layer_for` already reads
+    // that case as "the half-space is the bottom layer"; here it also has to be somewhere the
+    // ray geometry can start from, so it goes just inside the base of the deepest layer that
+    // has any thickness.
+    let (ksrc, hs) = match source_layer(vmod, layer_count, src_depth as f64) {
+        (Some(layer), depth_km) => (layer, depth_km),
+        (None, _) => {
+            let (deepest, base_km) = deepest_layer_with_thickness(vmod, layer_count);
+            (deepest, base_km - INTERFACE_CLEARANCE_KM)
         }
-        if hs < dep {
-            if (dep - hs) < hs_tol {
-                hs = dep - hs_tol;
-            }
-            ksrc = k;
-            break;
-        }
-    }
+    };
 
     let mut path = RayPath::new(&mut state.rays, wave_mode);
     // Both arms are the same two operations in a different order, plus the same Moho
