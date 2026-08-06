@@ -34,7 +34,7 @@
 use hb_high::fft::remove_quadratic_trend;
 use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, GeoPoint};
-use hb_high::radiation::radiation_pattern;
+use hb_high::radiation::{radiation_pattern, RadiationAngles};
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
 
@@ -48,7 +48,10 @@ fn rdatn_matches_fortran() {
     while !r.done() {
         let (str_, dip, rak, az, th) = (r.f32(), r.f32(), r.f32(), r.f32(), r.f32());
         let (w_sh, w_sv) = (r.f32(), r.f32());
-        let (sh, sv) = radiation_pattern(str_, dip, rak, az, th);
+        let coefficients = radiation_pattern(RadiationAngles {
+            strike_rad: str_, dip_rad: dip, rake_rad: rak, azimuth_rad: az, takeoff_rad: th,
+        });
+        let (sh, sv) = (coefficients.sh, coefficients.sv);
         eq32(&format!("radiation_pattern case {n} rdsh"), sh, w_sh);
         eq32(&format!("radiation_pattern case {n} rdsv"), sv, w_sv);
         n += 1;

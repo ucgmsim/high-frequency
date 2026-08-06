@@ -207,13 +207,13 @@ fn bench_radiation(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("radiation_pattern", |b| {
         b.iter(|| {
-            black_box(radiation_pattern(
-                black_box(1.2),
-                black_box(0.9),
-                black_box(-0.4),
-                black_box(2.1),
-                black_box(2.6),
-            ))
+            black_box(radiation_pattern(black_box(RadiationAngles {
+                strike_rad: 1.2,
+                dip_rad: 0.9,
+                rake_rad: -0.4,
+                azimuth_rad: 2.1,
+                takeoff_rad: 2.6,
+            })))
         })
     });
 

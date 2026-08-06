@@ -41,7 +41,7 @@ use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{distance_azimuth, subfault_geometry, FaultPlane, GeoPoint};
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
-use hb_high::radiation::radiation_pattern;
+use hb_high::radiation::{radiation_pattern, RadiationAngles};
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::apply_site_amplification;
@@ -557,7 +557,11 @@ proptest! {
         strike in 0.0f32..6.3, dip in 0.0f32..1.6, rake in -3.2f32..3.2,
         azimuth in 0.0f32..6.3, takeoff in 0.0f32..3.2,
     ) {
-        let (sh, sv) = radiation_pattern(strike, dip, rake, azimuth, takeoff);
+        let coefficients = radiation_pattern(RadiationAngles {
+            strike_rad: strike, dip_rad: dip, rake_rad: rake,
+            azimuth_rad: azimuth, takeoff_rad: takeoff,
+        });
+        let (sh, sv) = (coefficients.sh, coefficients.sv);
         prop_assert!(sh.is_finite() && sv.is_finite());
         prop_assert!(sh.abs() <= 1.0 + 1e-4, "SH coefficient {sh}");
         prop_assert!(sv.abs() <= 1.0 + 1e-4, "SV coefficient {sv}");
@@ -569,10 +573,13 @@ proptest! {
         strike in 0.0f32..6.3, dip in 0.0f32..1.6, rake in -3.2f32..3.2,
         azimuth in 0.0f32..6.3, takeoff in 0.0f32..3.2,
     ) {
-        let (sh, sv) = radiation_pattern(strike, dip, rake, azimuth, takeoff);
-        let (sh_turned, sv_turned) = radiation_pattern(
-            strike, dip, rake, azimuth + std::f32::consts::TAU, takeoff,
-        );
+        let at = |azimuth_rad| radiation_pattern(RadiationAngles {
+            strike_rad: strike, dip_rad: dip, rake_rad: rake,
+            azimuth_rad, takeoff_rad: takeoff,
+        });
+        let (here, turned) = (at(azimuth), at(azimuth + std::f32::consts::TAU));
+        let (sh, sv) = (here.sh, here.sv);
+        let (sh_turned, sv_turned) = (turned.sh, turned.sv);
         prop_assert!((sh - sh_turned).abs() < 1e-4, "SH {sh} vs {sh_turned}");
         prop_assert!((sv - sv_turned).abs() < 1e-4, "SV {sv} vs {sv_turned}");
     }

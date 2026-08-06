@@ -7,7 +7,20 @@
 
 use ndarray::{azip, ArrayView1, ArrayViewMut1};
 
+/// Full width of the horizontal component's perturbation cone: ±45° on each of the five
+/// angles, as Graves & Pitarka (2010) specify.
+const CONE_WIDTH_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
+/// Half-width of the vertical component's take-off cone.
+const VERTICAL_CONE_HALF_WIDTH_RAD: f32 = 40.0 * (std::f32::consts::PI / 180.0);
+/// Straight down: the shallowest take-off the vertical average accepts.
+const DOWNGOING_MIN_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
+/// Straight up.
+const DOWNGOING_MAX_RAD: f32 = 180.0 * (std::f32::consts::PI / 180.0);
+/// One full azimuthal turn.
+const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
+
 /// Fault orientation and the ray's arrival direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RadiationAngles {
     pub strike_rad: f32,
     pub dip_rad: f32,
@@ -18,10 +31,59 @@ pub struct RadiationAngles {
     pub takeoff_rad: f32,
 }
 
-/// SH and SV radiation coefficients for a double couple. (orig. `hb_high_ref.f:2275`)
+/// The two shear radiation coefficients for one ray leaving a double couple.
 ///
-/// Aki & Richards, *Quantitative Seismology* (2nd ed.), ch. 4. Returns `(rdsh, rdsv)`.
+/// Aki & Richards write these `F^SH` and `F^SV`: how much amplitude the source radiates into
+/// each of the two shear polarisations along the ray. Both are dimensionless and in `[-1, 1]`;
+/// the sign is a polarity, not a magnitude.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShearRadiation {
+    /// `rdsh` — the SH lobe: transverse to the ray and horizontal.
+    pub sh: f32,
+    /// `rdsv` — the SV lobe: transverse to the ray and in the vertical plane through it.
+    pub sv: f32,
+}
+
+/// The eight sines and cosines both coefficients are built from.
 ///
+/// Shared so that [`sv_radiation`] computes exactly the same intermediates as
+/// [`radiation_pattern`] rather than a re-derived set that might round differently.
+#[derive(Clone, Copy)]
+struct AngleTerms {
+    sin_rake: f32,
+    cos_rake: f32,
+    sin_dip: f32,
+    cos_dip: f32,
+    sin_takeoff: f32,
+    cos_takeoff: f32,
+    /// Azimuth measured from the strike direction, not from north.
+    sin_az: f32,
+    cos_az: f32,
+}
+
+impl AngleTerms {
+    #[inline]
+    fn of(angles: RadiationAngles) -> Self {
+        let RadiationAngles {
+            strike_rad,
+            dip_rad,
+            rake_rad,
+            azimuth_rad,
+            takeoff_rad,
+        } = angles;
+        Self {
+            sin_rake: rake_rad.sin(),
+            cos_rake: rake_rad.cos(),
+            sin_dip: dip_rad.sin(),
+            cos_dip: dip_rad.cos(),
+            sin_takeoff: takeoff_rad.sin(),
+            cos_takeoff: takeoff_rad.cos(),
+            sin_az: (azimuth_rad - strike_rad).sin(),
+            cos_az: (azimuth_rad - strike_rad).cos(),
+        }
+    }
+}
+
 /// # Do not regroup these expressions
 ///
 /// They are written to a specific association order, and regrouping — even into something
@@ -30,42 +92,61 @@ pub struct RadiationAngles {
 /// parenthesisation below says so explicitly.
 ///
 /// Double-angle identities would simplify these and are **not** bit-equivalent.
-pub fn radiation_pattern(
-    strike_rad: f32,
-    dip_rad: f32,
-    rake_rad: f32,
-    azimuth_rad: f32,
-    takeoff_rad: f32,
-) -> (f32, f32) {
-    let sin_rake = rake_rad.sin();
-    let cos_rake = rake_rad.cos();
-    let sin_dip = dip_rad.sin();
-    let cos_dip = dip_rad.cos();
-    let sin_takeoff = takeoff_rad.sin();
-    let cos_takeoff = takeoff_rad.cos();
-    let sin_az = (azimuth_rad - strike_rad).sin();
-    let cos_az = (azimuth_rad - strike_rad).cos();
-
-    let rdsv = sin_rake
-        * ((cos_dip * cos_dip) - (sin_dip * sin_dip))
-        * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff))
-        * sin_az
-        - cos_rake * cos_dip * ((cos_takeoff * cos_takeoff) - (sin_takeoff * sin_takeoff)) * cos_az
-        + cos_rake * sin_dip * sin_takeoff * cos_takeoff * 2.0 * sin_az * cos_az
-        - sin_rake
-            * sin_dip
-            * cos_dip
+#[inline]
+fn sv_from(t: AngleTerms) -> f32 {
+    t.sin_rake
+        * ((t.cos_dip * t.cos_dip) - (t.sin_dip * t.sin_dip))
+        * ((t.cos_takeoff * t.cos_takeoff) - (t.sin_takeoff * t.sin_takeoff))
+        * t.sin_az
+        - t.cos_rake
+            * t.cos_dip
+            * ((t.cos_takeoff * t.cos_takeoff) - (t.sin_takeoff * t.sin_takeoff))
+            * t.cos_az
+        + t.cos_rake * t.sin_dip * t.sin_takeoff * t.cos_takeoff * 2.0 * t.sin_az * t.cos_az
+        - t.sin_rake
+            * t.sin_dip
+            * t.cos_dip
             * 2.0
-            * sin_takeoff
-            * cos_takeoff
-            * (1.0 + (sin_az * sin_az));
+            * t.sin_takeoff
+            * t.cos_takeoff
+            * (1.0 + (t.sin_az * t.sin_az))
+}
 
-    let rdsh = cos_rake * cos_dip * cos_takeoff * sin_az
-        + cos_rake * sin_dip * sin_takeoff * ((cos_az * cos_az) - (sin_az * sin_az))
-        + sin_rake * ((cos_dip * cos_dip) - (sin_dip * sin_dip)) * cos_takeoff * cos_az
-        - sin_rake * sin_dip * cos_dip * sin_takeoff * 2.0 * sin_az * cos_az;
+/// The SH lobe. Same association-order warning as [`sv_from`].
+#[inline]
+fn sh_from(t: AngleTerms) -> f32 {
+    t.cos_rake * t.cos_dip * t.cos_takeoff * t.sin_az
+        + t.cos_rake * t.sin_dip * t.sin_takeoff * ((t.cos_az * t.cos_az) - (t.sin_az * t.sin_az))
+        + t.sin_rake
+            * ((t.cos_dip * t.cos_dip) - (t.sin_dip * t.sin_dip))
+            * t.cos_takeoff
+            * t.cos_az
+        - t.sin_rake * t.sin_dip * t.cos_dip * t.sin_takeoff * 2.0 * t.sin_az * t.cos_az
+}
 
-    (rdsh, rdsv)
+/// Both shear radiation coefficients for a double couple. (orig. `hb_high_ref.f:2275`)
+///
+/// Aki & Richards, *Quantitative Seismology* (2nd ed.), ch. 4.
+#[inline]
+pub fn radiation_pattern(angles: RadiationAngles) -> ShearRadiation {
+    let terms = AngleTerms::of(angles);
+    ShearRadiation {
+        sh: sh_from(terms),
+        sv: sv_from(terms),
+    }
+}
+
+/// Only the SV coefficient.
+///
+/// [`vertical_radiation_spectrum`] never uses the SH lobe. It used to call
+/// [`radiation_pattern`] and bind the SH result to `_rdsha`, which asked the reader to notice
+/// the underscore to learn that half the returned value was meaningless there.
+///
+/// **This is a separation of concerns, not an optimisation.** The compiler already eliminated
+/// the unused half; asking for what you need is just a clearer way to say it.
+#[inline]
+pub fn sv_radiation(angles: RadiationAngles) -> f32 {
+    sv_from(AngleTerms::of(angles))
 }
 
 /// Conically averaged radiation pattern for a horizontal component, per frequency bin.
@@ -112,48 +193,53 @@ pub fn horizontal_radiation_spectrum(
         azimuth_rad,
         takeoff_rad,
     } = angles;
-    let pu = std::f32::consts::PI / 180.0;
 
-    let fr1 = 0.5f32;
-    let fr2 = 2.0f32;
+    let blend_low_hz = 0.5f32;
+    let blend_high_hz = 2.0f32;
     // Set to 1.0 in 2009 with the note "since using a conical average around theoretical ray,
-    // don't allow much purely theoretical rad pattern". The superseded 0.5 is the `fr1` above.
-    let radmin = 1.0f32;
+    // don't allow much purely theoretical rad pattern". The superseded 0.5 is `blend_low_hz`.
+    let conical_floor = 1.0f32;
 
-    let (rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
+    let theoretical = radiation_pattern(*angles);
 
     // Project SV and SH onto the requested horizontal component. The sum is formed BEFORE the
     // magnitude is taken (below), because taking it per-term lets a negative cos or sin
     // introduce an asymmetry that is not physical.
-    let mut rdx =
-        rdsva * (component_rad - azimuth_rad).cos() + rdsha * (component_rad - azimuth_rad).sin();
+    let projected = theoretical.sv * (component_rad - azimuth_rad).cos()
+        + theoretical.sh * (component_rad - azimuth_rad).sin();
 
     // Sign preserved, not discarded: polarity is carried separately and reapplied at the end.
-    let mut polarity = 1.0f32;
-    if rdx < 0.0 {
-        polarity = -1.0;
-        rdx = -rdx;
-    }
+    let polarity = if projected < 0.0 { -1.0f32 } else { 1.0f32 };
+    let theoretical_gain = projected.abs();
 
-    let range = 10.0f32;
-    let mut radv = 0.0f32;
-    for _k in 1..=sample_count {
-        // Five draws, in this exact order. `9 * range * pu` is 90 degrees in radians, so each
-        // perturbation spans ±45°.
-        let th = takeoff_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let fa = azimuth_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let strx = strike_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let dipx = dip_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
-        let rakx = rake_rad + 9.0 * range * pu * (0.5 - rng.next_f32());
+    let mut sum_of_squares = 0.0f32;
+    for _sample in 0..sample_count {
+        // FIVE DRAWS, AND THIS IS THE ORDER. Bound to named locals rather than written
+        // straight into the struct literal below: field-initialiser order is what would
+        // decide the draw order there, so reordering the fields for readability would
+        // silently move every waveform. Here the order is a sequence of statements, which is
+        // not something anyone reorders by accident.
+        let takeoff = takeoff_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
+        let azimuth = azimuth_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
+        let strike = strike_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
+        let dip = dip_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
+        let rake = rake_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
 
-        let (rdsha, rdsva) = radiation_pattern(strx, dipx, rakx, fa, th);
-        let rads = rdsva * (component_rad - fa).cos() + rdsha * (component_rad - fa).sin();
+        let sample = radiation_pattern(RadiationAngles {
+            strike_rad: strike,
+            dip_rad: dip,
+            rake_rad: rake,
+            azimuth_rad: azimuth,
+            takeoff_rad: takeoff,
+        });
+        let projected = sample.sv * (component_rad - azimuth).cos()
+            + sample.sh * (component_rad - azimuth).sin();
         // Squared to remove the sign, so the average is an RMS; `polarity` restores the sign
         // after the sqrt below.
-        radv += rads * rads;
+        sum_of_squares += projected * projected;
     }
 
-    let radvh = (radv / sample_count as f32).sqrt();
+    let conical_gain = (sum_of_squares / sample_count as f32).sqrt();
 
     // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
     // log-linear blend between. Inert as written -- see `radmin` above.
@@ -161,18 +247,20 @@ pub fn horizontal_radiation_spectrum(
         gain in ArrayViewMut1::from(radiation),
         &freq in ArrayView1::from(frequency_hz),
     ) {
-        let del = if freq <= fr1 {
-            radmin
-        } else if freq <= fr2 {
-            let d = (freq / fr1).ln() / (fr2 / fr1).ln();
-            if d < radmin { radmin } else { d }
+        let blend = if freq <= blend_low_hz {
+            conical_floor
+        } else if freq <= blend_high_hz {
+            // The `max` applies to the QUOTIENT, not to the denominator. Written without the
+            // parentheses it binds to `.ln()` and silently changes the blend.
+            ((freq / blend_low_hz).ln() / (blend_high_hz / blend_low_hz).ln())
+                .max(conical_floor)
         } else {
             1.0
         };
-        *gain = polarity * (rdx + (radvh - rdx) * del);
+        *gain = polarity * (theoretical_gain + (conical_gain - theoretical_gain) * blend);
     });
 
-    fr1
+    blend_low_hz
 }
 
 /// Conically averaged radiation pattern for the vertical component, per frequency bin.
@@ -197,27 +285,18 @@ pub fn vertical_radiation_spectrum(
         strike_rad,
         dip_rad,
         rake_rad,
-        azimuth_rad,
         takeoff_rad,
+        ..
     } = angles;
-    let pu = std::f32::consts::PI / 180.0;
 
-    let fr1 = 0.001f32;
-    let fr2 = 0.01f32;
+    let blend_low_hz = 0.001f32;
+    let blend_high_hz = 0.01f32;
 
-    let (_rdsha, rdsva) =
-        radiation_pattern(strike_rad, dip_rad, rake_rad, azimuth_rad, takeoff_rad);
-    let rdx = rdsva * takeoff_rad.sin();
+    let theoretical_gain = sv_radiation(*angles) * takeoff_rad.sin();
 
-    let range = 40.0f32;
-    let mut tha1 = takeoff_rad - range * pu;
-    let mut tha2 = takeoff_rad + range * pu;
-    if tha1 < 90.0 * pu {
-        tha1 = 90.0 * pu;
-    }
-    if tha2 > 180.0 * pu {
-        tha2 = 180.0 * pu;
-    }
+    // Only downgoing directions contribute, so the cone is clipped to [90°, 180°].
+    let takeoff_min_rad = (takeoff_rad - VERTICAL_CONE_HALF_WIDTH_RAD).max(DOWNGOING_MIN_RAD);
+    let takeoff_max_rad = (takeoff_rad + VERTICAL_CONE_HALF_WIDTH_RAD).min(DOWNGOING_MAX_RAD);
 
     // The two uniform arrays are consumed in lockstep, one pair per sample. They are FILLED by
     // two separate sequential passes -- the first `nr` draws into `a`, the next `nr` into `b` --
@@ -225,19 +304,24 @@ pub fn vertical_radiation_spectrum(
     // Zipping the consumption is free; zipping the fill is not.
     //
     // The two limits are fixed above, so their cosines are loop invariants.
-    let (cos_tha1, cos_tha2) = (tha1.cos(), tha2.cos());
-    let mut radv = 0.0f32;
+    let (cos_min, cos_max) = (takeoff_min_rad.cos(), takeoff_max_rad.cos());
+    let mut sum_of_magnitudes = 0.0f32;
     for (&ua, &ub) in uniform_a[..sample_count].iter().zip(uniform_b) {
         // Uniform in cos(takeoff) between the clamped limits, which samples solid angle
         // evenly rather than angle evenly.
-        let th = ((1.0 - ua) * cos_tha1 + ua * cos_tha2).acos();
-        let fa = 360.0 * pu * ub;
-        let (_rdsha, rdsva) = radiation_pattern(strike_rad, dip_rad, rake_rad, fa, th);
-        let rads = rdsva * th.sin();
-        radv += rads.abs();
+        let takeoff_rad = ((1.0 - ua) * cos_min + ua * cos_max).acos();
+        let perturbed = RadiationAngles {
+            strike_rad,
+            dip_rad,
+            rake_rad,
+            azimuth_rad: FULL_TURN_RAD * ub,
+            takeoff_rad,
+        };
+        sum_of_magnitudes += (sv_radiation(perturbed) * takeoff_rad.sin()).abs();
     }
 
-    let radvh = radv / sample_count as f32 / 2.0;
+    // Halved because the magnitudes above are folded about zero.
+    let conical_gain = sum_of_magnitudes / sample_count as f32 / 2.0;
 
     // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
     // linear blend between. Written as one expression per bin so the piecewise structure is
@@ -246,14 +330,16 @@ pub fn vertical_radiation_spectrum(
         gain in ArrayViewMut1::from(radiation),
         &freq in ArrayView1::from(frequency_hz),
     ) {
-        *gain = if freq <= fr1 {
-            rdx
-        } else if freq <= fr2 {
-            rdx + (radvh - rdx) * (freq - fr1) / (fr2 - fr1)
+        *gain = if freq <= blend_low_hz {
+            theoretical_gain
+        } else if freq <= blend_high_hz {
+            theoretical_gain
+                + (conical_gain - theoretical_gain) * (freq - blend_low_hz)
+                    / (blend_high_hz - blend_low_hz)
         } else {
-            radvh
+            conical_gain
         };
     });
 
-    fr1
+    blend_low_hz
 }
