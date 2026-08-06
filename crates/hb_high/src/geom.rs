@@ -41,18 +41,19 @@ pub fn distance_azimuth(event: GeoPoint, station: GeoPoint) -> DistanceAzimuth {
     // geographiclib reports azimuth in (-180, 180]; the callers want [0, 360). Wrapping
     // 360.0 exactly to 0.0 keeps the range half-open after the f32 narrowing, which a
     // bare `+ 360.0` does not for azimuths within an f32 ulp of zero from below.
-    let mut azesdg = if azimuth_deg < 0.0 {
+    let shifted = if azimuth_deg < 0.0 {
         azimuth_deg + 360.0
     } else {
         azimuth_deg
     } as f32;
-    if azesdg >= 360.0 {
-        azesdg = 0.0;
-    }
-    let mut azes = azesdg.to_radians();
-    if azes >= std::f32::consts::TAU {
-        azes = 0.0;
-    }
+    let azesdg = if shifted >= 360.0 { 0.0 } else { shifted };
+
+    let radians = azesdg.to_radians();
+    let azes = if radians >= std::f32::consts::TAU {
+        0.0
+    } else {
+        radians
+    };
 
     DistanceAzimuth {
         deltkm: (metres / 1000.0) as f32,

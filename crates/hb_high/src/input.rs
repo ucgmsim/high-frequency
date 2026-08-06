@@ -51,18 +51,22 @@ pub struct Segment {
     subfaults: Vec<Subfault>,
 }
 
+/// How far one subfault slipped, as the `.stoch` file gives it.
+///
+/// A newtype because the quantity derived from it — a subfault's share of the total moment,
+/// `sim::MomentWeight` — is also a bare `f32` and means something else entirely. The two used
+/// to be **the same field**: `normalise_source` overwrote slip with relative moment and then
+/// with a normalised weight, so `Subfault::slip` meant three different things depending on how
+/// far through a run you were, and no comment on a call site could tell you which. Now the
+/// compiler will not let one stand in for the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct Slip(pub f32);
+
 /// What the `.stoch` file says about one subfault.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Subfault {
-    /// `sddp` — slip.
-    ///
-    /// **This field changes meaning partway through a run.** It holds slip as read from
-    /// the file until `sim::normalise_source`, which converts it in place to
-    /// relative moment and then rescales it to unit mean. Everything downstream of that
-    /// call is reading moment weights, not slip. The Fortran does the same thing to the
-    /// same array; naming it `slip_cm` would be a lie for most of the program's life,
-    /// which is why the units tag is absent here.
-    pub slip: f32,
+    /// `sddp` — slip. Read from the file and **never modified**.
+    pub slip: Slip,
     /// `rist` — rise time, s.
     pub rise_time_s: f32,
     /// `rupt` — rupture time relative to origin, s.
@@ -264,6 +268,9 @@ pub fn build_velocity_model(
 /// Needed to get the correct free-surface reflection coefficient for
 /// surface-reflected rays. The model grows by one layer.
 ///
+/// Takes the model by value and hands it back: the caller owns it and does not want the
+/// original afterwards, so there is nothing for a `&mut` to buy.
+///
 /// # There is no velocity-model perturbation
 ///
 /// The original had a `grandvel` routine that perturbed the layer velocities, gated on a
@@ -278,9 +285,9 @@ pub fn build_velocity_model(
 /// no live reader at all, and `attenuation_s` is read only at `vmod[nh1]` and `vmod[nhj]` in
 /// `geometric_spreading`, where the layer indices come from `green_function`'s ray building
 /// and are never below `krec = 1`.
-pub fn insert_air_layer(vmod_in: &mut VelocityModelInput) {
+pub fn insert_air_layer(mut vmod_in: VelocityModelInput) -> VelocityModelInput {
     if !(vmod_in[0].depth_km > 0.001 && vmod_in[0].vp_km_s > 0.01) {
-        return;
+        return vmod_in;
     }
 
     // The air layer copies the old first layer's two attenuation values rather than getting
@@ -301,6 +308,7 @@ pub fn insert_air_layer(vmod_in: &mut VelocityModelInput) {
 
     // A shift-everything-down-by-one loop is an insertion, and now says so.
     vmod_in.insert(0, air);
+    vmod_in
 }
 
 /// One station.
@@ -437,10 +445,10 @@ mod tests {
             (0.05, 1.8, 0.5, 1.81, 116.0, 58.0),
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
         ]);
-        let mut v = build_velocity_model(&model, 999.9).unwrap();
-        let layers_before = v.len();
-        let qp1_before = v[0].attenuation_p;
-        insert_air_layer(&mut v);
+        let built = build_velocity_model(&model, 999.9).unwrap();
+        let layers_before = built.len();
+        let qp1_before = built[0].attenuation_p;
+        let v = insert_air_layer(built);
         assert_eq!(
             v.len(),
             layers_before + 1,
@@ -471,9 +479,9 @@ mod tests {
             (0.0, 1.8, 0.5, 1.81, 116.0, 58.0),
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
         ]);
-        let mut v = build_velocity_model(&model, 999.9).unwrap();
-        let layers_before = v.len();
-        insert_air_layer(&mut v);
+        let built = build_velocity_model(&model, 999.9).unwrap();
+        let layers_before = built.len();
+        let v = insert_air_layer(built);
         assert_eq!(v.len(), layers_before);
     }
 }

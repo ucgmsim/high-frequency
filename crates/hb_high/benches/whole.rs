@@ -24,7 +24,7 @@ use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::input::{Segment, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
 use hb_high::state::{InputLayer, VelocityModelInput};
 
 /// Grid shapes spanning three orders of magnitude in subfault count. The alpine-scale case is
@@ -47,7 +47,7 @@ fn uniform_fault(along: usize, down: usize) -> StochModel {
         .hypocentre_down_dip_km(1.5)
         .subfaults(vec![
             Subfault {
-                slip: 50.0,
+                slip: Slip(50.0),
                 rise_time_s: 0.5,
                 rupture_time_s: 0.0
             };

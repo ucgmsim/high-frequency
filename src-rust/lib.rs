@@ -4,7 +4,7 @@ use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
+use hb_high::input::{build_velocity_model, Segment, Slip, Station, StochModel, Subfault};
 use hb_high::sim::Simulator;
 use hb_high::state::{InputLayer, VelocityModelInput};
 use numpy::ndarray::{s, Array3};
@@ -75,7 +75,7 @@ impl PyFaultSegment {
         let subfaults = (0..down_dip_count)
             .flat_map(|j| {
                 (0..along_strike_count).map(move |i| Subfault {
-                    slip: slip[[j, i]],
+                    slip: Slip(slip[[j, i]]),
                     rise_time_s: rise[[j, i]],
                     rupture_time_s: rupture[[j, i]],
                 })

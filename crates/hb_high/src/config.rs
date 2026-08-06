@@ -192,24 +192,27 @@ impl RuptureVelocityTaper {
             deep_top_km,
             deep_base_km,
         } = *self;
-        let mut rupture_fraction = frac * shallow_factor;
-        if depth_km >= shallow_top_km && depth_km < shallow_base_km {
-            rupture_fraction = frac
-                * (shallow_factor
-                    + (1.0 - shallow_factor) * (depth_km - shallow_top_km)
-                        / (shallow_base_km - shallow_top_km));
-        } else if depth_km >= shallow_base_km {
-            rupture_fraction = frac;
+        let shallow = if depth_km >= shallow_base_km {
+            frac
+        } else if depth_km >= shallow_top_km {
+            frac * (shallow_factor
+                + (1.0 - shallow_factor) * (depth_km - shallow_top_km)
+                    / (shallow_base_km - shallow_top_km))
+        } else {
+            frac * shallow_factor
+        };
+
+        // The deep band OVERRIDES the shallow result rather than blending with it, which is
+        // what the two-stage structure says: outside the deep band the shallow value stands.
+        if depth_km >= deep_base_km {
+            frac * deep_factor
+        } else if depth_km >= deep_top_km {
+            frac * (1.0
+                + (deep_factor - 1.0) * (depth_km - deep_top_km)
+                    / (deep_base_km - deep_top_km))
+        } else {
+            shallow
         }
-        if depth_km >= deep_top_km && depth_km < deep_base_km {
-            rupture_fraction = frac
-                * (1.0
-                    + (deep_factor - 1.0) * (depth_km - deep_top_km)
-                        / (deep_base_km - deep_top_km));
-        } else if depth_km >= deep_base_km {
-            rupture_fraction = frac * deep_factor;
-        }
-        rupture_fraction
     }
 }
 

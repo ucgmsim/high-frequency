@@ -154,7 +154,7 @@ const STRAIGHT_RAY_WINDOW_START_FRACTION: f32 = 0.7;
 /// identically when counting subfaults for the normalisation and when walking them in the
 /// subfault pass — the two must agree or `moment_scale`'s `N` counts subfaults that never
 /// radiate.
-const SUBFAULT_WEIGHT_THRESHOLD: f32 = 0.001;
+const SUBFAULT_WEIGHT_THRESHOLD: MomentWeight = MomentWeight(0.001);
 
 /// One station's synthetic record.
 pub struct Simulation {
@@ -214,8 +214,11 @@ pub enum SimError {
 /// Each call builds its own generator from its own seed and its own accumulator, so no state
 /// crosses between stations — which is what makes a batch safe to reorder, subset or resume.
 pub struct Simulator {
-    /// Normalised in place by [`normalise_source`]: `slip` holds moment weights, not slip.
+    /// The slip model as given. **Not modified** — the derived moment weights live in
+    /// [`Simulator::weights`], which is the whole point of them being a separate type.
     slip: StochModel,
+    /// One entry per segment, each indexed by [`Segment::grid_index`].
+    weights: Vec<SegmentWeights>,
     /// The working model, with the air layer inserted and the two `real*4` fields widened.
     vmod: VelocityModel,
     rupture: RuptureVelocityTaper,
@@ -261,8 +264,8 @@ impl Simulator {
 
         // The slip model is normalised in place and the velocity model gains an air
         // layer, so both are worked on as copies.
-        let mut slip_model = slip.clone();
-        let mut vmod_in = vmod_in.clone();
+        let slip_model = slip.clone();
+        let vmod_in = vmod_in.clone();
 
         // Every segment must agree with the FIRST on subfault size, so the first is the
         // reference and the rest are the candidates -- `split_first` says that, where
@@ -302,7 +305,7 @@ impl Simulator {
         let path_duration = path_duration_table(config.path.path_duration);
 
         // ------------------------------------------------------- air layer -------
-        insert_air_layer(&mut vmod_in);
+        let vmod_in = insert_air_layer(vmod_in);
 
         // Resolved here rather than at parse time: the deep transition depths depend on
         // the deepest hypocentre, which is only known once the slip model is read.
@@ -312,11 +315,14 @@ impl Simulator {
             .resolve(slip_model.max_hypocentre_depth_km);
 
         // ------------------------------------------------ source normalisation ---
-        let SourceScale {
-            avg_subfault_km,
-            total_moment_dyn_cm,
-            subfault_count,
-        } = normalise_source(&mut slip_model, &vmod_in);
+        let (
+            SourceScale {
+                avg_subfault_km,
+                total_moment_dyn_cm,
+                subfault_count,
+            },
+            weights,
+        ) = normalise_source(&slip_model, &vmod_in);
 
         // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
         // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
@@ -387,6 +393,7 @@ impl Simulator {
 
         Ok(Self {
             slip: slip_model,
+            weights,
             vmod,
             rupture,
             path_duration,
@@ -404,7 +411,13 @@ impl Simulator {
         let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; self.run.ndata]);
 
         // ------------------------------------------------- the single station ---
-        for (seg, angles) in self.slip.segments.iter().zip(&self.angles) {
+        for ((seg, angles), weights) in self
+            .slip
+            .segments
+            .iter()
+            .zip(&self.angles)
+            .zip(&self.weights)
+        {
             let geom = subfault_geometry(
                 &FaultPlane {
                     origin: GeoPoint {
@@ -457,6 +470,7 @@ impl Simulator {
                     windows: &windows,
                     plan: &plan,
                     angles,
+                    weights,
                 },
                 RunContext {
                     vmod: &self.vmod,
@@ -703,6 +717,8 @@ struct SegmentPass<'a> {
     windows: &'a WindowPass,
     plan: &'a SpectrumPlan,
     angles: &'a SegmentAngles,
+    /// This segment's moment weights, indexed by [`Segment::grid_index`].
+    weights: &'a [MomentWeight],
 }
 
 /// Everything the subfault pass reads that is fixed for the whole run.
@@ -737,6 +753,7 @@ fn subfault_pass(
         windows,
         plan,
         angles,
+        weights,
     } = segment;
     let RunContext {
         vmod,
@@ -773,7 +790,8 @@ fn subfault_pass(
 
     for (i, j) in seg.strike_major() {
         let subfault = seg.at(i, j);
-        if subfault.slip < SUBFAULT_WEIGHT_THRESHOLD {
+        let weight = weights[seg.grid_index(i, j)];
+        if weight < SUBFAULT_WEIGHT_THRESHOLD {
             continue; // goto 4 lands on the inner loop's terminator
         }
         let ray_geometry = geom.at(i, j);
@@ -816,19 +834,26 @@ fn subfault_pass(
                 ray_type.trace_type(),
                 WaveMode::Sh,
             );
-            let mut travel_time_s = green.stime;
-            let mut path_length_km = green.rpath;
-            let mut qbar = green.qbar;
-            let mut window_start_s = travel_time_s - run.window_peak_fraction * subfault_window_s;
-
-            // The straight-ray option throws the traced result away and substitutes a
-            // geometric one. The tracer still ran -- see the note at the loop head.
-            if kind == RayKind::StraightRay {
-                path_length_km = ray_geometry.slant_km;
-                qbar = path_length_km / (shear_velocity_km_s * STRAIGHT_RAY_Q);
-                travel_time_s = path_length_km / STRAIGHT_RAY_VELOCITY_KM_S;
-                window_start_s = STRAIGHT_RAY_WINDOW_START_FRACTION * travel_time_s;
-            }
+            // The straight-ray option discards the traced result entirely and substitutes a
+            // geometric one, so the two are alternatives rather than a default and a patch.
+            // The tracer still ran either way -- see the note at the loop head.
+            // The travel time itself is not one of them: it only ever fed `window_start_s`,
+            // which the two arms compute differently anyway.
+            let (path_length_km, qbar, window_start_s) = if kind == RayKind::StraightRay {
+                let path_length_km = ray_geometry.slant_km;
+                let travel_time_s = path_length_km / STRAIGHT_RAY_VELOCITY_KM_S;
+                (
+                    path_length_km,
+                    path_length_km / (shear_velocity_km_s * STRAIGHT_RAY_Q),
+                    STRAIGHT_RAY_WINDOW_START_FRACTION * travel_time_s,
+                )
+            } else {
+                (
+                    green.rpath,
+                    green.qbar,
+                    green.stime - run.window_peak_fraction * subfault_window_s,
+                )
+            };
 
             // Three calls in component order: each draws `np2` normal deviates. The only
             // field that differs between them is `fmax_hz`, which the vertical caps.
@@ -945,7 +970,7 @@ fn subfault_pass(
             let _stream_advance = rng.next_f32();
 
             if let Some(at) = Placement::clip(kst, np2, run.ndata) {
-                accumulate_subfault(acc, &subfault_acc, subfault.slip, &at);
+                accumulate_subfault(acc, &subfault_acc, weight, &at);
             }
         }
     }
@@ -1001,7 +1026,7 @@ impl Placement {
 fn accumulate_subfault(
     acc: &mut [Vec<f32>; 3],
     subfault_acc: &[Array1<f32>; 3],
-    weight: f32,
+    weight: MomentWeight,
     at: &Placement,
 ) {
     let &Placement {
@@ -1013,7 +1038,7 @@ fn accumulate_subfault(
     // names.
     for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
         ArrayViewMut1::from(&mut out[offset..offset + count])
-            .scaled_add(weight, &contribution.slice(s![skip..skip + count]));
+            .scaled_add(weight.0, &contribution.slice(s![skip..skip + count]));
     }
 }
 
@@ -1113,8 +1138,23 @@ struct SourceScale {
     subfault_count: usize,
 }
 
-/// Convert relative slip to relative moment, then normalise to unit average
-/// weight, mutating `stoch.segments[..].slip` in place.
+/// A subfault's share of the total moment, normalised so the mean over contributing
+/// subfaults is one.
+///
+/// This is what [`accumulate_subfault`] weights a subfault's trace by. It is **derived from**
+/// [`Slip`] and is not slip: the conversion multiplies by rigidity and area, then rescales the
+/// whole model. Keeping the two as distinct types is what stops a caller weighting by
+/// centimetres of slip, which is what a single reused `f32` field allowed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+pub struct MomentWeight(pub f32);
+
+/// One segment's moment weights, indexed by [`Segment::grid_index`].
+type SegmentWeights = Vec<MomentWeight>;
+
+/// Convert slip to relative moment, then normalise to unit average weight.
+///
+/// The slip model is **not modified**: the weights come back in their own storage, parallel to
+/// the subfault grid.
 ///
 /// Three passes over the subfault grid, in this order:
 ///
@@ -1126,7 +1166,10 @@ struct SourceScale {
 /// The two counts are different and both matter: pass 2's normalises the averages, pass 3's is
 /// the one that reaches `moment_scale` — the `N` of Graves & Pitarka (2010) eq. 12. Only the
 /// second is returned, because only it is read downstream.
-fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> SourceScale {
+fn normalise_source(
+    stoch: &StochModel,
+    vmod_in: &VelocityModelInput,
+) -> (SourceScale, Vec<SegmentWeights>) {
     let segment_count = stoch.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
@@ -1154,8 +1197,11 @@ fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> Sou
     //
     // What remains live: the in-place slip-to-moment conversion, and the moment sum.
     let mut relative_moment_sum = 0.0f32;
+    let mut weights: Vec<SegmentWeights> = Vec::with_capacity(stoch.segments.len());
 
-    for segment in &mut stoch.segments {
+    for segment in &stoch.segments {
+        let mut segment_weights: SegmentWeights =
+            Vec::with_capacity(segment.subfault_total());
         let row_depth_step_km = segment.subfault_width_km * segment.dip_deg.to_radians().sin();
         let top_depth_km = segment.top_depth_km;
         // THE WHOLE PRODUCT BELOW IS COMPUTED IN f64 and narrows only on assignment to `xmu`.
@@ -1168,7 +1214,7 @@ fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> Sou
 
         // Depth-major, which is storage order, so the sum accumulates without index
         // arithmetic. Rigidity is per depth row, not per subfault, so the row is the unit.
-        for (row_index, row) in segment.depth_rows_mut().enumerate() {
+        for (row_index, row) in segment.depth_rows().enumerate() {
             let row_depth_km = top_depth_km + (row_index as f32 + 0.5) * row_depth_step_km;
             // A subfault below every layer is in the half-space, which is the bottom
             // layer -- the same reading as `source_layer_for` and `ray::source_layer`.
@@ -1184,10 +1230,12 @@ fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> Sou
                 * width_km) as f32;
 
             for subfault in row {
-                subfault.slip *= rigidity_area;
-                relative_moment_sum += subfault.slip;
+                let weight = MomentWeight(subfault.slip.0 * rigidity_area);
+                relative_moment_sum += weight.0;
+                segment_weights.push(weight);
             }
         }
+        weights.push(segment_weights);
     }
 
     // Always derived from the summed subfault moments. A caller-supplied total used to be able
@@ -1195,29 +1243,29 @@ fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> Sou
     let total_moment_dyn_cm = RELATIVE_MOMENT_TO_DYN_CM * relative_moment_sum;
 
     // --- pass 3: normalise relative moments to average weight unity -----------
+    // Depth-major again -- and `weights` was filled depth-major, so a flat walk of it is the
+    // same order the original summed in.
     let mut weight_sum = 0.0f32;
     let mut subfault_count = 0usize;
-    for segment in &stoch.segments {
-        // Depth-major again, so the slice order is the summation order.
-        for subfault in segment.depth_rows().flatten() {
-            if subfault.slip > SUBFAULT_WEIGHT_THRESHOLD {
-                weight_sum += subfault.slip;
-                subfault_count += 1;
-            }
+    for weight in weights.iter().flatten() {
+        if *weight > SUBFAULT_WEIGHT_THRESHOLD {
+            weight_sum += weight.0;
+            subfault_count += 1;
         }
     }
     let scale = subfault_count as f32 / weight_sum;
-    for segment in &mut stoch.segments {
-        for subfault in segment.depth_rows_mut().flatten() {
-            subfault.slip *= scale;
-        }
+    for weight in weights.iter_mut().flatten() {
+        weight.0 *= scale;
     }
 
-    SourceScale {
-        avg_subfault_km,
-        total_moment_dyn_cm,
-        subfault_count,
-    }
+    (
+        SourceScale {
+            avg_subfault_km,
+            total_moment_dyn_cm,
+            subfault_count,
+        },
+        weights,
+    )
 }
 
 /// `α_τ`, the dip-and-rake corner-frequency and rise-time adjustment.
@@ -1359,7 +1407,7 @@ mod tests {
             let mut got: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
             let mut want: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
             if let Some(at) = Placement::clip(start, np2, ndata) {
-                accumulate_subfault(&mut got, &subfault_acc, 2.0, &at);
+                accumulate_subfault(&mut got, &subfault_acc, MomentWeight(2.0), &at);
             }
             accumulate_reference(&mut want, &subfault_acc, 2.0, start, np2, ndata);
             assert_eq!(got, want, "start_sample = {start}");

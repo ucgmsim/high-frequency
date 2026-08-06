@@ -197,6 +197,10 @@ fn trim_traversal(state: &mut RayState, layer: usize, segment: usize, fraction: 
     traversals[layer] = (traversals[layer] as f64 - fraction) as f32;
 }
 
+/// `sin(i)` substituted for a post-critical ray, where the real value would make the
+/// geometric-spreading denominator imaginary. Unsuffixed literal, so `f32` precision.
+const SIN_INCIDENCE_CLAMP: f64 = 0.999999f32 as f64;
+
 /// How far inside the branch cut [`stationary_ray_parameter`] starts its search.
 ///
 /// The ray parameter must sit strictly below `1/v_max`, because [`vertical_slowness`] is
@@ -253,12 +257,19 @@ pub fn geometric_spreading(
         Takeoff::Down => dep + vmod[nh1].thickness_km - source_depth_km,
     };
 
-    let clamp = 0.999999f32 as f64;
-
-    let mut sini = ray_parameter * vmod[nh1].vsh_km_s;
-    if sini >= 1.0 {
-        sini = clamp;
-    }
+    // Substituted only for a post-critical ray, where `sin(i) >= 1` would make `denom`
+    // imaginary.
+    //
+    // **This is not `min(sini, SIN_INCIDENCE_CLAMP)`**, tempting as it looks. A value between
+    // the clamp and 1 -- 0.9999995, say -- is post-critical by neither test and is kept
+    // exactly, where `min` would pull it down to the clamp and move the spreading.
+    // Snell's law: sin(i)/v = p.
+    let incidence_sine = ray_parameter * vmod[nh1].vsh_km_s;
+    let sini = if incidence_sine >= 1.0 {
+        SIN_INCIDENCE_CLAMP
+    } else {
+        incidence_sine
+    };
     let denom = 1.0 / (1.0 - sini * sini).sqrt();
 
     let ri = th1 * denom;
@@ -269,10 +280,12 @@ pub fn geometric_spreading(
 
     for j in 1..state.rays.segment_count() {
         let nhj = state.rays.layer_indices[j];
-        let mut sini = ray_parameter * vmod[nhj].vsh_km_s;
-        if sini >= 1.0 {
-            sini = clamp;
-        }
+        let incidence_sine = ray_parameter * vmod[nhj].vsh_km_s;
+        let sini = if incidence_sine >= 1.0 {
+            SIN_INCIDENCE_CLAMP
+        } else {
+            incidence_sine
+        };
         let denom = 1.0 / (1.0 - sini * sini).sqrt();
 
         let ri = vmod[nhj].thickness_km * denom;

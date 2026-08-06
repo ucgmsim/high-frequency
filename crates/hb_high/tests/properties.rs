@@ -38,7 +38,7 @@ use hb_high::config::{
 use hb_high::fft::{Complex32, Complex64};
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::geom::{FaultPlane, GeoPoint, distance_azimuth, subfault_geometry};
-use hb_high::input::{Segment, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
 use hb_high::radiation::{RadiationAngles, radiation_pattern};
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{Pcg32, fill_normal_deviates, fill_uniform_deviates};
@@ -852,7 +852,7 @@ fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
                 .hypocentre_down_dip_km(2.0)
                 .subfaults(vec![
                     Subfault {
-                        slip: 1.0,
+                        slip: Slip(1.0),
                         rise_time_s: 1.0,
                         rupture_time_s: 1.0
                     };
@@ -896,7 +896,7 @@ proptest! {
             prop_assert_eq!(segment.along_strike_count, along);
             prop_assert_eq!(segment.down_dip_count, down);
             for (i, j) in segment.depth_major() {
-                prop_assert_eq!(segment.at(i, j).slip, 1.0);
+                prop_assert_eq!(segment.at(i, j).slip, Slip(1.0));
             }
         }
     }
