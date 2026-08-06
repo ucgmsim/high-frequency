@@ -59,7 +59,7 @@ fn angle_gap_deg(a: f32, b: f32) -> f32 {
 
 /// A complex spectrum of `n` bins, filled deterministically from `seed`.
 fn spectrum(n: usize, seed: i32) -> Vec<Complex32> {
-    let (mut rng, _) = Pcg32::seed(seed);
+    let mut rng = Pcg32::seed(seed);
     (0..n)
         .map(|_| Complex32::new(rng.next_f32() - 0.5, rng.next_f32() - 0.5))
         .collect()
@@ -462,7 +462,7 @@ proptest! {
     #[test]
     fn real_input_has_a_real_dc_bin(exponent in 3u32..9) {
         let n = 1usize << exponent;
-        let (mut rng, _) = Pcg32::seed(97);
+        let mut rng = Pcg32::seed(97);
         let mut sum = 0.0f32;
         let mut work = vec![Complex32::ZERO; n];
         for slot in work.iter_mut() {
@@ -500,7 +500,7 @@ proptest! {
         dt in 0.001f32..0.05,
     ) {
         let n = 1usize << exponent;
-        let (mut rng, _) = Pcg32::seed(11);
+        let mut rng = Pcg32::seed(11);
         let mut acceleration: Vec<f32> =
             (0..n).map(|_| rng.next_f32() - 0.5 + offset).collect();
         let before = acceleration.clone();
@@ -593,7 +593,7 @@ proptest! {
     /// logarithms of these, so an out-of-range value is not a cosmetic problem.
     #[test]
     fn uniform_deviates_lie_in_the_unit_interval(seed in any::<i32>(), count in 1usize..2048) {
-        let (mut rng, _) = Pcg32::seed(seed);
+        let mut rng = Pcg32::seed(seed);
         let mut out = vec![0.0; count];
         fill_uniform_deviates(&mut rng, count, out.as_mut_slice());
         for (i, deviate) in out.iter().enumerate() {
@@ -609,7 +609,7 @@ proptest! {
     #[test]
     fn normal_deviates_have_unit_rms(seed in any::<i32>(), exponent in 6u32..13) {
         let count = 1usize << exponent;
-        let (mut rng, _) = Pcg32::seed(seed);
+        let mut rng = Pcg32::seed(seed);
         let mut out = vec![0.0; count];
         fill_normal_deviates(&mut rng, count, out.as_mut_slice());
 
@@ -636,9 +636,8 @@ proptest! {
     /// could not be a gate.
     #[test]
     fn a_seed_reproduces_its_stream(seed in any::<i32>(), draws in 1usize..64) {
-        let (mut first, first_mutated) = Pcg32::seed(seed);
-        let (mut second, second_mutated) = Pcg32::seed(seed);
-        prop_assert_eq!(first_mutated, second_mutated);
+        let mut first = Pcg32::seed(seed);
+        let mut second = Pcg32::seed(seed);
         for _ in 0..draws {
             prop_assert_eq!(first.next_u32(), second.next_u32());
         }
@@ -650,8 +649,8 @@ proptest! {
     #[test]
     fn distinct_seeds_give_distinct_streams(seed in any::<i32>()) {
         let other = seed.wrapping_add(1);
-        let (mut a, _) = Pcg32::seed(seed);
-        let (mut b, _) = Pcg32::seed(other);
+        let mut a = Pcg32::seed(seed);
+        let mut b = Pcg32::seed(other);
         let differs = (0..32).any(|_| a.next_u32() != b.next_u32());
         prop_assert!(differs, "seeds {seed} and {other} produced the same 32 draws");
     }

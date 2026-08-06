@@ -41,7 +41,7 @@ fn stoc_f_matches_fortran() {
             (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
-        let (mut rng, _) = Pcg32::seed(seed);
+        let mut rng = Pcg32::seed(seed);
         // The per-segment tables `SpectrumPlan` precomputes in the program. Built here from
         // the golden's own inputs by struct literal rather than through `SpectrumPlan::new`,
         // for two reasons: the golden records `np2` directly where `new` derives it from a

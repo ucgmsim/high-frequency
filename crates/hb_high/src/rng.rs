@@ -26,12 +26,9 @@ const PCG_INC_DEFAULT: u64 = 1442695040888963407;
 
 /// Number of words the original fed to `random_seed(put=)`.
 ///
-/// gfortran 16.1.1 reports 8 from `random_seed(size=n)` on x86-64. This is not
-/// a free choice: the original `init_random_seed` incremented its own argument
-/// once per word, and `hb_high` reads that mutated value at line 1366 to gate
-/// rupture-time jitter. Pinning it here keeps the branch behaving as production
-/// does, independent of the toolchain. Must equal `seed_words` in `pcg32.f`.
-pub const SEED_WORDS: i32 = 8;
+/// gfortran 16.1.1 reports 8 from `random_seed(size=n)` on x86-64. Must equal `seed_words`
+/// in `pcg32.f`, because it sets how many words are folded into the state below.
+const SEED_WORDS: i32 = 8;
 
 /// PCG32 (O'Neill 2014), `pcg32_random_r` variant.
 ///
@@ -47,12 +44,10 @@ pub struct Pcg32 {
 impl Pcg32 {
     /// Equivalent of `init_random_seed(irand)`.
     ///
-    /// Returns the mutated seed alongside the generator, because the Fortran
-    /// mutates its argument in place and the caller reads it afterwards. Making
-    /// that a return value rather than a hidden side effect is the one place
-    /// this file departs from a literal transliteration — the coupling is too
-    /// important to leave implicit.
-    pub fn seed(irand: i32) -> (Self, i32) {
+    /// This used to return the mutated seed alongside the generator, because the Fortran
+    /// mutates its argument in place and read it back to gate rupture-time jitter. That gate
+    /// is gone, so the second return had no consumer left.
+    pub fn seed(irand: i32) -> Self {
         let mut state: u64 = 0;
         let mut irand = irand;
         for _ in 0..SEED_WORDS {
@@ -69,7 +64,7 @@ impl Pcg32 {
         // Two discarded draws, matching pcg32.f.
         g.next_u32();
         g.next_u32();
-        (g, irand)
+        g
     }
 
     /// Equivalent of `pcg32_next()`.
@@ -159,9 +154,6 @@ pub enum DrawSource {
     /// **The default.** `rand_pcg`'s PCG32, seeded through `rand_core`'s `seed_from_u64`
     /// expansion — see [`DrawSource::for_station`] for why that matters.
     Modern(rand_pcg::Pcg32),
-    /// The Fortran's `init_random_seed`. Opt-in via `HB_LEGACY_SEEDING`, and retained
-    /// only to regenerate results produced before §3.1.
-    Legacy(Pcg32),
     /// Validation only — see [`FixtureDraws`]. Opt-in via `HB_FIXTURE_RNG`.
     Fixture(FixtureDraws),
 }
@@ -215,8 +207,6 @@ impl DrawSource {
     pub fn for_station(seed: u64) -> Self {
         if std::env::var_os("HB_FIXTURE_RNG").is_some() {
             Self::Fixture(FixtureDraws::seed(seed as i32))
-        } else if std::env::var_os("HB_LEGACY_SEEDING").is_some() {
-            Self::Legacy(Pcg32::seed(seed as i32).0)
         } else {
             use rand_core::SeedableRng;
             Self::Modern(rand_pcg::Pcg32::seed_from_u64(seed))
@@ -235,7 +225,6 @@ impl Draws for DrawSource {
                 use rand_core::Rng;
                 (g.next_u32() >> 8) as f32 / 16777216.0
             }
-            Self::Legacy(g) => g.next_f32(),
             Self::Fixture(g) => g.next_f32(),
         }
     }
@@ -382,21 +371,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seed_mutates_irand_by_seed_words() {
-        // The line-1366 coupling: irand comes back incremented by exactly 8.
-        let (_, irand) = Pcg32::seed(0);
-        assert_eq!(irand, SEED_WORDS);
-        let (_, irand) = Pcg32::seed(-3);
-        assert_eq!(
-            irand, 5,
-            "a small negative seed becomes positive, \
-                              which flips the line-1366 jitter branch"
-        );
-    }
-
-    #[test]
     fn rand_numb_stays_in_unit_interval() {
-        let (mut g, _) = Pcg32::seed(123456789);
+        let mut g = Pcg32::seed(123456789);
         for _ in 0..100_000 {
             let u = g.next_f32();
             assert!((0.0..1.0).contains(&u), "next_f32 returned {u}");
@@ -405,7 +381,7 @@ mod tests {
 
     #[test]
     fn normal_random_number_has_unit_rms() {
-        let (mut g, _) = Pcg32::seed(42);
+        let mut g = Pcg32::seed(42);
         for nr in [1usize, 2, 3, 15, 16, 1000] {
             let mut a = vec![0.0f32; nr];
             fill_normal_deviates(&mut g, nr, &mut a);
@@ -424,11 +400,11 @@ mod tests {
         // fresh generator advanced by hand against one driven through the
         // routine: the stream position must match.
         for nr in [1usize, 2, 3, 4, 7, 8] {
-            let (mut a, _) = Pcg32::seed(7);
+            let mut a = Pcg32::seed(7);
             let mut acc = vec![0.0f32; nr];
             fill_normal_deviates(&mut a, nr, &mut acc);
 
-            let (mut b, _) = Pcg32::seed(7);
+            let mut b = Pcg32::seed(7);
             for _ in 0..2 * nr.div_ceil(2) {
                 b.next_f32();
             }

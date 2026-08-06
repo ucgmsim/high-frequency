@@ -103,7 +103,7 @@ fn dfr_axis(np2: usize) -> Vec<f32> {
 
 /// Complex spectrum of plausible magnitude, deterministic so runs are comparable.
 fn spectrum(np2: usize) -> Vec<Complex32> {
-    let (mut g, _) = Pcg32::seed(20260804);
+    let mut g = Pcg32::seed(20260804);
     (0..np2)
         .map(|_| Complex32::new(g.next_f32() - 0.5, g.next_f32() - 0.5))
         .collect()
@@ -117,7 +117,7 @@ fn site_table() -> (Vec<f32>, Vec<f32>) {
     ];
     let mut fn_ = vec![0.0; HZ.len()];
     let mut an = vec![0.0; HZ.len()];
-    let (mut g, _) = Pcg32::seed(11);
+    let mut g = Pcg32::seed(11);
     for i in 0..20 {
         fn_[i] = HZ[i].ln();
         an[i] = 0.5 * g.next_f32();
@@ -167,11 +167,11 @@ fn bench_rng(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("next_u32", |b| {
-        let (mut g, _) = Pcg32::seed(1);
+        let mut g = Pcg32::seed(1);
         b.iter(|| black_box(g.next_u32()))
     });
     group.bench_function("next_f32", |b| {
-        let (mut g, _) = Pcg32::seed(1);
+        let mut g = Pcg32::seed(1);
         b.iter(|| black_box(g.next_f32()))
     });
 
@@ -181,12 +181,12 @@ fn bench_rng(c: &mut Criterion) {
     for &n in &[1024usize, 4096, 65536] {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("normal", n), &n, |b, &n| {
-            let (mut g, _) = Pcg32::seed(1);
+            let mut g = Pcg32::seed(1);
             let mut acc = vec![0.0; n];
             b.iter(|| fill_normal_deviates(&mut g, black_box(n), acc.as_mut_slice()))
         });
         group.bench_with_input(BenchmarkId::new("uniform_deviates", n), &n, |b, &n| {
-            let (mut g, _) = Pcg32::seed(1);
+            let mut g = Pcg32::seed(1);
             let mut rn = vec![0.0; n];
             b.iter(|| fill_uniform_deviates(&mut g, black_box(n), rn.as_mut_slice()))
         });
@@ -236,7 +236,7 @@ fn bench_radiation(c: &mut Criterion) {
     // same np2, since both happen the same number of times per subfault.
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("horizontal_radiation_spectrum", format!("nr{NR}")), |b| {
-        let (mut g, _) = Pcg32::seed(7);
+        let mut g = Pcg32::seed(7);
         b.iter(|| {
             horizontal_radiation_spectrum(
                 &mut g, &ARRIVAL, ArrayView1::from(&dfr[..nfold]),
@@ -245,7 +245,7 @@ fn bench_radiation(c: &mut Criterion) {
         })
     });
 
-    let (mut g, _) = Pcg32::seed(3);
+    let mut g = Pcg32::seed(3);
     let mut rna = vec![0.0; NR];
     let mut rnb = vec![0.0; NR];
     fill_uniform_deviates(&mut g, NR, rna.as_mut_slice());
@@ -346,7 +346,7 @@ fn bench_spectrum(c: &mut Criterion) {
         // note as `radiate_and_invert` below. §5.5 folds the internal mirror buffer into
         // the returned array, which is where that allocation comes back out.
         group.bench_with_input(BenchmarkId::new("stochastic_spectrum", np2), &np2, |b, &np2| {
-            let (mut g, _) = Pcg32::seed(5);
+            let mut g = Pcg32::seed(5);
             let plan = SpectrumPlan {
                 np2,
                 fold_count: nf,
