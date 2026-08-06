@@ -32,7 +32,13 @@ Specifically, and these are all things that were in this crate and are not now:
 - index loops where an iterator fits,
 - flag arguments — a parameter whose only job is to switch a function between behaviours,
 - out-parameters,
-- buffers sized by a compile-time ceiling rather than by the data.
+- buffers sized by a compile-time ceiling rather than by the data,
+- **sentinel values** — a "not found" spelled as an in-range index, a "leave it unset"
+  spelled as a negative count. `Option` says both, and cannot be indexed with by accident,
+- **one field meaning several things at different points in a run**, which no comment at a
+  call site can disambiguate. Two types, or two fields,
+- **a boolean whose only correct value is one of them.** That is not a configuration
+  option; it is a way for a caller to get the wrong answer.
 
 ## 3. Clean Rust
 
@@ -109,6 +115,8 @@ Short, and none of it is fidelity to the Fortran:
 | `cargo test --workspace` | properties, kernel goldens, and `snapshot.rs` — the whole pipeline against `harness/golden/snapshot.txt` on a frozen draw source | **every commit**, seconds |
 | `pytest tests/` | batch invariants, `station_seeds` properties, stub/dataclass agreement | **every commit**, ~10 s |
 | `cargo clippy --workspace` | zero warnings | **every commit**, and CI runs it with `-D warnings` |
+| `cargo fmt --all --check` | stock rustfmt, `rustfmt.toml` sets only the edition | **every commit**, CI enforces |
+| `cargo doc --no-deps` | no broken intra-doc links | before a docs commit — it catches renames the compiler does not |
 
 **The statistical tiers are gone with the oracle.** §4.3 deleted `crates/validate`,
 `crates/im`, `reference/` and the `run_*` scripts, because the port is certified and the

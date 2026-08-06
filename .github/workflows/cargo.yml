@@ -34,9 +34,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # No `cargo fmt --check` here, and that is a choice rather than an oversight. This
-      # crate has never been rustfmt'd: its formatting is hand-set, dense, and in places
-      # deliberately aligned so that a transliterated expression reads like the Fortran it
-      # came from. Turning the gate on means one mechanical commit touching every file, which
-      # would bury Stage 4 in the blame history. Worth doing on purpose one day, with a
-      # rustfmt.toml that matches the existing style; not worth doing as a side effect.
+      # Turned on deliberately, in its own commit, once the reason not to had expired. The
+      # crate's formatting was hand-set and in places aligned so that a transliterated
+      # expression read like the Fortran it came from; there are no Fortran transliterations
+      # left to read alongside. `rustfmt.toml` is stock, so there is no local dialect.
+      - name: Format
+        run: cargo fmt --all --check

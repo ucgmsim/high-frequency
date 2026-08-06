@@ -4,10 +4,10 @@ use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::input::{build_velocity_model, Segment, Slip, Station, StochModel, Subfault};
+use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
 use hb_high::sim::Simulator;
 use hb_high::state::{InputLayer, VelocityModelInput};
-use numpy::ndarray::{s, Array3};
+use numpy::ndarray::{Array3, s};
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -250,7 +250,11 @@ pub struct PyPathParameters {
 impl PyPathParameters {
     #[new]
     #[pyo3(signature = (*, rayset, q_frequency_exponent, path_duration_model))]
-    fn new(rayset: Vec<i32>, q_frequency_exponent: f32, path_duration_model: i32) -> PyResult<Self> {
+    fn new(
+        rayset: Vec<i32>,
+        q_frequency_exponent: f32,
+        path_duration_model: i32,
+    ) -> PyResult<Self> {
         // Only the checks Python cannot make for itself: this one decodes a non-contiguous
         // integer set that the Rust enum owns.
         let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {

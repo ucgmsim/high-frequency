@@ -1,0 +1,11 @@
+# Defaults, with one exception.
+#
+# The crate was hand-formatted until the physics-annotation arc, and the workflow comment
+# beside the (then absent) `cargo fmt --check` said the reason: expressions were deliberately
+# aligned so a transliterated formula read like the Fortran it came from. That reason expired
+# with the Fortran references themselves -- the formulae now cite papers and are laid out to
+# match the equations, which rustfmt leaves alone because they are already inside explicit
+# parentheses.
+#
+# So: stock style, no local dialect to learn.
+edition = "2024"

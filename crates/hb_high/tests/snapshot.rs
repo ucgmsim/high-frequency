@@ -40,8 +40,8 @@ use hb_high::config::{
 };
 use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
 use hb_high::sim::Simulator;
-use ndarray::Array2;
 use hb_high::state::VelocityModelInput;
+use ndarray::Array2;
 
 const GOLDEN: &str = "../../harness/golden/snapshot.txt";
 const COMPONENT_COUNT: usize = 3;

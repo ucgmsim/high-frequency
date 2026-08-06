@@ -9,7 +9,7 @@ use ndarray::{ArrayView1, ArrayViewMut1, azip};
 
 /// Full width of the horizontal component's perturbation cone: ±45° on each of the five
 /// angles, as Graves & Pitarka (2010) specify.
-const CONE_WIDTH_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
+pub const CONE_WIDTH_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
 /// Half-width of the vertical component's take-off cone.
 const VERTICAL_CONE_HALF_WIDTH_RAD: f32 = 40.0 * (std::f32::consts::PI / 180.0);
 /// Straight down: the shallowest take-off the vertical average accepts.
@@ -18,6 +18,13 @@ const DOWNGOING_MIN_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
 const DOWNGOING_MAX_RAD: f32 = 180.0 * (std::f32::consts::PI / 180.0);
 /// One full azimuthal turn.
 const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
+
+/// Lower bound on the conical-average blend for a horizontal component.
+///
+/// At 1.0 the blend is pinned to the conical average at every frequency, which is what
+/// "since using a conical average around theoretical ray, don't allow much purely theoretical
+/// rad pattern" asks for.
+pub const CONICAL_FLOOR: f32 = 1.0;
 
 /// Fault orientation and the ray's arrival direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,12 +145,10 @@ pub fn radiation_pattern(angles: RadiationAngles) -> ShearRadiation {
 
 /// Only the SV coefficient.
 ///
-/// [`vertical_radiation_spectrum`] never uses the SH lobe. It used to call
-/// [`radiation_pattern`] and bind the SH result to `_rdsha`, which asked the reader to notice
-/// the underscore to learn that half the returned value was meaningless there.
+/// [`vertical_radiation_spectrum`] never uses the SH lobe, so it asks for the one it wants.
 ///
-/// **This is a separation of concerns, not an optimisation.** The compiler already eliminated
-/// the unused half; asking for what you need is just a clearer way to say it.
+/// **This is a separation of concerns, not an optimisation** — the compiler eliminates an
+/// unused half either way.
 #[inline]
 pub fn sv_radiation(angles: RadiationAngles) -> f32 {
     sv_from(AngleTerms::of(angles))
@@ -157,8 +162,8 @@ pub fn sv_radiation(angles: RadiationAngles) -> f32 {
 /// theoretical values — a cone around the theoretical ray, on the reasoning that the true
 /// parameters are more likely near their nominal values than in an arbitrary orientation.
 ///
-/// The `9.0 * range * pu` below is 90° in radians, so `(0.5 - u)` scaled by it gives ±45°
-/// exactly as the paper specifies.
+/// [`CONE_WIDTH_RAD`] is 90°, so `(0.5 - u)` scaled by it gives ±45° exactly as the paper
+/// specifies.
 ///
 /// # This is the dominant consumer of random numbers
 ///
@@ -167,17 +172,18 @@ pub fn sv_radiation(angles: RadiationAngles) -> f32 {
 /// the phase spectrum (`PHYSICS.md` §9); changing either desynchronises every waveform that
 /// follows.
 ///
-/// # `radmin = 1.0` makes the frequency blend inert
+/// # The frequency blend is inert
 ///
-/// `radmin` forces `del` to exactly 1.0 on all three branches, so the result is the conical
-/// average at every frequency and the `fr1`/`fr2` taper never bites. The expression is still
-/// written out in full, because `rdx + (radvh - rdx) * 1.0` is not bitwise equal to `radvh`.
+/// [`CONICAL_FLOOR`] is 1.0, which forces the blend to exactly 1.0 on all three branches, so
+/// the result is the conical average at every frequency and the taper never bites. The
+/// expression is still written out in full, because
+/// `theoretical + (conical - theoretical) * 1.0` is not bitwise equal to `conical`.
 ///
 /// # The return value is a discarded output
 ///
-/// `fr1` is returned because the original assigned it to the caller's Butterworth low-cut,
-/// clobbering it. The only consumer of that value is a filter that is dead under production
-/// settings, so the clobber is real but inert. Returned explicitly rather than hidden.
+/// The blend's lower corner is returned because the caller once assigned it to a Butterworth
+/// low-cut, clobbering it. That filter is dead under production settings, so the clobber is
+/// real but inert. Returned explicitly rather than hidden.
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
     angles: &RadiationAngles,
@@ -196,9 +202,6 @@ pub fn horizontal_radiation_spectrum(
 
     let blend_low_hz = 0.5f32;
     let blend_high_hz = 2.0f32;
-    // Set to 1.0 in 2009 with the note "since using a conical average around theoretical ray,
-    // don't allow much purely theoretical rad pattern". The superseded 0.5 is `blend_low_hz`.
-    let conical_floor = 1.0f32;
 
     let theoretical = radiation_pattern(*angles);
 
@@ -248,12 +251,12 @@ pub fn horizontal_radiation_spectrum(
         &freq in frequency_hz,
     ) {
         let blend = if freq <= blend_low_hz {
-            conical_floor
+            CONICAL_FLOOR
         } else if freq <= blend_high_hz {
             // The `max` applies to the QUOTIENT, not to the denominator. Written without the
             // parentheses it binds to `.ln()` and silently changes the blend.
             ((freq / blend_low_hz).ln() / (blend_high_hz / blend_low_hz).ln())
-                .max(conical_floor)
+                .max(CONICAL_FLOOR)
         } else {
             1.0
         };

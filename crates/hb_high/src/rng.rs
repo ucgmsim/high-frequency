@@ -44,9 +44,6 @@ pub struct Pcg32 {
 impl Pcg32 {
     /// Equivalent of `init_random_seed(irand)`.
     ///
-    /// This used to return the mutated seed alongside the generator, because the Fortran
-    /// mutates its argument in place and read it back to gate rupture-time jitter. That gate
-    /// is gone, so the second return had no consumer left.
     pub fn seed(irand: i32) -> Self {
         let mut state: u64 = 0;
         let mut irand = irand;
@@ -235,11 +232,10 @@ impl Draws for DrawSource {
 /// Box-Muller pairs, then the whole vector is rescaled so that `sum(out**2) == count`
 /// exactly.
 ///
-/// # What the renormalisation actually buys — the old claim here was wrong
+/// # The rescale is not load-bearing for the spectrum
 ///
-/// This comment used to say the rescale was load-bearing because
-/// `stochastic_spectrum`'s amplitude calibration is tuned against a unit-RMS sequence.
-/// **It is not.** Trace the scale factor `s` through that routine: `a` is proportional to
+/// It looks as though `stochastic_spectrum`'s amplitude calibration must want a unit-RMS
+/// sequence. **It does not.** Trace the scale factor `s` through that routine: `a` is proportional to
 /// `s`; `remove_quadratic_trend` is linear and homogeneous of degree 1, so its output is
 /// too; `ac = a * w` and the forward transform are linear, so `ac ∝ s`; therefore
 /// `fsa = sum|ac|^2 ∝ s^2` and `amp = 1/(dt*sqrt(fsa/fold_count)) ∝ 1/s`. The product
@@ -276,7 +272,6 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
     // locals whose values survive between iterations of the DO 8 loop.
     let mut x1 = 0.0f32;
     let mut x2 = 0.0f32;
-    // The original's computed `goto (1,2),j`.
     let mut j = 1;
 
     for slot in out[..count].iter_mut() {
@@ -329,9 +324,8 @@ pub fn fill_normal_deviates<R: Draws>(rng: &mut R, count: usize, out: &mut [f32]
 ///
 /// That routine renormalises its whole output so the sum of squares equals the count,
 /// which for a single value would force it to exactly ±1 and destroy the distribution.
-/// The renormalisation only makes sense over a block, and the block it used to be applied
-/// over — 262,144 deviates supplying a few thousand reads — was an artifact of a buffer
-/// size rather than anything physical. See §3.2.
+/// The renormalisation only makes sense over a block, and a block sized by a buffer rather
+/// than by anything physical is not a block worth normalising over.
 ///
 /// The practical difference is small and in the right direction: the block form pinned
 /// the RMS to exactly 1 where an un-normalised generator lands within `1/sqrt(2N)` of it,

@@ -95,14 +95,13 @@ pub fn build_ray_path(
     // layer.
     let source_layer = state.rays.layer_indices[0];
     let receiver_layer = state.rays.layer_indices[n - 1];
-    // Starts at 1, not 0: the Fortran's `nl = 1` before the count.
+    // Starts at 1, not 0.
     let nl = 1 + state
         .rays
         .layer_indices
         .iter()
         .filter(|&&layer| layer == source_layer)
         .count() as i32;
-    // `(-1)**nl` in the Fortran -- integer exponentiation extracting a parity bit.
     let mut nup = Direction::from_parity(nl);
     if receiver_layer > source_layer {
         nup = nup.flipped();
@@ -138,9 +137,9 @@ pub fn build_ray_path(
     // Both endpoints sit part-way through their layer, so the whole-layer traversal
     // counted above is trimmed by the fraction the ray does not travel.
     //
-    // **The two blocks are not the same function.** `Up` trims by `below` at the receiver
-    // and by `above` at the source -- the roles are swapped -- and that asymmetry is the
-    // Fortran's, not a transcription slip.
+    // **The two calls are not the same function.** `Up` trims by `below` at the receiver and
+    // by `above` at the source -- the roles are swapped. Making them symmetric changes every
+    // travel time.
     let receiver = layer_fractions(vmod, receiver_layer, receiver_depth_km);
     trim_traversal(
         state,
@@ -186,8 +185,7 @@ fn layer_fractions(vmod: &VelocityModel, layer: usize, depth_km: f64) -> LayerFr
 
 /// Subtract the part of `layer` that segment `segment` does not actually travel.
 ///
-/// A shear mode takes the S multiplier, anything else the P one — the Fortran's labels
-/// 23/24.
+/// A shear mode takes the S multiplier, anything else the P one.
 fn trim_traversal(state: &mut RayState, layer: usize, segment: usize, fraction: f64) {
     let traversals = if state.rays.wave_modes[segment].is_shear() {
         &mut state.travel.s_traversals
@@ -206,12 +204,9 @@ const SIN_INCIDENCE_CLAMP: f64 = 0.999999f32 as f64;
 /// The ray parameter must sit strictly below `1/v_max`, because [`vertical_slowness`] is
 /// singular on the cut.
 ///
-/// The original *searched* for this, multiplying a `1e-10` seed by ten until
-/// `(1/v - eps) * v` fell below 1. **That search always terminates on its first test.** The
-/// product only fails to drop below 1 when `eps * v` is under half an ulp of 1.0, which for
-/// this seed needs `v < 1e-7` km/s -- a fastest-traversed-layer velocity of a tenth of a
-/// millimetre per second. So the seed is the answer, and the loop was a guard written as a
-/// search.
+/// One value suffices for every physical velocity. `(1/v - eps) * v` fails to fall below 1
+/// only when `eps * v` is under half an ulp of 1.0, which at this magnitude needs `v < 1e-7`
+/// km/s — a fastest-traversed-layer velocity of a tenth of a millimetre per second.
 const BRANCH_CUT_CLEARANCE: f64 = 1.0e-10;
 
 /// One layer as the Cagniard integrals see it: the medium, and how many times the ray
@@ -437,7 +432,7 @@ pub enum Takeoff {
 }
 
 impl Takeoff {
-    /// Every call site passes `itype >= 1`; a negative value is what the Fortran leaves
+    /// Every call site passes `ray_type >= 0`. A negative value leaves the take-off angle
     /// undefined, so it is rejected at the boundary rather than deep inside a formula.
     pub fn from_ray_type(ray_type: i32) -> Self {
         assert!(
@@ -511,13 +506,12 @@ impl<'a> RayPath<'a> {
     /// The Moho is above the first layer of zero thickness; `read_velocity_model` forces
     /// the bottom layer to zero thickness, so the scan always terminates.
     ///
-    /// The return value carries the Fortran's `DO` post-loop semantics, which is why this
-    /// is a method and not an inlined loop: a range that runs to completion leaves
-    /// `high + 1`, an EMPTY range leaves `low` untouched, and `green_function` reads the
-    /// loop variable afterwards as `kbot`. Getting that wrong silently changes the ray.
+    /// The two exhaustion cases return different things and both are read: a scan that runs
+    /// to completion returns one past the last layer tested, an empty range returns `from`
+    /// unchanged. Collapsing them silently changes the ray.
     fn descend_to_moho(&mut self, vmod: &VelocityModel, from: usize, bottom_layer: usize) -> usize {
         let last = bottom_layer - 1;
-        // The empty-range case: `low > high` leaves the Fortran's loop variable at `low`.
+        // Empty range: nothing to descend through, so the caller ascends from where it is.
         if from > last {
             return from;
         }
@@ -549,16 +543,12 @@ const INTERFACE_CLEARANCE_KM: f64 = 0.02f32 as f64;
 /// `None` means the source is below every layer, i.e. in the half-space. That is a real case:
 /// truncating the velocity model at the Moho can leave subfaults beneath the deepest layer.
 ///
-/// # This used to be an out-of-range index
+/// # Why this is an `Option` and not a sentinel
 ///
-/// The search is a `DO ksrc = 1, layer_count` exiting early via `goto`. Run to completion it
-/// leaves the loop variable at `layer_count + 1`, and the original **read it in that state**,
-/// making it the first ray segment's layer index. That index then reached the travel-time
-/// accumulator and the velocity lookup. It did not trap, because the arrays were dimensioned
-/// to a compile-time ceiling rather than to the model, so it quietly read a zeroed layer —
-/// zero velocity, zero density — and produced garbage travel times for those subfaults.
-///
-/// An `Option` makes the case nameable, and the caller resolves it to the bottom layer.
+/// A "not found" spelled as `layer_count` is a valid index into anything sized to hold the
+/// model plus slack, so it does not trap — it reads a zeroed layer, zero velocity and zero
+/// density, and puts NaN travel times into the waveform for those subfaults. The `Option`
+/// makes that case impossible to use by accident.
 fn source_layer(vmod: &VelocityModel, mut depth_km: f64) -> (Option<usize>, f64) {
     let mut interface_km = 0.0f64;
     for (layer, entry) in vmod.iter().enumerate() {
@@ -607,8 +597,9 @@ pub struct GreenFunction {
 }
 
 /// Builds the ray segment description for a given source depth and ray type,
-/// then drives [`build_ray_path`], [`stationary_ray_parameter`], [`travel_time`] and [`geometric_spreading`] to return ray
-/// parameter, travel time, path length and path attenuation.
+/// then drives [`build_ray_path`], [`stationary_ray_parameter`] and
+/// [`geometric_spreading`] to return ray parameter, travel time, path length and path
+/// attenuation.
 /// `subroutine green_function(...)` — `hb_high_ref.f:3174`.
 ///
 ///
@@ -616,14 +607,11 @@ pub struct GreenFunction {
 /// down-going then Moho-reflected, and values above 2 add Moho multiples —
 /// production passes 1, so the multiple loops never run.
 ///
-/// The `sgc` argument is declared `complex` in the Fortran and never referenced;
-/// omitted here. `rcv`, `cp0` and `gc` are likewise declared and unused.
-///
 /// The Moho is taken to be above the first layer of zero thickness, or the
 /// deepest layer if none is zero.
 ///
-/// A source below the whole model is in the half-space, which is the bottom layer — see
-/// [`source_layer`].
+/// A source below the whole model is in the half-space, so it is placed just inside the
+/// deepest layer that has thickness.
 ///
 /// Note that if the source layer is shallower than `krec` (layer 2) the upgoing segment loop
 /// produces zero segments and `nd` is 0, which [`build_ray_path`] is not written to handle.

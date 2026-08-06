@@ -208,8 +208,7 @@ impl RuptureVelocityTaper {
             frac * deep_factor
         } else if depth_km >= deep_top_km {
             frac * (1.0
-                + (deep_factor - 1.0) * (depth_km - deep_top_km)
-                    / (deep_base_km - deep_top_km))
+                + (deep_factor - 1.0) * (depth_km - deep_top_km) / (deep_base_km - deep_top_km))
         } else {
             shallow
         }

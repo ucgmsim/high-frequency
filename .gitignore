@@ -24,3 +24,4 @@ harness/science_*_n*.csv
 # publisher-copyright material and do not belong in git history.
 papers/*.pdf
 __pycache__/
+Todoist Export_*.csv

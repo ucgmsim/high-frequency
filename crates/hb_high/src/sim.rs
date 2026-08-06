@@ -161,22 +161,13 @@ pub struct Simulation {
     /// Samples per component.
     pub ndata: usize,
     pub dt: f32,
-    /// Ground motion, shaped `(n_components, ndata)`, rows in [`Component::ALL`] order —
-    /// 090, 000, vertical.
-    ///
-    /// The three components are computed as three separate traces, so this is how they
-    /// already exist. It used to be flattened into one interleaved `Vec` here and
-    /// de-interleaved again by the caller, which was two passes over the whole record to
-    /// arrive back at the shape it started in.
+    /// Ground motion, shaped `(n_components, ndata)`, rows ordered 090, 000, vertical.
     pub acc: Array2<f32>,
 }
 
 /// Why a simulation could not be produced.
 ///
-/// The messages are written for whoever has to fix the input. They used to be the Fortran's,
-/// which reported `dx(2) = 1.5 not equal to dx(1) = 2.0, exiting...` — 1-based indices into a
-/// deck that no longer exists, and a promise about what the program is about to do that is not
-/// this function's to make.
+/// The messages name the field a caller would set, since a caller is who has to fix it.
 #[derive(Debug, thiserror::Error)]
 pub enum SimError {
     /// Every segment must share the first one's subfault size, because `dl` is a single
@@ -204,9 +195,6 @@ pub enum SimError {
 /// slip-model normalisation, the moment scaling, the rupture taper, the path-duration table,
 /// the per-segment angles — is computed here. [`Simulator::run`] then does only the part that
 /// genuinely varies: the source-to-station geometry and the passes over it.
-///
-/// The caller used to be a loop over stations calling a free function, which redid all of the
-/// above every time, including cloning and re-normalising the entire slip model per station.
 ///
 /// # Stations are independent, and that is a contract
 ///
@@ -953,10 +941,7 @@ fn subfault_pass(
                 subfault_acc[component.index()] = radiate_and_invert(spec, radiation.view());
             }
 
-            // Rupture time at this subfault, taken from the slip model. A constant-rupture-
-            // velocity override used to live here, computing the time from the hypocentre
-            // distance instead and optionally jittering it; nothing set it, and it was the only
-            // reachable jitter site.
+            // Rupture time at this subfault, taken from the slip model.
             let ratim = subfault.rupture_time_s;
 
             // Both terms truncate TOWARD ZERO, not toward negative infinity, so a negative
@@ -1063,8 +1048,7 @@ struct DurationSegment {
 
 /// The path-duration model: a piecewise-linear duration-versus-distance table.
 ///
-/// `len()` is the segment count, so a length and a capacity can no longer disagree. The largest
-/// model here uses eight segments.
+/// `len()` is the segment count. The largest model here uses eight segments.
 type PathDuration = Vec<DurationSegment>;
 
 /// Build the path-duration table.
@@ -1146,8 +1130,8 @@ struct SourceScale {
 /// A subfault's share of the total moment, normalised so the mean over contributing
 /// subfaults is one.
 ///
-/// This is what [`accumulate_subfault`] weights a subfault's trace by. It is **derived from**
-/// [`Slip`] and is not slip: the conversion multiplies by rigidity and area, then rescales the
+/// This is what a subfault's trace is weighted by when it is summed into the record. It is
+/// **derived from** [`crate::input::Slip`] and is not slip: the conversion multiplies by rigidity and area, then rescales the
 /// whole model. Keeping the two as distinct types is what stops a caller weighting by
 /// centimetres of slip, which is what a single reused `f32` field allowed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
@@ -1178,8 +1162,6 @@ fn normalise_source(
     let segment_count = stoch.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
-    // A maximum-slip accumulation over every subfault used to happen here. Nothing read it, so
-    // it is gone along with the whole loop that fed it.
     let avg_subfault_km = stoch
         .segments
         .iter()
@@ -1205,8 +1187,7 @@ fn normalise_source(
     let mut weights: Vec<SegmentWeights> = Vec::with_capacity(stoch.segments.len());
 
     for segment in &stoch.segments {
-        let mut segment_weights: SegmentWeights =
-            Vec::with_capacity(segment.subfault_total());
+        let mut segment_weights: SegmentWeights = Vec::with_capacity(segment.subfault_total());
         let row_depth_step_km = segment.subfault_width_km * segment.dip_deg.to_radians().sin();
         let top_depth_km = segment.top_depth_km;
         // THE WHOLE PRODUCT BELOW IS COMPUTED IN f64 and narrows only on assignment to `xmu`.
@@ -1243,8 +1224,6 @@ fn normalise_source(
         weights.push(segment_weights);
     }
 
-    // Always derived from the summed subfault moments. A caller-supplied total used to be able
-    // to override this; nothing supplied one.
     let total_moment_dyn_cm = RELATIVE_MOMENT_TO_DYN_CM * relative_moment_sum;
 
     // --- pass 3: normalise relative moments to average weight unity -----------

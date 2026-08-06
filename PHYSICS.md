@@ -307,8 +307,8 @@ Contributions can start before the record begins or after it ends; both are clip
 
 ## 8. Symbol glossary
 
-The identifiers are inherited from Fortran, where six characters was the limit. This is the
-translation table.
+Code name to symbol. The identifiers were inherited from Fortran, where six characters was
+the limit; they are not any more, so this table maps what is in the code today.
 
 ### Source
 
@@ -316,38 +316,42 @@ translation table.
 |---|---|---|---|
 | `subevent_moment` | `σ_p·dl³` | subfault moment scale | dyn·cm |
 | `moment_scale` | `F` | Frankel finite-fault factor (§2) | — |
-| `stress_drop`, `sdrop` | `Δσ`, `σ_p` | Brune stress parameter | bars |
-| `corner_frequency_hz`, `fce` | `f_ci` | subfault corner frequency | Hz |
+| `stress_drop_bars` | `Δσ`, `σ_p` | Brune stress parameter | bars |
+| `corner_frequency_hz` | `f_ci` | subfault corner frequency | Hz |
 | `czero` | `c₀` | corner-frequency constant (= 2.0) | — |
 | `calpha` | `c_α` | `α_τ` coefficient (= 0.1) | — |
-| `avg_subfault_km`, `dlm` | `dl` | average subfault dimension | km |
-| `slip` | `d_i` | subfault slip → relative moment weight | cm |
-| `rvf` | — | rupture-speed factor, fraction of β | — |
+| `avg_subfault_km` | `dl` | average subfault dimension | km |
+| `total_moment_dyn_cm` | `M_o` | total seismic moment | dyn·cm |
+| `Slip` | `d_i` | subfault slip, as the `.stoch` file gives it | cm |
+| `MomentWeight` | — | a subfault's share of the moment, mean 1 | — |
+| `rupture_fraction` | — | rupture-speed factor, fraction of β | — |
 
 ### Path and medium
 
-| code | symbol | meaning | units |
-|---|---|---|---|
-| `shear_velocity_km_s`, `betvs` | `β` | shear-wave speed at the source | km/s |
-| `density_g_cm3`, `row` | `ρ` | density at the source | g/cm³ |
-| `distance_km`, `rpath` | `R`, `r_ij` | ray path length (**not** epicentral) | km |
-| `qbar` | `q̄` | travel-time weighted `Σt/q` | s |
-| `q_exponent`, `qfexp` | `x` | exponent in `Q(f) = Q₀f^x` | — |
-| `attenuation_s`, `attenuation_p` | `Q_s`, `Q_p` | per-layer quality factors | — |
-| `kappa_s`, `akapp` | `κ` | near-surface decay (= 0.045) | s |
-| `fmax_hz`, `fmx` | `f_max` | high-cut corner | Hz |
+| code                             | symbol       | meaning                              | units |
+|----------------------------------|--------------|--------------------------------------|-------|
+| `shear_velocity_km_s`            | `β`          | shear-wave speed at the source       | km/s  |
+| `density_g_cm3`                  | `ρ`          | density at the source                | g/cm³ |
+| `path_length_km`, `distance_km`  | `R`, `r_ij`  | ray path length (**not** epicentral) | km    |
+| `qbar`                           | `q̄`          | travel-time weighted `Σt/q`          | s     |
+| `q_exponent`                     | `x`          | exponent in `Q(f) = Q₀f^x`           | —     |
+| `attenuation_s`, `attenuation_p` | `Q_s`, `Q_p` | per-layer quality factors            | —     |
+| `kappa_s`                        | `κ`          | near-surface decay (= 0.045)         | s     |
+| `f_max_hz`                       | `f_max`      | high-cut corner                      | Hz    |
+| `p_traversals`, `s_traversals`   | —            | per-layer path multipliers           | —     |
 
 ### Time series
 
 | code | symbol | meaning | units |
 |---|---|---|---|
-| `window_s`, `tw` | `T_w` | shaping-window length | s |
-| `window_eps`, `window_eta` | `ε`, `η` | envelope shape (= 0.2, 0.05) | — |
+| `window_s` | `T_w` | shaping-window length | s |
+| `window_peak_fraction`, `window_end_fraction` | `ε`, `η` | envelope shape (= 0.2, 0.05) | — |
 | `np2` | — | FFT length, a power of two | samples |
-| `fold_count`, `nfold` | — | positive-frequency bins, `np2/2 + 1` | — |
+| `fold_count` | — | positive-frequency bins, `np2/2 + 1` | — |
 | `dt` | `Δt` | sample interval | s |
 | `ndata` | — | output samples per component | — |
 | `radiation` | `RP_ij` | conically averaged pattern, per bin | — |
+| `ShearRadiation::sh`, `::sv` | `F^SH`, `F^SV` | double-couple radiation coefficients | — |
 
 ---
 
