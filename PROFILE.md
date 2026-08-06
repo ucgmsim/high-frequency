@@ -36,6 +36,32 @@ Four stations cost exactly 4× one (26.16 vs 26.19 s each), confirming the batch
 serial by design: the GIL is released so a dask thread pool scales across chunks, and there is
 no internal thread pool to compete with it.
 
+## Building the simulator once buys almost nothing, and that is the finding
+
+`Simulator::new` hoists everything station-independent out of the station loop: the air
+layer, the rupture taper, the path-duration table, the per-segment angles, and
+`normalise_source`, which walks every subfault three times and was preceded by a full clone
+of the slip model. Before it, a batch redid all of that per station.
+
+**It is worth ~2% on a tiny fault and nothing on a realistic one.** `batch` in
+`benches/whole.rs` runs 16 stations two ways — one simulator shared, versus one rebuilt per
+station:
+
+| fault | subfaults | shared | rebuilt per station | saving |
+| --- | ---: | ---: | ---: | ---: |
+| mini | 4 | 56.5 ms | 57.6 ms | 1.9% |
+| medium | 112 | 2.891 s | 2.875 s | none, within noise |
+
+The saving *shrinks* as the fault grows, which is the opposite of the intuition that made
+this look worth measuring: setup scales with subfault count, so it ought to matter more.
+It does scale — but `run` scales with subfaults **times** rays times components times an
+FFT each, so the setup's share falls away. At 112 subfaults it is already below the noise
+floor on a loaded machine.
+
+So the refactor stands on its structure, not its speed: `run(&self)` is what lets one
+simulator be shared across a dask thread pool, and the per-station clone of the slip model
+is gone. Nobody should spend further effort optimising the setup path.
+
 ## What the batch API removed
 
 Stage 3 measured the mini fault at ~5.8 ms **through the CLI**, against 3.44 ms calling the
