@@ -29,7 +29,7 @@ use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spect
 use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, Takeoff};
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::{site_amplification_factors, apply_site_amplification};
-use hb_high::state::{params, RayState, VelocityModel};
+use hb_high::state::{Layer, RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
 use hb_high::state::WaveMode;
 
@@ -51,18 +51,18 @@ const DT: f32 = 0.005;
 /// air layer is inserted: thin slow layers near the surface, thickening and
 /// speeding up with depth, zero-thickness base.
 fn vmod(j0: usize) -> VelocityModel {
-    let mut v = VelocityModel::new();
+    let mut v: VelocityModel = vec![Layer::default(); j0];
     let mut dep = 0.0f64;
-    for k in 0..j0 {
+    for (k, layer) in v.iter_mut().enumerate() {
         let frac = k as f64 / (j0 - 1) as f64;
-        v[k].thickness_km = 0.05 + 3.0 * frac;
-        v[k].vsh_km_s = 0.5 + 4.1 * frac;
-        v[k].vp_km_s = v[k].vsh_km_s * 1.75;
-        v[k].density_g_cm3 = 1.81 + 1.5 * frac;
-        v[k].attenuation_s = (50.0 + 150.0 * frac) as f32;
-        v[k].attenuation_p = 2.0 * v[k].attenuation_s;
-        dep += v[k].thickness_km;
-        v[k].depth_km = dep;
+        layer.thickness_km = 0.05 + 3.0 * frac;
+        layer.vsh_km_s = 0.5 + 4.1 * frac;
+        layer.vp_km_s = layer.vsh_km_s * 1.75;
+        layer.density_g_cm3 = 1.81 + 1.5 * frac;
+        layer.attenuation_s = (50.0 + 150.0 * frac) as f32;
+        layer.attenuation_p = 2.0 * layer.attenuation_s;
+        dep += layer.thickness_km;
+        layer.depth_km = dep;
     }
     v[j0 - 1].thickness_km = 0.0;
     v
@@ -72,16 +72,11 @@ fn vmod(j0: usize) -> VelocityModel {
 /// source layer up to `krec = 2`, all SH (`nm = 4`).
 fn ray_state(ksrc: usize) -> RayState {
     let mut st = RayState::default();
-    let mut l = 0usize;
-    let mut j = ksrc as i64;
-    while j >= 2 {
-        st.rays.nh[l] = j as i32;
-        st.rays.nm[l] = WaveMode::Sh;
-        l += 1;
-        j -= 1;
+    for layer in (2..=ksrc).rev() {
+        st.rays.layer_indices.push(layer);
+        st.rays.wave_modes.push(WaveMode::Sh);
     }
-    st.rays.nd = l as i32;
-    st.rays.ndeg = 1;
+    st.rays.degeneracy = 1;
     st
 }
 
@@ -89,10 +84,7 @@ fn ray_state(ksrc: usize) -> RayState {
 /// kernels see self-consistent state.
 fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     let mut st = ray_state(ksrc);
-    let mut depsum = 0.0f64;
-    for k in 0..=ksrc {
-        depsum += v[k].thickness_km;
-    }
+    let depsum: f64 = v[..=ksrc].iter().map(|l| l.thickness_km).sum();
     let hs = depsum - 0.5 * v[ksrc].thickness_km;
     build_ray_path(&mut st, v, hs, v[0].thickness_km);
     st
@@ -122,8 +114,8 @@ fn site_table() -> (Vec<f32>, Vec<f32>) {
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00,
         3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let mut fn_ = vec![0.0; params::NLAYMAX];
-    let mut an = vec![0.0; params::NLAYMAX];
+    let mut fn_ = vec![0.0; HZ.len()];
+    let mut an = vec![0.0; HZ.len()];
     let (mut g, _) = Pcg32::seed(11);
     for i in 0..20 {
         fn_[i] = HZ[i].ln();
@@ -309,7 +301,7 @@ fn bench_ray(c: &mut Criterion) {
             RayState::default,
             |st| {
                 black_box(green_function(
-                    st, &v, 35, black_box(28.0), black_box(60.0), 1, WaveMode::Sh,
+                    st, &v, black_box(28.0), black_box(60.0), 1, WaveMode::Sh,
                 ))
             },
             criterion::BatchSize::SmallInput,

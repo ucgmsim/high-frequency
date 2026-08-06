@@ -745,8 +745,8 @@ fn site_table(np2: usize, level: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     for (bin, slot) in frequency.iter_mut().enumerate().take(np2 / 2 + 1) {
         *slot = bin as f32 * 0.5;
     }
-    let mut log_frequency = vec![0.0; hb_high::state::params::NLAYMAX];
-    let mut factors = vec![0.0; hb_high::state::params::NLAYMAX];
+    let mut log_frequency = vec![0.0; 20];
+    let mut factors = vec![0.0; 20];
     for i in 0..6 {
         log_frequency[i] = (0.001f32 * 10f32.powi(i as i32)).ln();
         factors[i] = level;
@@ -900,7 +900,7 @@ proptest! {
 
 /// A plausible layered velocity model: thin slow layers near the surface, thickening and
 /// speeding up with depth, zero-thickness base as the reader expects.
-fn velocity_model(layers: usize) -> (hb_high::state::VelocityModelInput, usize) {
+fn velocity_model(layers: usize) -> hb_high::state::VelocityModelInput {
     let built: Vec<hb_high::state::InputLayer> = (0..layers)
         .map(|k| {
             let frac = k as f64 / (layers - 1) as f64;
@@ -922,9 +922,7 @@ fn velocity_model(layers: usize) -> (hb_high::state::VelocityModelInput, usize) 
             }
         })
         .collect();
-    let mut vmod = hb_high::state::VelocityModelInput::new();
-    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
-    (vmod, count)
+    build_velocity_model(&built, 999.9).expect("valid velocity model")
 }
 
 /// Production-shaped configuration.
@@ -965,13 +963,13 @@ fn config() -> HfConfig {
 /// Run one station through the whole simulation.
 fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
-    let (vmod, layer_count) = velocity_model(20);
+    let vmod = velocity_model(20);
     let station = Station {
         longitude: 173.4,
         latitude: -43.1,
         name: "TEST".to_string(),
     };
-    hb_high::sim::simulate(&config(), &slip, &vmod, layer_count, station, seed)
+    hb_high::sim::simulate(&config(), &slip, &vmod, station, seed)
         .expect("simulation should succeed")
 }
 
@@ -1038,21 +1036,14 @@ fn simulate_is_deterministic_and_seed_dependent() {
 /// beneath the deepest layer.
 #[test]
 fn a_source_below_the_model_stays_finite() {
-    let (vmod, layer_count) = velocity_model(12);
-    let model_bottom_km: f32 = (0..layer_count).map(|k| vmod[k].thickness_km).sum();
+    let vmod = velocity_model(12);
+    let model_bottom_km: f32 = vmod.iter().map(|l| l.thickness_km).sum();
 
     let mut state = hb_high::state::RayState::default();
     for depth_km in [model_bottom_km + 1.0, model_bottom_km * 2.0, 500.0] {
         let green = hb_high::ray::green_function(
             &mut state,
-            &{
-                let mut v = hb_high::state::VelocityModel::new();
-                for k in 0..layer_count {
-                    v[k] = vmod[k].into();
-                }
-                v
-            },
-            layer_count,
+            &vmod.iter().copied().map(hb_high::state::Layer::from).collect(),
             depth_km,
             60.0,
             1,

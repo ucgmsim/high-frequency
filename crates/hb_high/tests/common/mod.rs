@@ -129,27 +129,28 @@ impl Golden {
     /// layers.
     ///
     /// `layers` is the Fortran's deepest layer *number*, which doubles as a count from 1.
-    /// `Travel::ndeep` is a 0-based index since §2.3, so it is one lower — that `- 1` is
-    /// the whole reason this is shared rather than written out twice.
+    /// `Travel::deepest_layer` is a 0-based index since §2.3, so it is one lower — that
+    /// `- 1` is the whole reason this is shared rather than written out twice.
     pub fn ray_seam_state(&mut self, layers: usize) -> (RayState, VelocityModel) {
-        let mut vmod = VelocityModel::new();
-        for k in 0..layers {
-            vmod[k].thickness_km = self.f64();
+        let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); layers];
+        for layer in vmod.iter_mut() {
+            layer.thickness_km = self.f64();
         }
-        for k in 0..layers {
-            vmod[k].vp_km_s = self.f64();
+        for layer in vmod.iter_mut() {
+            layer.vp_km_s = self.f64();
         }
-        for k in 0..layers {
-            vmod[k].vsh_km_s = self.f64();
+        for layer in vmod.iter_mut() {
+            layer.vsh_km_s = self.f64();
         }
         let mut st = RayState::default();
-        for k in 0..layers {
-            st.travel.alp[k] = self.f32();
+        st.travel.reset_for(layers);
+        for slot in st.travel.p_traversals.iter_mut() {
+            *slot = self.f32();
         }
-        for k in 0..layers {
-            st.travel.als[k] = self.f32();
+        for slot in st.travel.s_traversals.iter_mut() {
+            *slot = self.f32();
         }
-        st.travel.ndeep = layers as i32 - 1;
+        st.travel.deepest_layer = layers - 1;
         (st, vmod)
     }
 }

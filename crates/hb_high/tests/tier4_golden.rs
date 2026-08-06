@@ -122,11 +122,11 @@ fn gf_amp_tt_matches_fortran() {
         let src_depth = r.f32();
         let range = r.f32();
 
-        let mut vmod = VelocityModel::new();
-        for k in 0..j0 { vmod[k].thickness_km = r.f64(); }
-        for k in 0..j0 { vmod[k].vp_km_s = r.f64(); }
-        for k in 0..j0 { vmod[k].vsh_km_s = r.f64(); }
-        for k in 0..j0 { vmod[k].attenuation_s = r.f32(); }
+        let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); j0];
+        for layer in vmod.iter_mut() { layer.thickness_km = r.f64(); }
+        for layer in vmod.iter_mut() { layer.vp_km_s = r.f64(); }
+        for layer in vmod.iter_mut() { layer.vsh_km_s = r.f64(); }
+        for layer in vmod.iter_mut() { layer.attenuation_s = r.f32(); }
 
         let want_nd = r.usize();
         let want_nh: Vec<i32> = (0..want_nd).map(|_| r.i32()).collect();
@@ -136,19 +136,19 @@ fn gf_amp_tt_matches_fortran() {
         let (w_rp0, w_stime, w_rpath, w_qbar) = (r.f32(), r.f32(), r.f32(), r.f32());
 
         let mut st = RayState::default();
-        let g = green_function(&mut st, &vmod, j0, src_depth, range, itype, WaveMode::from_fortran(md));
+        let g = green_function(&mut st, &vmod, src_depth, range, itype, WaveMode::from_fortran(md));
 
         let tag = format!("green_function case {cases} (itype={itype} md={md} \
                            depth={src_depth} range={range})");
         // The ray description itself, before the derived quantities: a wrong
         // segment list would otherwise only show up as a wrong travel time.
-        assert_eq!(st.rays.nd as usize, want_nd, "{tag} nd");
+        assert_eq!(st.rays.segment_count(), want_nd, "{tag} nd");
         for k in 0..want_nd {
             // 0-based layer index against the golden's 1-based layer number.
-            assert_eq!(st.rays.nh[k] + 1, want_nh[k], "{tag} nh[{k}]");
-            assert_eq!(st.rays.nm[k].as_fortran(), want_nm[k], "{tag} nm[{k}]");
+            assert_eq!(st.rays.layer_indices[k] as i32 + 1, want_nh[k], "{tag} nh[{k}]");
+            assert_eq!(st.rays.wave_modes[k].as_fortran(), want_nm[k], "{tag} nm[{k}]");
         }
-        assert_eq!(st.travel.ndeep + 1, want_ndeep, "{tag} ndeep");
+        assert_eq!(st.travel.deepest_layer as i32 + 1, want_ndeep, "{tag} ndeep");
         assert_eq!(st.love, want_love, "{tag} love");
 
         eq32(&format!("{tag} rp0"), g.rp0, w_rp0);

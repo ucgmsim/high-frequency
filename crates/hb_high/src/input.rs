@@ -7,7 +7,7 @@
 //! what is left is the data model plus the two derivations that belong next to the physics
 //! consuming them: Moho truncation and the air layer.
 
-use crate::state::{params, VelocityModelInput};
+use crate::state::VelocityModelInput;
 
 /// One fault segment from the `.stoch` file.
 ///
@@ -210,8 +210,6 @@ impl StochModel {
 pub enum ModelError {
     #[error("velocity model has no layers")]
     NoLayers,
-    #[error("velocity model has {count} layers, exceeding nlaymax = {max}")]
-    TooManyLayers { count: usize, max: usize },
     #[error(
         "the first layer already reaches vs_moho = {vs_moho_km_s} km/s, so there is no \
          model above the Moho to simulate"
@@ -219,54 +217,52 @@ pub enum ModelError {
     MohoAtFirstLayer { vs_moho_km_s: f64 },
 }
 
-/// Build the velocity model from layer records, returning the layer count after Moho
-/// truncation.
+/// Build the velocity model from layer records, truncated at the Moho.
 ///
 /// Depth accumulation, truncation at the first layer reaching `vs_moho_km_s`, and the
 /// zero-thickness bottom layer that makes reflected rays come out right.
+///
+/// The returned model is exactly as long as the truncation left it, so its `len()` is the
+/// layer count. There is no ceiling on how many layers a caller may supply.
 pub fn build_velocity_model(
-    vmod_in: &mut VelocityModelInput,
     layers: &[crate::state::InputLayer],
     vs_moho_km_s: f64,
-) -> Result<usize, ModelError> {
+) -> Result<VelocityModelInput, ModelError> {
     if layers.is_empty() {
         return Err(ModelError::NoLayers);
     }
-    if layers.len() > params::NLAYMAX {
-        return Err(ModelError::TooManyLayers {
-            count: layers.len(),
-            max: params::NLAYMAX,
-        });
-    }
 
-    let mut layer_count = layers.len();
+    let mut model = VelocityModelInput::with_capacity(layers.len());
     for (i, layer) in layers.iter().enumerate() {
-        vmod_in[i] = *layer;
-        vmod_in[i].depth_km = layer.thickness_km;
+        let mut built = *layer;
+        built.depth_km = layer.thickness_km;
         if i > 0 {
-            vmod_in[i].depth_km += vmod_in[i - 1].depth_km;
+            built.depth_km += model[i - 1].depth_km;
         }
 
         if layer.vsh_km_s >= vs_moho_km_s {
             if i == 0 {
                 return Err(ModelError::MohoAtFirstLayer { vs_moho_km_s });
             }
-            // A LAYER COUNT, so one more than the 0-based index that reached it.
-            layer_count = i + 1;
-            vmod_in[i].thickness_km = 0.0;
-            vmod_in[i].depth_km = vmod_in[i - 1].depth_km;
-            break;
+            // Truncate here: this layer is the half-space, and it is the last.
+            built.thickness_km = 0.0;
+            built.depth_km = model[i - 1].depth_km;
+            model.push(built);
+            return Ok(model);
         }
+        model.push(built);
     }
 
-    vmod_in[layer_count - 1].thickness_km = 0.0;
-    Ok(layer_count)
+    // Untruncated: the deepest layer is the half-space.
+    let last = model.len() - 1;
+    model[last].thickness_km = 0.0;
+    Ok(model)
 }
 
 /// Insert the thin "air" layer at the top of the model.
 ///
 /// Needed to get the correct free-surface reflection coefficient for
-/// surface-reflected rays. Returns the updated layer count.
+/// surface-reflected rays. The model grows by one layer.
 ///
 /// # There is no velocity-model perturbation
 ///
@@ -277,43 +273,34 @@ pub fn build_velocity_model(
 ///
 /// # The air layer's Q is never set, and it does not matter
 ///
-/// The shift copies seven fields down but only **five** are overwritten at
-/// index 0, so `attenuation_p` and `attenuation_s` there keep the original
-/// first layer's values instead of air-like ones. **neither field is ever read
-/// at index 0.** `attenuation_p` has no live reader at all, and `attenuation_s`
-/// is read only at `vmod[nh1]` and `vmod[nhj]` in `geometric_spreading`, where
-/// the layer indices come from `green_function`'s ray building and are never
-/// below `krec = 1`.
-pub fn insert_air_layer(vmod_in: &mut VelocityModelInput, layer_count: usize) -> usize {
+/// The air layer keeps the original first layer's `attenuation_p` and `attenuation_s` rather
+/// than getting air-like ones. **Neither field is ever read at index 0.** `attenuation_p` has
+/// no live reader at all, and `attenuation_s` is read only at `vmod[nh1]` and `vmod[nhj]` in
+/// `geometric_spreading`, where the layer indices come from `green_function`'s ray building
+/// and are never below `krec = 1`.
+pub fn insert_air_layer(vmod_in: &mut VelocityModelInput) {
     if !(vmod_in[0].depth_km > 0.001 && vmod_in[0].vp_km_s > 0.01) {
-        return layer_count;
-    }
-    let layer_count = layer_count + 1;
-
-    // Shift down from the back so nothing is overwritten before it is copied. 0-based,
-    // the Fortran's `DO i = layer_count, 2, -1` is `layer_count - 1` down to `1`.
-    //
-    // One whole layer per step, where this used to be seven field assignments. That is
-    // the difference that matters below: the shift moves ALL seven fields, and only five
-    // are then overwritten at index 0, so `attenuation_p`/`attenuation_s` there keep the
-    // original first layer's values. With parallel arrays that was an absence a reader
-    // had to notice; here it is a visibly partial update of a whole struct.
-    for i in (1..layer_count).rev() {
-        vmod_in[i] = vmod_in[i - 1];
+        return;
     }
 
+    // The air layer copies the old first layer's two attenuation values rather than getting
+    // air-like ones of its own -- see above, where that is shown to be unobservable. Starting
+    // from a copy is what says so: the five fields that are set below are exactly the five
+    // that differ.
+    let mut air = vmod_in[0];
     // depth_km and thickness_km are real*4, so these literals are already f32.
-    vmod_in[0].depth_km = 0.0001;
-    vmod_in[0].thickness_km = 0.0001;
+    air.depth_km = 0.0001;
+    air.thickness_km = 0.0001;
     // vp_km_s, vsh_km_s and density_g_cm3 are real*8, but the Fortran literals are UNSUFFIXED
-    // and therefore only carry f32 precision -- PORTING_RULES.md §1b. Writing
-    // 0.001f64 here gives 0.001 exactly; the Fortran stores
-    // 0.0010000000474974513. Caught by the reader golden.
-    vmod_in[0].vp_km_s = 0.001f32 as f64;
-    vmod_in[0].vsh_km_s = 0.0005f32 as f64;
-    vmod_in[0].density_g_cm3 = 0.001f32 as f64;
+    // and therefore only carry f32 precision -- PORTING_RULES.md §1b. Writing 0.001f64 here
+    // gives 0.001 exactly; the Fortran stores 0.0010000000474974513. Caught by the reader
+    // golden.
+    air.vp_km_s = 0.001f32 as f64;
+    air.vsh_km_s = 0.0005f32 as f64;
+    air.density_g_cm3 = 0.001f32 as f64;
 
-    layer_count
+    // A shift-everything-down-by-one loop is an insertion, and now says so.
+    vmod_in.insert(0, air);
 }
 
 /// One station.
@@ -402,13 +389,12 @@ mod tests {
             attenuation_p: 400.0,
             attenuation_s: 200.0,
         }];
-        let mut v = VelocityModelInput::new();
         assert!(matches!(
-            build_velocity_model(&mut v, &layers, 4.0),
+            build_velocity_model(&layers, 4.0),
             Err(ModelError::MohoAtFirstLayer { .. })
         ));
         assert!(matches!(
-            build_velocity_model(&mut v, &[], 999.9),
+            build_velocity_model(&[], 999.9),
             Err(ModelError::NoLayers)
         ));
     }
@@ -420,16 +406,15 @@ mod tests {
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
             (3.0, 8.0, 4.6, 3.3, 400.0, 200.0),
         ]);
-        let mut v = VelocityModelInput::new();
         // vsmoho below the third layer's 4.6 truncates there.
-        let j0 = build_velocity_model(&mut v, &model, 4.0).unwrap();
-        assert_eq!(j0, 3);
-        // `j0` is a COUNT, so the Moho layer it stops at is index `j0 - 1`. Note the
-        // first of these would also have passed against index 3, on an element the
-        // reader never wrote -- an NLAYMAX-sized buffer will happily read zero one past
-        // the model, which is why the second assertion compares two real values.
-        assert_eq!(v[j0 - 1].thickness_km, 0.0, "the Moho layer is zeroed");
-        assert_eq!(v[j0 - 1].depth_km, v[j0 - 2].depth_km);
+        let v = build_velocity_model(&model, 4.0).unwrap();
+        // The model IS the layer count now -- there is no buffer past the end that could
+        // read as a plausible zero, which is what this assertion used to have to work
+        // around.
+        assert_eq!(v.len(), 3);
+        let base = v.len() - 1;
+        assert_eq!(v[base].thickness_km, 0.0, "the Moho layer is zeroed");
+        assert_eq!(v[base].depth_km, v[base - 1].depth_km);
     }
 
     #[test]
@@ -438,9 +423,8 @@ mod tests {
             (1.0, 2.0, 1.0, 2.0, 100.0, 50.0),
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
         ]);
-        let mut v = VelocityModelInput::new();
-        let j0 = build_velocity_model(&mut v, &model, 999.9).unwrap();
-        assert_eq!(j0, 2);
+        let v = build_velocity_model(&model, 999.9).unwrap();
+        assert_eq!(v.len(), 2);
         // 0-based since §2.3: the base of a 2-layer model is index 1, and the first
         // layer's cumulative depth is index 0.
         assert_eq!(v[1].thickness_km, 0.0);
@@ -453,11 +437,15 @@ mod tests {
             (0.05, 1.8, 0.5, 1.81, 116.0, 58.0),
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
         ]);
-        let mut v = VelocityModelInput::new();
-        let j0 = build_velocity_model(&mut v, &model, 999.9).unwrap();
+        let mut v = build_velocity_model(&model, 999.9).unwrap();
+        let layers_before = v.len();
         let qp1_before = v[0].attenuation_p;
-        let j0b = insert_air_layer(&mut v, j0);
-        assert_eq!(j0b, j0 + 1, "production models do get the air layer");
+        insert_air_layer(&mut v);
+        assert_eq!(
+            v.len(),
+            layers_before + 1,
+            "production models do get the air layer"
+        );
         assert_eq!(v[0].thickness_km, 0.0001);
         // Not 0.001f64: the Fortran literal is unsuffixed in a real*8 context,
         // so it carries only f32 precision. See PORTING_RULES.md §1b.
@@ -468,8 +456,8 @@ mod tests {
             v[1].thickness_km, 0.05,
             "the original first layer shifted down"
         );
-        // The shift copies seven fields but only five are overwritten, so Q
-        // stays put.
+        // The air layer starts as a copy of the old first layer and only five of its seven
+        // fields are set, so Q stays put.
         assert_eq!(
             v[0].attenuation_p, qp1_before,
             "the air layer's Q is left as-is; nothing reads it, so this pins the shift \
@@ -483,9 +471,9 @@ mod tests {
             (0.0, 1.8, 0.5, 1.81, 116.0, 58.0),
             (2.0, 4.0, 2.5, 2.5, 200.0, 100.0),
         ]);
-        let mut v = VelocityModelInput::new();
-        let j0 = build_velocity_model(&mut v, &model, 999.9).unwrap();
-        let j0b = insert_air_layer(&mut v, j0);
-        assert_eq!(j0b, j0);
+        let mut v = build_velocity_model(&model, 999.9).unwrap();
+        let layers_before = v.len();
+        insert_air_layer(&mut v);
+        assert_eq!(v.len(), layers_before);
     }
 }

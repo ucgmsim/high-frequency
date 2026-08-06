@@ -134,7 +134,6 @@ impl PySlipModel {
 #[pyclass(frozen, name = "VelocityModel1D")]
 pub struct PyVelocityModel {
     input: VelocityModelInput,
-    layer_count: usize,
 }
 
 #[pymethods]
@@ -190,16 +189,15 @@ impl PyVelocityModel {
             })
             .collect();
 
-        let mut input = VelocityModelInput::new();
-        let layer_count = build_velocity_model(&mut input, &layers, vs_moho_km_s)
+        let input = build_velocity_model(&layers, vs_moho_km_s)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(Self { input, layer_count })
+        Ok(Self { input })
     }
 
     /// Layers remaining after Moho truncation.
     #[getter]
     fn layer_count(&self) -> usize {
-        self.layer_count
+        self.input.len()
     }
 }
 
@@ -314,7 +312,6 @@ fn _simulate_stations<'py>(
                 &config,
                 &slip_model.inner,
                 &velocity_model.input,
-                velocity_model.layer_count,
                 station,
                 seed,
             )

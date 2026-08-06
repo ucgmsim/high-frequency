@@ -1,6 +1,6 @@
 //! Ray theoretical calculations.
 use crate::fft::Complex64;
-use crate::state::{Direction, Interaction, RayState, Rays, VelocityModel, WaveMode};
+use crate::state::{Direction, Interaction, Layer, RayState, Rays, VelocityModel, WaveMode};
 
 /// `function vertical_slowness(ray_parameter,velocity_km_s)` — `hb_high_ref.f:3349`. Complex vertical slowness
 /// `eta = sqrt(1/velocity_km_s^2 - ray_parameter^2)`, with an explicit branch-cut choice.
@@ -52,127 +52,163 @@ pub fn build_ray_path(
     source_depth_km: f64,
     receiver_depth_km: f64,
 ) {
-    state.love = if state.rays.nm[0] == WaveMode::Sh {
+    state.love = if state.rays.wave_modes[0] == WaveMode::Sh {
         2
     } else {
         1
     };
-    let n = state.rays.nd as usize;
-    // The n == 0 case the doc comment describes would underflow every `n - 1` below.
-    // The Fortran read past the array start instead; both are broken, but a named panic
-    // beats an index arithmetic overflow.
-    assert!(
-        n >= 1,
-        "build_ray_path needs at least one ray segment, got nd = 0"
-    );
+    let n = state.rays.segment_count();
+    // A zero-segment ray would underflow every `n - 1` below. The Fortran read past the
+    // array start instead; both are broken, but a named panic beats index arithmetic
+    // wrapping.
+    assert!(n >= 1, "build_ray_path needs at least one ray segment");
 
-    // FIXED (§3.4). The Fortran zeroes `alp(1:100)` while the arrays are dimensioned
-    // `nlaymax = 500`, so a model deeper than 100 layers inherits multipliers from the
-    // PREVIOUS ray and silently produces wrong travel times. Production uses 34 layers,
-    // so this was harmless there and is why it survived -- but it is wrong for any deeper
-    // model, and nothing warned.
-    state.travel.alp.fill(0.0);
-    state.travel.als.fill(0.0);
+    state.travel.reset_for(vmod.len());
+    state.coefficients.reset_for(n);
 
-    // Count how many times each layer is traversed, by wave mode. Both indices are
-    // 0-based since §2.3: `i` over segments, and the layer numbers stored in `nh`.
-    for (&layer, &mode) in state.rays.nh[..n].iter().zip(&state.rays.nm[..n]) {
-        let h = layer as usize;
+    // Count how many times each layer is traversed, by wave mode.
+    for (&layer, &mode) in state
+        .rays
+        .layer_indices
+        .iter()
+        .zip(&state.rays.wave_modes)
+    {
         if mode == WaveMode::P {
-            state.travel.alp[h] += 1.0;
+            state.travel.p_traversals[layer] += 1.0;
         }
         if mode.is_shear() {
-            state.travel.als[h] += 1.0;
+            state.travel.s_traversals[layer] += 1.0;
         }
     }
 
     // Ray direction from the source: nup = +1 up, -1 down. ndeg < 0 forces
     // upgoing, which resolves the ambiguity when source and receiver share a
     // layer.
-    let lis = state.rays.nh[0] as usize;
-    let lir = state.rays.nh[n - 1] as usize;
+    let source_layer = state.rays.layer_indices[0];
+    let receiver_layer = state.rays.layer_indices[n - 1];
     // Starts at 1, not 0: the Fortran's `nl = 1` before the count.
-    let nl = 1 + state.rays.nh[..n]
+    let nl = 1 + state
+        .rays
+        .layer_indices
         .iter()
-        .filter(|&&h| h as usize == lis)
+        .filter(|&&layer| layer == source_layer)
         .count() as i32;
     // `(-1)**nl` in the Fortran -- integer exponentiation extracting a parity bit.
     let mut nup = Direction::from_parity(nl);
-    if lir > lis {
+    if receiver_layer > source_layer {
         nup = nup.flipped();
     }
-    if state.rays.ndeg < 0 {
+    if state.rays.degeneracy < 0 {
         nup = Direction::Up;
     }
     if n == 1 && receiver_depth_km >= source_depth_km {
         nup = Direction::Down;
     }
-    state.travel.nup = nup;
+    state.travel.takeoff = nup;
 
     // Interaction type at each interface and direction of each segment.
-    let n1 = n - 1;
-    state.coff.nup1[0] = nup;
-    if n != 1 {
-        for i in 0..n1 {
-            let k = state.rays.nh[i];
-            let m = state.rays.nh[i + 1];
+    state.coefficients.directions[0] = nup;
+    if n == 1 {
+        state.coefficients.interactions[0] = Interaction::Direct;
+    } else {
+        for i in 0..n - 1 {
             // Consecutive segments in the same layer means the ray turned around.
-            state.coff.it[i] = if m == k {
-                Interaction::Reflection
-            } else {
-                Interaction::Transmission
-            };
-            state.coff.nup1[i + 1] = match state.coff.it[i] {
-                Interaction::Reflection => state.coff.nup1[i].flipped(),
-                Interaction::Transmission | Interaction::Direct => state.coff.nup1[i],
+            state.coefficients.interactions[i] =
+                if state.rays.layer_indices[i + 1] == state.rays.layer_indices[i] {
+                    Interaction::Reflection
+                } else {
+                    Interaction::Transmission
+                };
+            state.coefficients.directions[i + 1] = match state.coefficients.interactions[i] {
+                Interaction::Reflection => state.coefficients.directions[i].flipped(),
+                Interaction::Transmission | Interaction::Direct => {
+                    state.coefficients.directions[i]
+                }
             };
         }
     }
-    if n == 1 {
-        state.coff.it[0] = Interaction::Direct;
+
+    // Both endpoints sit part-way through their layer, so the whole-layer traversal
+    // counted above is trimmed by the fraction the ray does not travel.
+    //
+    // **The two blocks are not the same function.** `Up` trims by `below` at the receiver
+    // and by `above` at the source -- the roles are swapped -- and that asymmetry is the
+    // Fortran's, not a transcription slip.
+    let receiver = layer_fractions(vmod, receiver_layer, receiver_depth_km);
+    trim_traversal(
+        state,
+        receiver_layer,
+        n - 1,
+        match state.coefficients.directions[n - 1] {
+            Direction::Up => receiver.above,
+            Direction::Down => receiver.below,
+        },
+    );
+
+    let source = layer_fractions(vmod, source_layer, source_depth_km);
+    trim_traversal(
+        state,
+        source_layer,
+        0,
+        match nup {
+            Direction::Up => source.below,
+            Direction::Down => source.above,
+        },
+    );
+
+    state.travel.deepest_layer = state.rays.layer_indices.iter().copied().max().unwrap_or(0);
+}
+
+/// Where an endpoint sits within its layer, as the two complementary fractions.
+struct LayerFractions {
+    /// Fraction of the layer above the point.
+    above: f64,
+    /// Fraction below it. `above + below == 1`.
+    below: f64,
+}
+
+fn layer_fractions(vmod: &VelocityModel, layer: usize, depth_km: f64) -> LayerFractions {
+    let above_km: f64 = vmod[..layer].iter().map(|l| l.thickness_km).sum();
+    let into_layer_km = depth_km - above_km;
+    let thickness_km = vmod[layer].thickness_km;
+    LayerFractions {
+        above: into_layer_km / thickness_km,
+        below: (thickness_km - into_layer_km) / thickness_km,
     }
+}
 
-    // Receiver position within its layer: total thickness of everything above it.
-    let thtot: f64 = vmod.layers()[..lir].iter().map(|l| l.thickness_km).sum();
-    let hrl = receiver_depth_km - thtot;
-    let a1 = hrl / vmod[lir].thickness_km;
-    let a2 = (vmod[lir].thickness_km - hrl) / vmod[lir].thickness_km;
-    let nupa = state.coff.nup1[n - 1];
-    // Labels 23/24: a shear mode takes the S multiplier, anything else the P one.
-    let trim = match nupa {
-        Direction::Up => a1,
-        Direction::Down => a2,
-    };
-    let multiplier = if state.rays.nm[n - 1].is_shear() {
-        &mut state.travel.als
+/// Subtract the part of `layer` that segment `segment` does not actually travel.
+///
+/// A shear mode takes the S multiplier, anything else the P one — the Fortran's labels
+/// 23/24.
+fn trim_traversal(state: &mut RayState, layer: usize, segment: usize, fraction: f64) {
+    let traversals = if state.rays.wave_modes[segment].is_shear() {
+        &mut state.travel.s_traversals
     } else {
-        &mut state.travel.alp
+        &mut state.travel.p_traversals
     };
-    multiplier[lir] = (multiplier[lir] as f64 - trim) as f32;
+    traversals[layer] = (traversals[layer] as f64 - fraction) as f32;
+}
 
-    // Source position within its layer, same as the receiver block above.
-    let thtot: f64 = vmod.layers()[..lis].iter().map(|l| l.thickness_km).sum();
-    let hsl = source_depth_km - thtot;
-    let a1 = hsl / vmod[lis].thickness_km;
-    let a2 = (vmod[lis].thickness_km - hsl) / vmod[lis].thickness_km;
-    // Note the a1/a2 roles are SWAPPED relative to the receiver block above: `Up`
-    // subtracts a2 here but a1 there. That is what the Fortran does, and it is the one
-    // asymmetry that makes these two blocks not quite the same function.
-    let trim = match nup {
-        Direction::Up => a2,
-        Direction::Down => a1,
-    };
-    let multiplier = if state.rays.nm[0].is_shear() {
-        &mut state.travel.als
-    } else {
-        &mut state.travel.alp
-    };
-    multiplier[lis] = (multiplier[lis] as f64 - trim) as f32;
+/// One layer as the Cagniard integrals see it: the medium, and how many times the ray
+/// crosses it in each mode.
+struct TraversedLayer<'a> {
+    layer: &'a Layer,
+    p: f32,
+    s: f32,
+}
 
-    // Deepest layer the ray penetrates.
-    // Folded from 0 rather than `max().unwrap()`: the Fortran seeds `ndeep = 0`, so a ray
-    // whose layers were all negative would keep the 0. Unreachable, but preserved.
-    state.travel.ndeep = state.rays.nh[..n].iter().copied().fold(0i32, i32::max);
+/// The layers the ray penetrates, `0..=deepest_layer`, zipped with their multipliers.
+fn traversed_layers<'a>(
+    state: &'a RayState,
+    vmod: &'a VelocityModel,
+) -> impl Iterator<Item = TraversedLayer<'a>> {
+    let depth = state.travel.deepest_layer;
+    vmod[..=depth]
+        .iter()
+        .zip(&state.travel.p_traversals[..=depth])
+        .zip(&state.travel.s_traversals[..=depth])
+        .map(|((layer, &p), &s)| TraversedLayer { layer, p, s })
 }
 
 /// Returns `(rp, qb)`: total ray path length in km, and the path-integrated
@@ -185,12 +221,12 @@ pub fn geometric_spreading(
     ray_parameter: f64,
     takeoff: Takeoff,
 ) -> (f64, f32) {
-    let nh1 = state.rays.nh[0] as usize;
+    let nh1 = state.rays.layer_indices[0];
 
     // Layers above the source layer, skipping the air layer at index 0. 0-based this is
     // `1..nh1`, not `1..=nh1 - 1`: same range, but the first spelling cannot underflow
     // when the source is in layer 0 and does not need the `saturating_sub` that hid it.
-    let dep: f64 = vmod.layers()[1..nh1].iter().map(|l| l.thickness_km).sum();
+    let dep: f64 = vmod[1..nh1].iter().map(|l| l.thickness_km).sum();
 
     let th1 = match takeoff {
         Takeoff::Up => source_depth_km - dep,
@@ -211,8 +247,8 @@ pub fn geometric_spreading(
     let mut rsum = ri;
     let mut qb = (ti / vmod[nh1].attenuation_s as f64) as f32;
 
-    for j in 1..state.rays.nd as usize {
-        let nhj = state.rays.nh[j] as usize;
+    for j in 1..state.rays.segment_count() {
+        let nhj = state.rays.layer_indices[j];
         let mut sini = ray_parameter * vmod[nhj].vsh_km_s;
         if sini >= 1.0 {
             sini = clamp;
@@ -249,18 +285,18 @@ pub fn cagniard_time(
     range_km: f64,
 ) -> Complex64 {
     let mut a = Complex64::ZERO;
-    for i in 0..=state.travel.ndeep as usize {
-        let mut ea = Complex64::ZERO;
-        let mut eb = Complex64::ZERO;
-        if state.travel.alp[i] > 0.0 {
-            ea = vertical_slowness(ray_parameter, vmod[i].vp_km_s);
-        }
-        if state.travel.als[i] > 0.0 {
-            eb = vertical_slowness(ray_parameter, vmod[i].vsh_km_s);
-        }
-        a = a
-            + ea * (state.travel.alp[i] as f64) * vmod[i].thickness_km
-            + eb * (state.travel.als[i] as f64) * vmod[i].thickness_km;
+    for TraversedLayer { layer, p, s } in traversed_layers(state, vmod) {
+        let ea = if p > 0.0 {
+            vertical_slowness(ray_parameter, layer.vp_km_s)
+        } else {
+            Complex64::ZERO
+        };
+        let eb = if s > 0.0 {
+            vertical_slowness(ray_parameter, layer.vsh_km_s)
+        } else {
+            Complex64::ZERO
+        };
+        a = a + ea * (p as f64) * layer.thickness_km + eb * (s as f64) * layer.thickness_km;
     }
     ray_parameter * range_km + a
 }
@@ -281,17 +317,19 @@ pub fn cagniard_time_derivative(
     range_km: f64,
 ) -> Complex64 {
     let mut a = Complex64::ZERO;
-    for i in 0..=state.travel.ndeep as usize {
-        let mut b = Complex64::ZERO;
-        let mut c = Complex64::ZERO;
-        if state.travel.alp[i] != 0.0 {
-            let ea = vertical_slowness(ray_parameter, vmod[i].vp_km_s);
-            b = Complex64::from(vmod[i].thickness_km * state.travel.alp[i] as f64) / ea;
-        }
-        if state.travel.als[i] != 0.0 {
-            let eb = vertical_slowness(ray_parameter, vmod[i].vsh_km_s);
-            c = Complex64::from(vmod[i].thickness_km * state.travel.als[i] as f64) / eb;
-        }
+    for TraversedLayer { layer, p, s } in traversed_layers(state, vmod) {
+        let b = if p != 0.0 {
+            Complex64::from(layer.thickness_km * p as f64)
+                / vertical_slowness(ray_parameter, layer.vp_km_s)
+        } else {
+            Complex64::ZERO
+        };
+        let c = if s != 0.0 {
+            Complex64::from(layer.thickness_km * s as f64)
+                / vertical_slowness(ray_parameter, layer.vsh_km_s)
+        } else {
+            Complex64::ZERO
+        };
         a = a + b + c;
     }
     Complex64::from(range_km) - ray_parameter * a
@@ -312,15 +350,18 @@ pub fn stationary_ray_parameter(
     range_km: f64,
 ) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
-    let mut v = 0.0f64;
-    for i in 0..=state.travel.ndeep as usize {
-        if state.travel.alp[i] > 0.0 {
-            v = v.max(vmod[i].vp_km_s);
+    let v = traversed_layers(state, vmod).fold(0.0f64, |fastest, TraversedLayer { layer, p, s }| {
+        let fastest = if p > 0.0 {
+            fastest.max(layer.vp_km_s)
+        } else {
+            fastest
+        };
+        if s > 0.0 {
+            fastest.max(layer.vsh_km_s)
+        } else {
+            fastest
         }
-        if state.travel.als[i] > 0.0 {
-            v = v.max(vmod[i].vsh_km_s);
-        }
-    }
+    });
 
     let mut eps = 1.0e-10f64;
     let ptest = 1.0 / v;
@@ -417,21 +458,21 @@ impl RayShape {
 /// segment-building block was 60 lines of which roughly 45 were duplicates.
 struct RayPath<'a> {
     rays: &'a mut Rays,
-    len: usize,
     mode: WaveMode,
 }
 
 impl<'a> RayPath<'a> {
     fn new(rays: &'a mut Rays, mode: WaveMode) -> Self {
-        Self { rays, len: 0, mode }
+        rays.layer_indices.clear();
+        rays.wave_modes.clear();
+        Self { rays, mode }
     }
 
-    /// 0-based: write at the current count, then advance it. The Fortran pre-increments,
-    /// so `l` ends at the same segment count either way.
+    /// Append one segment. The segment count is the list length, so there is no separate
+    /// counter to keep in step.
     fn push(&mut self, layer: usize) {
-        self.rays.nh[self.len] = layer as i32;
-        self.rays.nm[self.len] = self.mode;
-        self.len += 1;
+        self.rays.layer_indices.push(layer);
+        self.rays.wave_modes.push(self.mode);
     }
 
     /// Segments from `from` up to `receiver` inclusive, shallowing.
@@ -472,9 +513,6 @@ impl<'a> RayPath<'a> {
         self.ascend_to(kbot, receiver);
     }
 
-    fn finish(self) -> usize {
-        self.len
-    }
 }
 
 /// How far a source is nudged clear of a layer interface, km.
@@ -499,14 +537,10 @@ const INTERFACE_CLEARANCE_KM: f64 = 0.02f32 as f64;
 /// zero velocity, zero density — and produced garbage travel times for those subfaults.
 ///
 /// An `Option` makes the case nameable, and the caller resolves it to the bottom layer.
-fn source_layer(
-    vmod: &VelocityModel,
-    layer_count: usize,
-    mut depth_km: f64,
-) -> (Option<usize>, f64) {
+fn source_layer(vmod: &VelocityModel, mut depth_km: f64) -> (Option<usize>, f64) {
     let mut interface_km = 0.0f64;
-    for layer in 0..layer_count {
-        interface_km += vmod[layer].thickness_km;
+    for (layer, entry) in vmod.iter().enumerate() {
+        interface_km += entry.thickness_km;
         // Resting on the interface from above: push down past it.
         if depth_km >= interface_km && (depth_km - interface_km) < INTERFACE_CLEARANCE_KM {
             depth_km = interface_km + INTERFACE_CLEARANCE_KM;
@@ -528,16 +562,13 @@ fn source_layer(
 /// thickness as a half-space marker, and [`build_ray_path`] places a source within its layer
 /// by dividing by that thickness. Putting a source in the zero-thickness layer divides by
 /// zero and NaNs the travel time.
-fn deepest_layer_with_thickness(vmod: &VelocityModel, layer_count: usize) -> (usize, f64) {
-    let mut base_km = 0.0f64;
-    let mut deepest = 0usize;
-    for layer in 0..layer_count {
-        if vmod[layer].thickness_km > 0.0 {
-            deepest = layer;
-            base_km += vmod[layer].thickness_km;
-        }
-    }
-    (deepest, base_km)
+fn deepest_layer_with_thickness(vmod: &VelocityModel) -> (usize, f64) {
+    vmod.iter()
+        .enumerate()
+        .filter(|(_, layer)| layer.thickness_km > 0.0)
+        .fold((0, 0.0), |(_, base_km), (index, layer)| {
+            (index, base_km + layer.thickness_km)
+        })
 }
 
 /// Outputs of [`green_function`].
@@ -577,7 +608,6 @@ pub struct GreenFunction {
 pub fn green_function(
     state: &mut RayState,
     vmod: &VelocityModel,
-    layer_count: usize,
     src_depth: f32,
     range: f32,
     ray_type: i32,
@@ -585,12 +615,13 @@ pub fn green_function(
 ) -> GreenFunction {
     // The receiver sits in the second layer -- index 1 since §2.3, not 2.
     let krec = 1usize;
+    let layer_count = vmod.len();
     // Deepest layer, 0-based. The Moho loops below run to `bottom_layer - 1` because they
     // test the thickness of the layer BELOW the one they are on, and the bottom layer is
     // forced to zero thickness by `read_velocity_model`.
     let bottom_layer = layer_count - 1;
 
-    state.rays.ndeg = 1;
+    state.rays.degeneracy = 1;
     let hr = vmod[0].thickness_km;
     let rr = range as f64;
 
@@ -598,10 +629,10 @@ pub fn green_function(
     // that case as "the half-space is the bottom layer"; here it also has to be somewhere the
     // ray geometry can start from, so it goes just inside the base of the deepest layer that
     // has any thickness.
-    let (ksrc, hs) = match source_layer(vmod, layer_count, src_depth as f64) {
+    let (ksrc, hs) = match source_layer(vmod, src_depth as f64) {
         (Some(layer), depth_km) => (layer, depth_km),
         (None, _) => {
-            let (deepest, base_km) = deepest_layer_with_thickness(vmod, layer_count);
+            let (deepest, base_km) = deepest_layer_with_thickness(vmod);
             (deepest, base_km - INTERFACE_CLEARANCE_KM)
         }
     };
@@ -625,7 +656,6 @@ pub fn green_function(
             }
         }
     }
-    state.rays.nd = path.finish() as i32;
 
     build_ray_path(state, vmod, hs, hr);
     let (p0, t0) = stationary_ray_parameter(state, vmod, rr);

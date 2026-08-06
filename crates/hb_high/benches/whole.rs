@@ -57,7 +57,7 @@ fn uniform_fault(along: usize, down: usize) -> StochModel {
     StochModel::new(vec![segment])
 }
 
-fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
+fn crustal_model(layers: usize) -> VelocityModelInput {
     let built: Vec<InputLayer> = (0..layers)
         .map(|k| {
             let frac = k as f64 / (layers - 1) as f64;
@@ -78,9 +78,7 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
             }
         })
         .collect();
-    let mut vmod = VelocityModelInput::new();
-    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
-    (vmod, count)
+    build_velocity_model(&built, 999.9).expect("valid velocity model")
 }
 
 fn production_config() -> HfConfig {
@@ -114,7 +112,7 @@ fn production_config() -> HfConfig {
 }
 
 fn bench_whole(c: &mut Criterion) {
-    let (vmod, layer_count) = crustal_model(20);
+    let vmod = crustal_model(20);
     let config = production_config();
     let slow = std::env::var("HB_BENCH_SLOW").is_ok_and(|v| v == "1");
 
@@ -140,7 +138,7 @@ fn bench_whole(c: &mut Criterion) {
             |b, slip| {
                 b.iter(|| {
                     black_box(
-                        hb_high::sim::simulate(&config, slip, &vmod, layer_count, station.clone(), 12345)
+                        hb_high::sim::simulate(&config, slip, &vmod, station.clone(), 12345)
                             .expect("simulation succeeds"),
                     )
                 })

@@ -6,44 +6,8 @@
 //! Layouts are positionally identical across every declaration, so only the
 //! naming needed resolving.
 
-/// `params.h` / `params_no_window.h`.
-///
-/// `nq`, `np`, `nlaymax` and `lv` are identical in both headers. `mm` and `mmv`
-/// are **not** — the main program under `VERSION1` gets `params_no_window.h`
-/// (`262144`) while every subroutine unconditionally includes `params.h`
-/// (`32769`/`180000`). That mismatch does not affect the live subprogram set,
-/// which only uses the four constants below, but see `reference/PROVENANCE.md`.
-pub mod params {
-    /// Maximum layers in the velocity model.
-    pub const NLAYMAX: usize = 500;
-    /// `mmv` from `params_no_window.h`.
-    ///
-    /// The last compile-time ceiling in the port, and it is not a ceiling on capability:
-    /// it is the number of normal deviates `simulate` draws per station, which is part of
-    /// the RNG stream and therefore load-bearing rather than a size. See §2.6b.
-    ///
-    /// `NQ` (600 subfaults along strike), `NP` (100 down dip), `LV` (1000 segments) and
-    /// `MM` (262144 samples) were deleted in §2.3/§2.6b: every buffer they sized is now
-    /// sized from the deck, so a longer record no longer needs a recompile.
-    pub const MMV: usize = 262144;
-}
 
-use params::NLAYMAX;
-
-/// `common /vmod/` — the working velocity model, as perturbed and truncated.
-///
-/// Mixed precision within one block: the first five arrays are `real*8`, `attenuation_p`
-/// and `attenuation_s` are `real*4`. Note that five of the fourteen declarations get their
-/// `real*8`-ness solely from `implicit real*8 (a-h,o-z)`, so the types here are
-/// not negotiable.
-///
-/// **Layers are indexed 0-based**, `0..layer_count` — §2.3. The Fortran numbers them from
-/// 1 and so did this port until then. The allocation stays at `NLAYMAX` rather than
-/// shrinking to `layer_count`, and that is load-bearing rather than lazy: two lookups read
-/// one element PAST the model when a source is below every layer, which the Fortran did
-/// too, and the surrounding code depends on getting the zero there rather than a panic.
-/// See `PORTING_RULES.md` §7.
-/// One layer of the working velocity model.
+/// One layer of the working velocity model, `common /vmod/`.
 ///
 /// The mixed precision is not negotiable and not tidyable: the first five are `real*8`
 /// and the two `attenuation` fields `real*4` in the Fortran, five of the fourteen
@@ -66,60 +30,16 @@ pub struct Layer {
     pub attenuation_s: f32,
 }
 
-#[derive(Clone, Debug)]
-pub struct VelocityModel {
-    /// Indexed through [`Index`], so a caller writes `vmod[k].vsh_km_s`.
-    layers: Vec<Layer>,
-}
-
-impl Default for VelocityModel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VelocityModel {
-    pub fn new() -> Self {
-        Self {
-            layers: vec![Layer::default(); NLAYMAX],
-        }
-    }
-
-    /// The layers as a slice, for the reductions that want a range rather than one index.
-    ///
-    /// Deliberately not `Deref<Target = [Layer]>`: that would also expose `len()`, which
-    /// is `NLAYMAX` and not the layer count. Every caller here already carries the real
-    /// count, and confusing the two is exactly the `j0` hazard `PORTING_RULES.md` §7
-    /// describes.
-    #[inline]
-    pub fn layers(&self) -> &[Layer] {
-        &self.layers
-    }
-}
-
-impl std::ops::Index<usize> for VelocityModel {
-    type Output = Layer;
-    #[inline]
-    fn index(&self, layer: usize) -> &Layer {
-        &self.layers[layer]
-    }
-}
-
-impl std::ops::IndexMut<usize> for VelocityModel {
-    #[inline]
-    fn index_mut(&mut self, layer: usize) -> &mut Layer {
-        &mut self.layers[layer]
-    }
-}
-
-/// `common /vmod_in/` — the unperturbed model as read from file.
+/// The working velocity model: layers from the surface down, **0-based**.
 ///
-/// `depth_km`, `thickness_km` and `attenuation_p` are `real*4` here while the corresponding
-/// `/vmod/` fields are `real*8`. That asymmetry is not a mistake in the port:
-/// those three are undeclared in *both* scopes that declare the block, so they
-/// fall to implicit `real*4`. Adding `implicit none` to either Fortran scope
-/// would shift the whole block. See `PORTING_RULES.md` §2.
-/// One layer as read from file.
+/// A plain `Vec`, so `len()` is the layer count and means it. This was a newtype wrapping a
+/// fixed 500-element buffer, with `len()` deliberately hidden because it reported the
+/// ceiling rather than the model — every caller had to carry the real count alongside. The
+/// ceiling existed to absorb one out-of-range read, which `ray::source_layer` now names
+/// instead.
+pub type VelocityModel = Vec<Layer>;
+
+/// One layer as read from file, `common /vmod_in/`.
 ///
 /// **`depth_km` and `thickness_km` are `f32` here and `f64` in [`Layer`].** That is not
 /// an inconsistency to tidy: they are undeclared in *both* Fortran scopes that declare
@@ -137,24 +57,8 @@ pub struct InputLayer {
     pub attenuation_s: f32,
 }
 
-#[derive(Clone, Debug)]
-pub struct VelocityModelInput {
-    layers: Vec<InputLayer>,
-}
-
-impl Default for VelocityModelInput {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VelocityModelInput {
-    pub fn new() -> Self {
-        Self {
-            layers: vec![InputLayer::default(); NLAYMAX],
-        }
-    }
-}
+/// The velocity model as read, before the air layer and the working-model widening.
+pub type VelocityModelInput = Vec<InputLayer>;
 
 impl From<InputLayer> for Layer {
     /// The unperturbed path: `/vmod_in/` to `/vmod/` verbatim, widening the two `real*4`
@@ -172,21 +76,6 @@ impl From<InputLayer> for Layer {
             attenuation_p: l.attenuation_p,
             attenuation_s: l.attenuation_s,
         }
-    }
-}
-
-impl std::ops::Index<usize> for VelocityModelInput {
-    type Output = InputLayer;
-    #[inline]
-    fn index(&self, layer: usize) -> &InputLayer {
-        &self.layers[layer]
-    }
-}
-
-impl std::ops::IndexMut<usize> for VelocityModelInput {
-    #[inline]
-    fn index_mut(&mut self, layer: usize) -> &mut InputLayer {
-        &mut self.layers[layer]
     }
 }
 
@@ -234,9 +123,9 @@ impl WaveMode {
 }
 
 impl Default for WaveMode {
-    /// Arbitrary, and unobservable. `Rays::nm` is allocated at `NLAYMAX` but every read
-    /// is inside `0..nd`, which `green_function` always writes in full, so no consumer
-    /// can reach an unwritten slot. `Sh` is chosen because it is what production writes.
+    /// Arbitrary, and unobservable: [`Rays::wave_modes`] is grown one entry per segment as
+    /// the path is built, so there is no unwritten slot for a consumer to reach. `Sh` is
+    /// chosen because it is what production writes.
     fn default() -> Self {
         Self::Sh
     }
@@ -327,37 +216,29 @@ impl Direction {
 /// leading dimension, and every routine hardwires the ray index to 1. The
 /// leading dimension is dropped here; routines still take an `ir` argument so
 /// call sites match the Fortran, and assert it is 1.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Rays {
-    /// Layer index of each ray segment. **Indexed 0-based by segment**, `0..nd`.
-    pub nh: Vec<i32>,
-    /// Wave mode of each segment. 0-based by segment.
-    pub nm: Vec<WaveMode>,
+    /// Layer index of each ray segment. **Indexed 0-based by segment.**
+    ///
+    /// Grown as the path is built, so its length IS the segment count -- the Fortran's
+    /// separate `nd` counter alongside a fixed-size buffer is gone.
+    pub layer_indices: Vec<usize>,
+    /// Wave mode of each segment, parallel to [`Rays::layer_indices`].
+    pub wave_modes: Vec<WaveMode>,
     /// Ray degeneracy; negative means the ray is upgoing.
     ///
-    /// A scalar, not an array. The Fortran declares `ndeg(1)` and `nd(1)` -- indexed by
-    /// the same degenerate ray dimension the struct header describes -- and every routine
-    /// hardwires that index to 1, so an array here only invited the reader to wonder what
-    /// the other elements meant.
-    pub ndeg: i32,
-    /// Number of segments in the ray. A scalar, for the same reason as `ndeg`.
-    pub nd: i32,
-}
-
-impl Default for Rays {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// A scalar, not an array. The Fortran declares `ndeg(1)` indexed by the same
+    /// degenerate ray dimension the struct header describes, and every routine hardwires
+    /// that index to 1, so an array here only invited the reader to wonder what the other
+    /// elements meant.
+    pub degeneracy: i32,
 }
 
 impl Rays {
-    pub fn new() -> Self {
-        Self {
-            nh: vec![0; NLAYMAX],
-            nm: vec![WaveMode::default(); NLAYMAX],
-            ndeg: 0,
-            nd: 0,
-        }
+    /// Number of segments in the ray — the Fortran's `nd`.
+    #[inline]
+    pub fn segment_count(&self) -> usize {
+        self.layer_indices.len()
     }
 }
 
@@ -370,60 +251,52 @@ impl Rays {
 /// and `cagniard_time_derivative` and as `ndp` by `stationary_ray_parameter` — and it is **not** the same quantity as
 /// `Rays::nd`, which those same routines also declare. See `PORTING_RULES.md`
 /// §6.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Travel {
-    /// P path multiplier per layer. 0-based by layer.
-    pub alp: Vec<f32>,
-    /// S path multiplier per layer. 0-based by layer.
-    pub als: Vec<f32>,
-    /// Deepest layer the ray penetrates, as a **0-based layer index**. Read as `nd`/`ndp`
-    /// by consumers, which iterate `0..=ndeep`.
-    pub ndeep: i32,
+    /// P path multiplier per layer. 0-based by layer, one entry per layer in the model.
+    pub p_traversals: Vec<f32>,
+    /// S path multiplier per layer, parallel to [`Travel::p_traversals`].
+    pub s_traversals: Vec<f32>,
+    /// Deepest layer the ray penetrates, as a **0-based layer index**. Consumers iterate
+    /// `0..=deepest_layer`.
+    pub deepest_layer: usize,
     /// Direction the ray leaves the source. Written by `build_ray_path`; read by nothing
     /// live, but the tier-1 golden compares it.
-    pub nup: Direction,
-}
-
-impl Default for Travel {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub takeoff: Direction,
 }
 
 impl Travel {
-    pub fn new() -> Self {
-        Self {
-            alp: vec![0.0; NLAYMAX],
-            als: vec![0.0; NLAYMAX],
-            ndeep: 0,
-            nup: Direction::default(),
-        }
+    /// Resize both multiplier tables to one entry per layer and zero them.
+    ///
+    /// The Fortran zeroed `alp(1:100)` while the arrays were dimensioned 500, so a model
+    /// deeper than 100 layers inherited multipliers from the PREVIOUS ray and silently
+    /// produced wrong travel times. Sizing to the model makes that unrepresentable.
+    pub fn reset_for(&mut self, layer_count: usize) {
+        self.p_traversals.clear();
+        self.p_traversals.resize(layer_count, 0.0);
+        self.s_traversals.clear();
+        self.s_traversals.resize(layer_count, 0.0);
     }
 }
 
 /// `common /coff/` — interface interaction types. Written only by `build_ray_path`.
 ///
 /// Do not conflate with the dead `gencof`'s dummy argument, also named `it`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Coefficients {
     /// What happens at the interface below each segment. 0-based by segment.
-    pub it: Vec<Interaction>,
+    pub interactions: Vec<Interaction>,
     /// Direction of each segment. 0-based by segment.
-    pub nup1: Vec<Direction>,
-}
-
-impl Default for Coefficients {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub directions: Vec<Direction>,
 }
 
 impl Coefficients {
-    pub fn new() -> Self {
-        Self {
-            it: vec![Interaction::default(); NLAYMAX],
-            nup1: vec![Direction::default(); NLAYMAX],
-        }
+    /// Resize both tables to one entry per ray segment and reset them.
+    pub fn reset_for(&mut self, segment_count: usize) {
+        self.interactions.clear();
+        self.interactions.resize(segment_count, Interaction::default());
+        self.directions.clear();
+        self.directions.resize(segment_count, Direction::default());
     }
 }
 
@@ -439,7 +312,7 @@ impl Coefficients {
 pub struct RayState {
     pub rays: Rays,
     pub travel: Travel,
-    pub coff: Coefficients,
+    pub coefficients: Coefficients,
     /// `/rmode/love` — 1 for P-SV, 2 for SH. Written by `build_ray_path`, never read.
     pub love: i32,
 }

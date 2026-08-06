@@ -115,7 +115,7 @@ fn uniform_fault(along: usize, down: usize) -> StochModel {
 
 /// A smoothly graded crustal model with a thin near-surface layer, so `insert_air_layer`
 /// fires as it does on every production model.
-fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
+fn crustal_model(layers: usize) -> VelocityModelInput {
     let built: Vec<hb_high::state::InputLayer> = (0..layers)
         .map(|k| {
             let frac = k as f64 / (layers - 1) as f64;
@@ -136,9 +136,7 @@ fn crustal_model(layers: usize) -> (VelocityModelInput, usize) {
             }
         })
         .collect();
-    let mut vmod = VelocityModelInput::new();
-    let count = build_velocity_model(&mut vmod, &built, 999.9).expect("valid velocity model");
-    (vmod, count)
+    build_velocity_model(&built, 999.9).expect("valid velocity model")
 }
 
 fn production_config(duration: f32) -> HfConfig {
@@ -181,7 +179,7 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
     // Built in code, not read from a fixture. §4.3 deleted the readers, and a snapshot
     // needs FIXED inputs rather than realistic ones -- these are chosen to be reproducible
     // and to span two grid shapes, not to resemble any particular earthquake.
-    let (vmod, layer_count) = crustal_model(20);
+    let vmod = crustal_model(20);
 
     let mut lines = Vec::new();
     for (label, along, down) in [("small", 4usize, 1usize), ("medium", 14, 8)] {
@@ -198,7 +196,6 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
                 &production_config(duration),
                 &slip,
                 &vmod,
-                layer_count,
                 station,
                 seed,
             )

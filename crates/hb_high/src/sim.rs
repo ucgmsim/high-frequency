@@ -42,7 +42,7 @@ use crate::radiation::{
 use crate::ray::green_function;
 use crate::rng::{fill_uniform_deviates, normal_deviate, DrawSource, Draws};
 use crate::site::{apply_site_amplification, site_amplification_factors};
-use crate::state::{RayState, VelocityModel, VelocityModelInput, WaveMode};
+use crate::state::{Layer, RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::{radiate_and_invert, stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
 
 /// The three output components, in the order they are computed — which is also the order a
@@ -140,7 +140,6 @@ pub fn simulate(
     config: &HfConfig,
     slip: &StochModel,
     vmod_in: &VelocityModelInput,
-    j0_in: usize,
     station: crate::input::Station,
     seed: u64,
 ) -> Result<Simulation, SimError> {
@@ -174,7 +173,6 @@ pub fn simulate(
     // layer, so both are worked on as copies.
     let mut stoch = slip.clone();
     let mut vmod_in = vmod_in.clone();
-    let mut j0 = j0_in;
 
     // Every segment must agree with the FIRST on subfault size, so the first is the
     // reference and the rest are the candidates -- `split_first` says that, where
@@ -206,7 +204,7 @@ pub fn simulate(
     let path_duration = path_duration_table(config.path.path_duration);
 
     // ------------------------------------------------------- air layer -------
-    j0 = insert_air_layer(&mut vmod_in, j0);
+    insert_air_layer(&mut vmod_in);
 
     // Resolved here rather than at parse time: the deep transition depths depend on
     // the deepest hypocentre, which is only known once the slip model is read.
@@ -220,7 +218,7 @@ pub fn simulate(
         dlm,
         sm,
         subfault_count,
-    } = normalise_source(&mut stoch, j0, &vmod_in);
+    } = normalise_source(&mut stoch, &vmod_in);
 
     // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
     // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
@@ -257,7 +255,8 @@ pub fn simulate(
 
     let (mut rng, deviates) = seed_and_predraw(seed, nr);
 
-    let mut vmod = VelocityModel::new();
+    // The working model widens the two `real*4` input fields to `real*8`.
+    let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();
     // Three separate component traces rather than one interleaved 2-D block. The interleaving
     // that the output format wants happens once, at the end.
     let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
@@ -280,14 +279,9 @@ pub fn simulate(
         radv_sample_count: nr,
         site_table_len: nsfac,
         ndata,
-        layer_count: j0,
     };
 
     // ------------------------------------------------- the single station ---
-    for k in 0..j0 {
-        vmod[k] = vmod_in[k].into();
-    }
-
     for seg in &stoch.segments {
         let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const);
 
@@ -405,9 +399,6 @@ struct RunScalars {
     /// `nsfac` — length of the site-amplification frequency table.
     site_table_len: usize,
     ndata: usize,
-    /// Layer count. Also read as an INDEX where a source sits below the model — see
-    /// [`source_layer_for`], which is where that case is resolved.
-    layer_count: usize,
 }
 
 /// Per-segment angles, plus the corner-frequency coefficient hoisted out of the subfault
@@ -496,10 +487,10 @@ fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviate
 ///
 /// This is reachable — the `vs_moho=4.2` deck truncates the model at the Moho and lands
 /// subfaults beneath it, and it is the one deck of 22 whose output moves.
-fn source_layer_for(vmod: &VelocityModel, run: &RunScalars, depth_km: f32) -> usize {
-    (0..run.layer_count)
-        .find(|&k| vmod[k].depth_km >= depth_km as f64)
-        .unwrap_or(run.layer_count - 1)
+fn source_layer_for(vmod: &VelocityModel, depth_km: f32) -> usize {
+    vmod.iter()
+        .position(|layer| layer.depth_km >= depth_km as f64)
+        .unwrap_or(vmod.len() - 1)
 }
 
 /// What the time-window pass produces for one segment.
@@ -533,7 +524,7 @@ fn time_window_pass(
         let ray = geom.at(i, j);
         // A subfault below the whole model takes the DEEPEST layer -- see
         // [`source_layer_for`] for why neither of the original fallbacks was defensible.
-        let shear_velocity_km_s = vmod[source_layer_for(vmod, run, ray.depth_km)].vsh_km_s as f32;
+        let shear_velocity_km_s = vmod[source_layer_for(vmod, ray.depth_km)].vsh_km_s as f32;
 
         let rvf = rupture.factor(ray.depth_km);
 
@@ -673,7 +664,7 @@ fn subfault_pass(
         // `accumulate_subfault` reads any of them, so every element is written before it
         // is read. The fill was 192 KB of memset per subfault that nothing could observe.
 
-        let ksrc = source_layer_for(vmod, run, ray_geometry.depth_km);
+        let ksrc = source_layer_for(vmod, ray_geometry.depth_km);
         let shear_velocity_km_s = vmod[ksrc].vsh_km_s as f32;
         let density_g_cm3 = vmod[ksrc].density_g_cm3 as f32;
 
@@ -699,7 +690,6 @@ fn subfault_pass(
             let g = green_function(
                 &mut ray,
                 vmod,
-                run.layer_count,
                 ray_geometry.depth_km,
                 ray_geometry.horiz_km,
                 ray_type.trace_type(),
@@ -989,11 +979,7 @@ struct SourceScale {
 /// The two counts are different and both matter: pass 2's normalises the averages, pass 3's is
 /// the one that reaches `moment_scale` — the `N` of Graves & Pitarka (2010) eq. 12. Only the
 /// second is returned, because only it is read downstream.
-fn normalise_source(
-    stoch: &mut StochModel,
-    layer_count: usize,
-    vmod_in: &VelocityModelInput,
-) -> SourceScale {
+fn normalise_source(stoch: &mut StochModel, vmod_in: &VelocityModelInput) -> SourceScale {
     let nevnt = stoch.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
@@ -1037,12 +1023,12 @@ fn normalise_source(
         // Rigidity is per depth row, not per subfault, which is why the row is the unit.
         for (row_index, row) in segment.depth_rows_mut().enumerate() {
             let zdep = top_depth_km + (row_index as f32 + 0.5) * dwdj;
-            // Layer lookup. FALLS THROUGH to `layer_count` -- one past the model -- when the
-            // depth is below every layer, and that index is then used. The fall-through is
-            // load-bearing, not an error path.
-            let k = (0..layer_count)
-                .find(|&kk| zdep <= vmod_in[kk].depth_km)
-                .unwrap_or(layer_count);
+            // A subfault below every layer is in the half-space, which is the bottom
+            // layer -- the same reading as `source_layer_for` and `ray::source_layer`.
+            let k = vmod_in
+                .iter()
+                .position(|layer| zdep <= layer.depth_km)
+                .unwrap_or(vmod_in.len() - 1);
             let xmu = (vmod_in[k].vsh_km_s
                 * vmod_in[k].vsh_km_s
                 * vmod_in[k].density_g_cm3
