@@ -1,4 +1,22 @@
-//! Ray theoretical calculations.
+//! Ray theory: travel times, geometric spreading and path attenuation through a 1-D
+//! layered medium.
+//!
+//! # Where to read the theory
+//!
+//! The slowness formulation — ray parameter `p`, vertical slowness
+//! `eta = sqrt(1/v^2 - p^2)`, and the branch-cut choice [`vertical_slowness`] makes — is
+//! standard, and Shearer, *Introduction to Seismology*, ch. 4 ("Ray Theory: Travel Times")
+//! is enough to follow everything here.
+//!
+//! [`cagniard_time`] and [`cagniard_time_derivative`] evaluate the Cagniard–De Hoop
+//! integrand: the transform-domain response is written so that the inverse transform can be
+//! read off as a time-domain one along a path where the phase is real. De Hoop (1960), "A
+//! modification of Cagniard's method for solving seismic pulse problems", *Applied Scientific
+//! Research* B8, 349–356, is the paper the method is named for.
+//!
+//! **Neither source is in `papers/`, so unlike the physics modules these citations are
+//! signposts rather than verified equation references** — nothing below is annotated with an
+//! equation number, because §3 says to cite a paper only after reading it.
 use crate::fft::Complex64;
 use crate::state::{Direction, Interaction, Layer, RayState, Rays, VelocityModel, WaveMode};
 
@@ -10,8 +28,8 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     let pr = ray_parameter.re;
     // `pi` here is Im(ray_parameter), matching the Fortran's variable name.
     let pi = ray_parameter.im;
-    let mut a = rsq - pr * pr + pi * pi;
-    let mut b = -2.0f64 * pi * pr;
+    let a = rsq - pr * pr + pi * pi;
+    let b = -2.0f64 * pi * pr;
     let d = (a * a + b * b).sqrt().sqrt();
 
     // Near the real axis the phase is forced to 0 or pi rather than taken from
@@ -26,21 +44,21 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
         b.atan2(a)
     };
 
-    let mut e = (phi / 2.0f64).cos();
-    let mut f = (phi / 2.0f64).sin();
+    let cos_half = (phi / 2.0f64).cos();
+    let sin_half = (phi / 2.0f64).sin();
 
-    // Labels 13/12: negate unless (f <= t1 and e > 0).
-    //   IF(F.GT.T1) GO TO 13      -> f > t1 negates
-    //   IF(E.GT.0.0D0) GO TO 12   -> otherwise e > 0 skips the negation
+    // The branch choice, as one expression rather than four reassignments. Negate unless
+    // (sin <= t1 and cos > 0):
+    //   IF(F.GT.T1) GO TO 13      -> sin > t1 negates
+    //   IF(E.GT.0.0D0) GO TO 12   -> otherwise cos > 0 skips the negation
     //   13: e = -e; f = -f
-    if f > t1 || e <= 0.0 {
-        e = -e;
-        f = -f;
-    }
+    let (e, f) = if sin_half > t1 || cos_half <= 0.0 {
+        (-cos_half, -sin_half)
+    } else {
+        (cos_half, sin_half)
+    };
 
-    a = d * e;
-    b = d * f;
-    Complex64::new(a, b)
+    Complex64::new(d * e, d * f)
 }
 
 /// Builds the per-layer path multipliers for one ray `hb_high_ref.f:3507`.
@@ -189,6 +207,19 @@ fn trim_traversal(state: &mut RayState, layer: usize, segment: usize, fraction: 
     };
     traversals[layer] = (traversals[layer] as f64 - fraction) as f32;
 }
+
+/// How far inside the branch cut [`stationary_ray_parameter`] starts its search.
+///
+/// The ray parameter must sit strictly below `1/v_max`, because [`vertical_slowness`] is
+/// singular on the cut.
+///
+/// The original *searched* for this, multiplying a `1e-10` seed by ten until
+/// `(1/v - eps) * v` fell below 1. **That search always terminates on its first test.** The
+/// product only fails to drop below 1 when `eps * v` is under half an ulp of 1.0, which for
+/// this seed needs `v < 1e-7` km/s -- a fastest-traversed-layer velocity of a tenth of a
+/// millimetre per second. So the seed is the answer, and the loop was a guard written as a
+/// search.
+const BRANCH_CUT_CLEARANCE: f64 = 1.0e-10;
 
 /// One layer as the Cagniard integrals see it: the medium, and how many times the ray
 /// crosses it in each mode.
@@ -363,19 +394,8 @@ pub fn stationary_ray_parameter(
         }
     });
 
-    let mut eps = 1.0e-10f64;
     let ptest = 1.0 / v;
-
-    loop {
-        let rp = (ptest - eps) * v;
-        if rp >= 1.0 {
-            eps *= 10.0;
-        } else {
-            break;
-        }
-    }
-
-    let mut p = Complex64::from(ptest - 10.0 * eps);
+    let mut p = Complex64::from(ptest - 10.0 * BRANCH_CUT_CLEARANCE);
 
     let mut a = cagniard_time_derivative(state, vmod, p, range_km).re;
 
