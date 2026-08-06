@@ -13,6 +13,7 @@ use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};
 use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, stochastic_spectrum};
+use ndarray::Array1;
 
 mod common;
 use common::*;
@@ -58,7 +59,8 @@ fn stoc_f_matches_fortran() {
         // `dlm` was argument 11 and unused; §5.3 deleted it from the signature. The golden
         // still records it, so it is still read off the record and simply not passed.
         let _ = dlm;
-        let cw = stochastic_spectrum(
+        let mut cw: Array1<Complex32> = Array1::zeros(np2);
+        stochastic_spectrum(
             &mut rng,
             &plan,
             &SourceModel {
@@ -78,6 +80,7 @@ fn stoc_f_matches_fortran() {
                 fmax_hz: fmx,
                 qbar: qb,
             },
+            cw.view_mut(),
         );
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");

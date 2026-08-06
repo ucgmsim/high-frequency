@@ -152,9 +152,11 @@ pub struct RayPath {
 ///           source          high-cut    path Q        spreading
 /// ```
 ///
-/// with the finite-fault correction of Graves & Pitarka (2010) eq. 12 folded in. Returns `np2`
-/// values; the spectrum is returned rather than written through an out-parameter so the value
-/// can move straight into [`radiate_and_invert`], which consumes it.
+/// with the finite-fault correction of Graves & Pitarka (2010) eq. 12 folded in.
+///
+/// Writes `np2` bins into `spectrum`, which must be contiguous — the transform is in place.
+/// The caller owns the storage so that the three components can be one `(3, np2)` block
+/// rather than three separate allocations per subfault per ray.
 ///
 /// See `PHYSICS.md` §2–§3 and §6 for the physics, and `papers/README.md` for the verification.
 ///
@@ -188,7 +190,8 @@ pub fn stochastic_spectrum(
     plan: &SpectrumPlan,
     model: &SourceModel,
     path: &RayPath,
-) -> Array1<Complex32> {
+    mut spectrum: ArrayViewMut1<Complex32>,
+) {
     // Destructured so that the arithmetic below reads as arithmetic, under the names the
     // derivation uses.
     let &SourceModel {
@@ -343,21 +346,30 @@ pub fn stochastic_spectrum(
     fill_normal_deviates(rng, np2, &mut a);
     remove_quadratic_trend(dt, &mut a);
 
-    // Windowed noise: the envelope times the deviates, as the imaginary part of a real signal.
-    // Collected rather than zero-filled and overwritten -- this is `np2` complex values
-    // allocated three times per subfault.
-    let mut ac: Vec<Complex32> = a
-        .iter()
-        .zip(&w)
-        .map(|(&deviate, &envelope)| Complex32::new(deviate * envelope, 0.0))
-        .collect();
+    // Windowed noise: the envelope times the deviates, as the real part of the signal,
+    // written straight into the caller's storage.
+    azip!((
+        bin in &mut spectrum,
+        &deviate in ArrayView1::from(&a[..]),
+        &envelope in ArrayView1::from(&w[..]),
+    ) {
+        *bin = Complex32::new(deviate * envelope, 0.0);
+    });
 
-    forward(&mut ac);
+    forward(
+        spectrum
+            .as_slice_mut()
+            .expect("the caller's spectrum row must be contiguous"),
+    );
 
     // Measure the realised average power of the noise spectrum, so it can be normalised out.
     // `norm_sqr()` is `re² + im²` -- the same quantity as `|z|²` without the `hypot` and the
     // squaring that undoes it, which was 4.5% of total runtime.
-    let fsa: f32 = ac[..fold_count].iter().map(Complex32::norm_sqr).sum();
+    let fsa: f32 = spectrum
+        .slice(s![..fold_count])
+        .iter()
+        .map(Complex32::norm_sqr)
+        .sum();
     let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
 
     // Apply the shape, then mirror to Hermitian symmetry. The mirror is not a second
@@ -365,8 +377,6 @@ pub fn stochastic_spectrum(
     // lets the two separate: conjugation commutes with real scaling, and negating an imaginary
     // part is exact, so conjugating before or after narrowing gives the same bits.
     //
-    // In place on `ac`, which is the array being returned.
-    let mut spectrum = Array1::from(ac);
     let np = np2 / 2;
 
     // Positive frequencies, Nyquist included. The `Complex64` intermediate is the precision
@@ -388,8 +398,6 @@ pub fn stochastic_spectrum(
     // are disjoint and this can be a pair of views at all.
     let (positive, mut negative) = spectrum.view_mut().split_at(Axis(0), np + 1);
     azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
-
-    spectrum
 }
 
 /// Apply the radiation pattern, invert to a time series, scale and taper.
@@ -397,8 +405,8 @@ pub fn stochastic_spectrum(
 ///
 /// Completes Graves & Pitarka (2010) eq. 10 for one component: the spectrum from
 /// [`stochastic_spectrum`] carries `C·S·G·P`, and the conically averaged pattern `RP_ij` from
-/// [`crate::radiation`] goes on here. Takes the spectrum **by value** because the inverse
-/// transform consumes it.
+/// [`crate::radiation`] goes on here. The inverse transform runs in place on `spectrum`,
+/// which is therefore left as scratch, and the real samples land in `time_series`.
 ///
 /// Lengths carry what the original passed as three separate counts: the radiation pattern
 /// covers the positive frequencies, so `radiation.len()` *is* `fold_count`, and the mirrored
@@ -420,9 +428,10 @@ pub fn stochastic_spectrum(
 /// worst of those truncations, and it left the taper fractionally short of a half cosine so the
 /// final sample was not exactly zero. It is `std::f32::consts::PI` now and the taper closes.
 pub fn radiate_and_invert(
-    mut spectrum: Array1<Complex32>,
+    mut spectrum: ArrayViewMut1<Complex32>,
     radiation: ArrayView1<f32>,
-) -> Array1<f32> {
+    mut time_series: ArrayViewMut1<f32>,
+) {
     let np2 = spectrum.len();
     let fold_count = radiation.len();
     // Always `fold_count - 2`. Sliced explicitly rather than as `fold_count..` because the two
@@ -444,11 +453,13 @@ pub fn radiate_and_invert(
     inverse(
         spectrum
             .as_slice_mut()
-            .expect("an owned Array1 is contiguous"),
+            .expect("the caller's spectrum row must be contiguous"),
     );
 
+    // Assigns rather than accumulates, so `time_series` needs no pre-zeroing: every element
+    // is written before anything reads it.
     let scale = 1.0 / (AVERAGE_RADIATION_PATTERN * HORIZONTAL_PARTITION * np2 as f32);
-    let mut samples = spectrum.mapv(|bin| scale * bin.re);
+    azip!((sample in &mut time_series, &bin in &spectrum) *sample = scale * bin.re);
 
     // Raised-cosine taper over the final tenth, so the transient closes smoothly instead of
     // being truncated. The `i + 1` is what makes the last sample land on `cos(π)` and the
@@ -456,10 +467,8 @@ pub fn radiate_and_invert(
     let taper_len = np2 / 10;
     let step = std::f32::consts::PI / taper_len as f32;
     let taper = Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
-    let mut tail = samples.slice_mut(s![np2 - taper_len..]);
+    let mut tail = time_series.slice_mut(s![np2 - taper_len..]);
     tail *= &taper;
-
-    samples
 }
 
 #[cfg(test)]

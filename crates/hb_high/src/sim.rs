@@ -31,7 +31,7 @@ use crate::config::{
     HfConfig, PathDurationModel, RUPTURE_VELOCITY_FRACTION_MAX, RayKind, RayType,
     RuptureVelocityTaper,
 };
-use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut1, s};
+use ndarray::{Array1, Array2, ArrayView2, ArrayViewMut2, s};
 use std::f32::consts::PI;
 
 use crate::fft::Complex32;
@@ -400,8 +400,8 @@ impl Simulator {
     /// Simulate one station.
     pub fn run(&self, station: crate::input::Station, seed: u64) -> Simulation {
         let (mut rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);
-        // Three separate component traces rather than one interleaved 2-D block.
-        let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; self.run.ndata]);
+        // One row per component, which is the shape this is returned in.
+        let mut acc: Array2<f32> = Array2::zeros((Component::ALL.len(), self.run.ndata));
 
         // ------------------------------------------------- the single station ---
         for ((seg, angles), weights) in self
@@ -456,7 +456,7 @@ impl Simulator {
 
             subfault_pass(
                 &mut rng,
-                &mut acc,
+                acc.view_mut(),
                 SegmentPass {
                     seg,
                     geom: &geom,
@@ -476,17 +476,10 @@ impl Simulator {
             );
         }
 
-        // One row per component, in `Component::ALL` order -- which is the order `acc` was
-        // filled in, so this is a copy rather than a shuffle.
-        let mut out = Array2::zeros((Component::ALL.len(), self.run.ndata));
-        for (mut row, trace) in out.rows_mut().into_iter().zip(&acc) {
-            row.assign(&ArrayView1::from(&trace[..]));
-        }
-
         Simulation {
             ndata: self.run.ndata,
             dt: self.run.dt,
-            acc: out,
+            acc,
         }
     }
 }
@@ -736,7 +729,7 @@ struct RunContext<'a> {
 /// See `PORTING_RULES.md` §5.
 fn subfault_pass(
     rng: &mut impl Draws,
-    acc: &mut [Vec<f32>; 3],
+    mut acc: ArrayViewMut2<'_, f32>,
     segment: SegmentPass<'_>,
     ctx: RunContext<'_>,
 ) {
@@ -769,14 +762,11 @@ fn subfault_pass(
         kappa_s: run.kappa_s,
         moment_scale: run.moment_scale,
     };
-    // Holds three owned spectra between the two component loops. A `Vec` rather than a
-    // `[_; 3]` because the values MOVE out at the end -- `drain` hands each one to
-    // `radiate_and_invert`, which consumes it -- and because it must be filled by an
-    // explicit sequential loop: the fill order is the RNG stream, and neither
-    // `array::from_fn` nor `array::map` documents its evaluation order. The Vec's own
-    // three-pointer allocation is made once here and reused; `drain` leaves the capacity.
-    let mut spectrum: Vec<Array1<Complex32>> = Vec::with_capacity(3);
-    let mut subfault_acc: [Array1<f32>; 3] = std::array::from_fn(|_| Array1::zeros(np2));
+    // One row per component, allocated once for the whole pass. Both are pure scratch: every
+    // element is written before it is read, on every subfault and every ray.
+    let components = Component::ALL.len();
+    let mut spectrum: Array2<Complex32> = Array2::zeros((components, np2));
+    let mut subfault_acc: Array2<f32> = Array2::zeros((components, np2));
     let mut radiation: Array1<f32> = Array1::zeros(plan.fold_count);
     let mut siteamp_factors: Array1<f32> = Array1::zeros(run.site_table_len);
     let mut ray = RayState::default();
@@ -789,11 +779,6 @@ fn subfault_pass(
         }
         let ray_geometry = geom.at(i, j);
         let subfault_window_s = windows.window_s[seg.grid_index(i, j)];
-
-        // No pre-zeroing. `apply_radiation_and_invert` ASSIGNS over `time_series[..np2]`
-        // -- `*sample = fac * bin.re`, not `+=` -- for all three components before
-        // `accumulate_subfault` reads any of them, so every element is written before it
-        // is read. The fill was 192 KB of memset per subfault that nothing could observe.
 
         let source_layer = source_layer_for(vmod, ray_geometry.depth_km);
         let shear_velocity_km_s = vmod[source_layer].vsh_km_s as f32;
@@ -849,10 +834,10 @@ fn subfault_pass(
             };
 
             // Three calls in component order: each draws `np2` normal deviates. The only
-            // field that differs between them is `fmax_hz`, which the vertical caps.
-            spectrum.clear();
+            // field that differs between them is `fmax_hz`, which the vertical caps. Each
+            // writes a full row, so there is nothing to reset between rays.
             for component in Component::ALL {
-                spectrum.push(stochastic_spectrum(
+                stochastic_spectrum(
                     rng,
                     plan,
                     &model,
@@ -865,7 +850,8 @@ fn subfault_pass(
                         fmax_hz: component.capped_fmax(run.fmax_hz),
                         qbar,
                     },
-                ));
+                    spectrum.row_mut(component.index()),
+                );
             }
 
             // Unconditional. There is no run for which the quarter-wavelength site
@@ -876,9 +862,9 @@ fn subfault_pass(
                 siteamp_log_freq.view(),
                 siteamp_factors.view_mut(),
             );
-            for spec in &mut spectrum {
+            for mut spec in spectrum.rows_mut() {
                 apply_site_amplification(
-                    spec.as_slice_mut().expect("an owned Array1 is contiguous"),
+                    spec.as_slice_mut().expect("a row of a C-order Array2"),
                     plan.log_frequency_hz.view(),
                     siteamp_log_freq.view(),
                     siteamp_factors.view(),
@@ -904,9 +890,6 @@ fn subfault_pass(
             // The ONLY difference between the three components is which radiation
             // routine runs, and the `Option` carries it: `Some` is a horizontal, which
             // draws 5,000 deviates; `None` is the vertical, which draws none.
-            // `drain` moves each spectrum out. The zip is sound because the fill loop
-            // above pushes in `Component::ALL` order and this walks the same order; the
-            // Vec is left empty and reusable for the next ray type.
             let arrival = RadiationAngles {
                 strike_rad: angles.strike_rad,
                 dip_rad: angles.dip_rad,
@@ -914,7 +897,7 @@ fn subfault_pass(
                 azimuth_rad: pa,
                 takeoff_rad: th,
             };
-            for (component, spec) in Component::ALL.into_iter().zip(spectrum.drain(..)) {
+            for component in Component::ALL {
                 match component.radiation_mode() {
                     RadiationMode::Horizontal { azimuth_offset_deg } => {
                         horizontal_radiation_spectrum(
@@ -935,10 +918,14 @@ fn subfault_pass(
                         radiation.view_mut(),
                     ),
                 };
-                // The spectrum moves: out of the Vec, into `radiate_and_invert`, which
-                // consumes it because the inverse transform is in place, and the samples
-                // move on into the accumulator. No copy anywhere on this path.
-                subfault_acc[component.index()] = radiate_and_invert(spec, radiation.view());
+                // In place on both rows: the inverse transform overwrites the spectrum,
+                // and the real samples land straight in the accumulator's row. No
+                // allocation and no copy anywhere on this path.
+                radiate_and_invert(
+                    spectrum.row_mut(component.index()),
+                    radiation.view(),
+                    subfault_acc.row_mut(component.index()),
+                );
             }
 
             // Rupture time at this subfault, taken from the slip model.
@@ -960,7 +947,7 @@ fn subfault_pass(
             let _stream_advance = rng.next_f32();
 
             if let Some(at) = Placement::clip(kst, np2, run.ndata) {
-                accumulate_subfault(acc, &subfault_acc, weight, &at);
+                accumulate_subfault(acc.view_mut(), subfault_acc.view(), weight, &at);
             }
         }
     }
@@ -1014,8 +1001,8 @@ impl Placement {
 /// Every index here is already known to be inside both buffers: [`Placement::clip`] did that,
 /// and it is the caller's job to have called it. What is left is the axpy.
 fn accumulate_subfault(
-    acc: &mut [Vec<f32>; 3],
-    subfault_acc: &[Array1<f32>; 3],
+    mut acc: ArrayViewMut2<'_, f32>,
+    subfault_acc: ArrayView2<'_, f32>,
     weight: MomentWeight,
     at: &Placement,
 ) {
@@ -1025,11 +1012,9 @@ fn accumulate_subfault(
         count,
     } = at;
     // `scaled_add` IS this operation: `y += alpha * x`, the axpy every linear-algebra library
-    // names.
-    for (out, contribution) in acc.iter_mut().zip(subfault_acc) {
-        ArrayViewMut1::from(&mut out[offset..offset + count])
-            .scaled_add(weight.0, &contribution.slice(s![skip..skip + count]));
-    }
+    // names. One call per component, over the clipped window of each.
+    let mut destination = acc.slice_mut(s![.., offset..offset + count]);
+    destination.scaled_add(weight.0, &subfault_acc.slice(s![.., skip..skip + count]));
 }
 
 /// One segment of the piecewise-linear duration-versus-distance table.
@@ -1351,8 +1336,8 @@ mod tests {
 
     /// The straightforward sample-at-a-time loop, as an independent check on the slice form.
     fn accumulate_reference(
-        acc: &mut [Vec<f32>; 3],
-        subfault_acc: &[Array1<f32>; 3],
+        acc: &mut Array2<f32>,
+        subfault_acc: &Array2<f32>,
         weight: f32,
         start_sample: i32,
         np2: usize,
@@ -1364,8 +1349,8 @@ mod tests {
             if li >= 1 {
                 let idx = (li - start_sample) as usize;
                 let sample = li as usize - 1;
-                for component in 0..3 {
-                    acc[component][sample] += weight * subfault_acc[component][idx];
+                for component in 0..acc.nrows() {
+                    acc[[component, sample]] += weight * subfault_acc[[component, idx]];
                 }
             }
             li += 1;
@@ -1383,15 +1368,14 @@ mod tests {
     fn accumulate_matches_the_reference_loop_at_every_alignment() {
         let np2 = 8usize;
         let ndata = 10usize;
-        let subfault_acc: [Array1<f32>; 3] =
-            std::array::from_fn(|c| (0..np2).map(|i| (c * 100 + i + 1) as f32).collect());
+        let subfault_acc = Array2::from_shape_fn((3, np2), |(c, i)| (c * 100 + i + 1) as f32);
 
         // Well before the record, straddling both edges, and well past the end.
         for start in -12i32..=14 {
-            let mut got: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
-            let mut want: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
+            let mut got: Array2<f32> = Array2::zeros((3, ndata));
+            let mut want: Array2<f32> = Array2::zeros((3, ndata));
             if let Some(at) = Placement::clip(start, np2, ndata) {
-                accumulate_subfault(&mut got, &subfault_acc, MomentWeight(2.0), &at);
+                accumulate_subfault(got.view_mut(), subfault_acc.view(), MomentWeight(2.0), &at);
             }
             accumulate_reference(&mut want, &subfault_acc, 2.0, start, np2, ndata);
             assert_eq!(got, want, "start_sample = {start}");

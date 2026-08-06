@@ -376,10 +376,8 @@ fn bench_spectrum(c: &mut Criterion) {
 
         // stochastic_spectrum: one FFT plus np2 normal draws plus the per-bin spectral shape.
         //
-        // Returns the spectrum since §5.2, so this timing INCLUDES the result allocation
-        // where the out-parameter form reused a caller buffer and excluded it -- the same
-        // note as `radiate_and_invert` below. §5.5 folds the internal mirror buffer into
-        // the returned array, which is where that allocation comes back out.
+        // Writes into a caller-owned row, so no allocation is inside this timing -- the
+        // buffer is made once outside `iter`, as the real caller makes it once per pass.
         group.bench_with_input(
             BenchmarkId::new("stochastic_spectrum", np2),
             &np2,
@@ -410,22 +408,29 @@ fn bench_spectrum(c: &mut Criterion) {
                     fmax_hz: 10.0,
                     qbar: 0.02,
                 };
-                b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path))
+                let mut spectrum: ndarray::Array1<Complex32> = ndarray::Array1::zeros(np2);
+                b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path, spectrum.view_mut()))
             },
         );
 
         // radiate_and_invert: the radiation multiply, one inverse FFT, the scale and the
-        // raised-cosine taper. Takes the spectrum by value, so the batched setup hands it a
-        // fresh Array1 each iteration rather than resetting a buffer -- which also means this
-        // timing now INCLUDES the result allocation, where the out-parameter form excluded it.
+        // raised-cosine taper. The inverse transform is in place, so the batched setup hands
+        // it a fresh spectrum each iteration; the output row is allocated once outside.
         group.bench_with_input(
             BenchmarkId::new("radiate_and_invert", np2),
             &np2,
             |b, &_np2| {
                 let radiation = ndarray::Array1::from(rdna.clone());
-                b.iter_batched(
+                let mut time_series: ndarray::Array1<f32> = ndarray::Array1::zeros(src.len());
+                b.iter_batched_ref(
                     || ndarray::Array1::from(src.clone()),
-                    |spectrum| radiate_and_invert(spectrum, radiation.view()),
+                    |spectrum| {
+                        radiate_and_invert(
+                            spectrum.view_mut(),
+                            radiation.view(),
+                            time_series.view_mut(),
+                        )
+                    },
                     criterion::BatchSize::SmallInput,
                 )
             },
