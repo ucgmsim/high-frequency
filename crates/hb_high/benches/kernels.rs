@@ -18,20 +18,25 @@
 //!   ray topology `green_function` actually produces) rather than to whatever is
 //!   convenient, so the numbers here transfer to the real workload.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fft::{Complex32, Complex64};
-use hb_high::geom::{subfault_geometry, FaultPlane, GeoPoint};
-use hb_high::stoc::{radiate_and_invert, RayPath, SourceModel, SpectrumPlan};
-use hb_high::radiation::{horizontal_radiation_spectrum, vertical_radiation_spectrum, radiation_pattern, RadiationAngles};
-use hb_high::ray::{cagniard_time, vertical_slowness, cagniard_time_derivative, geometric_spreading, green_function, stationary_ray_parameter, build_ray_path, Takeoff};
-use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
-use hb_high::site::{site_amplification_factors, apply_site_amplification};
+use hb_high::fft::{forward, inverse, remove_quadratic_trend};
+use hb_high::geom::{FaultPlane, GeoPoint, subfault_geometry};
+use hb_high::radiation::{
+    RadiationAngles, horizontal_radiation_spectrum, radiation_pattern, vertical_radiation_spectrum,
+};
+use hb_high::ray::{
+    Takeoff, build_ray_path, cagniard_time, cagniard_time_derivative, geometric_spreading,
+    green_function, stationary_ray_parameter, vertical_slowness,
+};
+use hb_high::rng::{Pcg32, fill_normal_deviates, fill_uniform_deviates};
+use hb_high::site::{apply_site_amplification, site_amplification_factors};
+use hb_high::state::WaveMode;
 use hb_high::state::{Layer, RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
-use hb_high::state::WaveMode;
+use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, radiate_and_invert};
 use ndarray::{ArrayView1, ArrayViewMut1};
 
 /// Transform lengths the program actually produces. `np2` is built by doubling
@@ -112,8 +117,8 @@ fn spectrum(np2: usize) -> Vec<Complex32> {
 /// The 20-entry log-frequency site-amplification table from `:196-218`.
 fn site_table() -> (Vec<f32>, Vec<f32>) {
     const HZ: [f32; 20] = [
-        0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00,
-        3.00, 5.00, 7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
+        0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
+        10.00, 20.00, 30.00, 50.00, 70.00,
     ];
     let mut fn_ = vec![0.0; HZ.len()];
     let mut an = vec![0.0; HZ.len()];
@@ -142,17 +147,13 @@ fn bench_fft(c: &mut Criterion) {
             ("analysis", forward as fn(&mut [Complex32])),
             ("synthesis", inverse as fn(&mut [Complex32])),
         ] {
-            group.bench_with_input(
-                BenchmarkId::new(name, np2),
-                &np2,
-                |b, _| {
-                    b.iter_batched_ref(
-                        || src.clone(),
-                        |ace| run(ace.as_mut_slice()),
-                        criterion::BatchSize::SmallInput,
-                    )
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(name, np2), &np2, |b, _| {
+                b.iter_batched_ref(
+                    || src.clone(),
+                    |ace| run(ace.as_mut_slice()),
+                    criterion::BatchSize::SmallInput,
+                )
+            });
         }
     }
     group.finish();
@@ -235,29 +236,43 @@ fn bench_radiation(c: &mut Criterion) {
     // Per call, not per draw: the useful comparison is against one FFT of the
     // same np2, since both happen the same number of times per subfault.
     group.throughput(Throughput::Elements(1));
-    group.bench_function(BenchmarkId::new("horizontal_radiation_spectrum", format!("nr{NR}")), |b| {
-        let mut g = Pcg32::seed(7);
-        b.iter(|| {
-            horizontal_radiation_spectrum(
-                &mut g, &ARRIVAL, ArrayView1::from(&dfr[..nfold]),
-                black_box(-90.0f32.to_radians()), NR, ArrayViewMut1::from(&mut rdna[..nfold]),
-            )
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("horizontal_radiation_spectrum", format!("nr{NR}")),
+        |b| {
+            let mut g = Pcg32::seed(7);
+            b.iter(|| {
+                horizontal_radiation_spectrum(
+                    &mut g,
+                    &ARRIVAL,
+                    ArrayView1::from(&dfr[..nfold]),
+                    black_box(-90.0f32.to_radians()),
+                    NR,
+                    ArrayViewMut1::from(&mut rdna[..nfold]),
+                )
+            })
+        },
+    );
 
     let mut g = Pcg32::seed(3);
     let mut rna = vec![0.0; NR];
     let mut rnb = vec![0.0; NR];
     fill_uniform_deviates(&mut g, NR, rna.as_mut_slice());
     fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
-    group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
-        b.iter(|| {
-            vertical_radiation_spectrum(
-                &ARRIVAL, ArrayView1::from(&dfr[..nfold]), rna.as_slice(), rnb.as_slice(), NR,
-                ArrayViewMut1::from(&mut rdna[..nfold]),
-            )
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")),
+        |b| {
+            b.iter(|| {
+                vertical_radiation_spectrum(
+                    &ARRIVAL,
+                    ArrayView1::from(&dfr[..nfold]),
+                    rna.as_slice(),
+                    rnb.as_slice(),
+                    NR,
+                    ArrayViewMut1::from(&mut rdna[..nfold]),
+                )
+            })
+        },
+    );
 
     group.finish();
 }
@@ -284,13 +299,28 @@ fn bench_ray(c: &mut Criterion) {
         b.iter(|| black_box(cagniard_time(&st, &v, black_box(p), black_box(60.0))))
     });
     group.bench_function("cagniard_time_derivative", |b| {
-        b.iter(|| black_box(cagniard_time_derivative(&st, &v, black_box(p), black_box(60.0))))
+        b.iter(|| {
+            black_box(cagniard_time_derivative(
+                &st,
+                &v,
+                black_box(p),
+                black_box(60.0),
+            ))
+        })
     });
     group.bench_function("stationary_ray_parameter", |b| {
         b.iter(|| black_box(stationary_ray_parameter(&st, &v, black_box(60.0))))
     });
     group.bench_function("geometric_spreading", |b| {
-        b.iter(|| black_box(geometric_spreading(&st, &v, black_box(30.0), black_box(0.15), Takeoff::Up)))
+        b.iter(|| {
+            black_box(geometric_spreading(
+                &st,
+                &v,
+                black_box(30.0),
+                black_box(0.15),
+                Takeoff::Up,
+            ))
+        })
     });
     group.bench_function("build_ray_path", |b| {
         b.iter_batched_ref(
@@ -305,7 +335,12 @@ fn bench_ray(c: &mut Criterion) {
             RayState::default,
             |st| {
                 black_box(green_function(
-                    st, &v, black_box(28.0), black_box(60.0), 1, WaveMode::Sh,
+                    st,
+                    &v,
+                    black_box(28.0),
+                    black_box(60.0),
+                    1,
+                    WaveMode::Sh,
                 ))
             },
             criterion::BatchSize::SmallInput,
@@ -345,71 +380,88 @@ fn bench_spectrum(c: &mut Criterion) {
         // where the out-parameter form reused a caller buffer and excluded it -- the same
         // note as `radiate_and_invert` below. §5.5 folds the internal mirror buffer into
         // the returned array, which is where that allocation comes back out.
-        group.bench_with_input(BenchmarkId::new("stochastic_spectrum", np2), &np2, |b, &np2| {
-            let mut g = Pcg32::seed(5);
-            let plan = SpectrumPlan {
-                np2,
-                fold_count: nf,
-                log_frequency_hz: log_dfr.clone().into(),
-                path_exponent: path_exp.clone().into(),
-                envelope_power: env_pow.clone().into(),
-                frequency_hz: dfr.clone().into(),
-            };
-            let model = SourceModel {
-                dt: DT,
-                window_eps: 0.2,
-                window_eta: 0.05,
-                subevent_moment: 3.0e22,
-                kappa_s: 0.045,
-                moment_scale: 2.1,
-            };
-            let path = RayPath {
-                distance_km: 60.0,
-                window_s: 2.0,
-                shear_velocity_km_s: 3.2,
-                density_g_cm3: 2.7,
-                corner_frequency_hz: 1.5,
-                fmax_hz: 10.0,
-                qbar: 0.02,
-            };
-            b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("stochastic_spectrum", np2),
+            &np2,
+            |b, &np2| {
+                let mut g = Pcg32::seed(5);
+                let plan = SpectrumPlan {
+                    np2,
+                    fold_count: nf,
+                    log_frequency_hz: log_dfr.clone().into(),
+                    path_exponent: path_exp.clone().into(),
+                    envelope_power: env_pow.clone().into(),
+                    frequency_hz: dfr.clone().into(),
+                };
+                let model = SourceModel {
+                    dt: DT,
+                    window_eps: 0.2,
+                    window_eta: 0.05,
+                    subevent_moment: 3.0e22,
+                    kappa_s: 0.045,
+                    moment_scale: 2.1,
+                };
+                let path = RayPath {
+                    distance_km: 60.0,
+                    window_s: 2.0,
+                    shear_velocity_km_s: 3.2,
+                    density_g_cm3: 2.7,
+                    corner_frequency_hz: 1.5,
+                    fmax_hz: 10.0,
+                    qbar: 0.02,
+                };
+                b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path))
+            },
+        );
 
         // radiate_and_invert: the radiation multiply, one inverse FFT, the scale and the
         // raised-cosine taper. Takes the spectrum by value, so the batched setup hands it a
         // fresh Array1 each iteration rather than resetting a buffer -- which also means this
         // timing now INCLUDES the result allocation, where the out-parameter form excluded it.
-        group.bench_with_input(BenchmarkId::new("radiate_and_invert", np2), &np2, |b, &_np2| {
-            let radiation = ndarray::Array1::from(rdna.clone());
-            b.iter_batched(
-                || ndarray::Array1::from(src.clone()),
-                |spectrum| radiate_and_invert(spectrum, radiation.view()),
-                criterion::BatchSize::SmallInput,
-            )
-        });
+        group.bench_with_input(
+            BenchmarkId::new("radiate_and_invert", np2),
+            &np2,
+            |b, &_np2| {
+                let radiation = ndarray::Array1::from(rdna.clone());
+                b.iter_batched(
+                    || ndarray::Array1::from(src.clone()),
+                    |spectrum| radiate_and_invert(spectrum, radiation.view()),
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("apply_site_amplification", np2), &np2, |b, &_np2| {
-            b.iter_batched_ref(
-                || src.clone(),
-                |cw| apply_site_amplification(
-                    cw.as_mut_slice(),
-                    ArrayView1::from(log_dfr.as_slice()),
-                    ArrayView1::from(&fn_[..20]),
-                    ArrayView1::from(&an[..20]),
-                ),
-                criterion::BatchSize::SmallInput,
-            )
-        });
+        group.bench_with_input(
+            BenchmarkId::new("apply_site_amplification", np2),
+            &np2,
+            |b, &_np2| {
+                b.iter_batched_ref(
+                    || src.clone(),
+                    |cw| {
+                        apply_site_amplification(
+                            cw.as_mut_slice(),
+                            ArrayView1::from(log_dfr.as_slice()),
+                            ArrayView1::from(&fn_[..20]),
+                            ArrayView1::from(&an[..20]),
+                        )
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("remove_quadratic_trend", np2), &np2, |b, &np2| {
-            let a: Vec<f32> =
-                (0..np2).map(|i| (i as f32 * 0.01).sin()).collect();
-            b.iter_batched_ref(
-                || a.clone(),
-                |a| remove_quadratic_trend(DT, a.as_mut_slice()),
-                criterion::BatchSize::SmallInput,
-            )
-        });
+        group.bench_with_input(
+            BenchmarkId::new("remove_quadratic_trend", np2),
+            &np2,
+            |b, &np2| {
+                let a: Vec<f32> = (0..np2).map(|i| (i as f32 * 0.01).sin()).collect();
+                b.iter_batched_ref(
+                    || a.clone(),
+                    |a| remove_quadratic_trend(DT, a.as_mut_slice()),
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
     }
 
     // Cheap and called once per subfault per ray; included so it can be ruled out
@@ -418,12 +470,14 @@ fn bench_spectrum(c: &mut Criterion) {
     let (fn_, mut an) = site_table();
     group.throughput(Throughput::Elements(1));
     group.bench_function("site_amplification_factors", |b| {
-        b.iter(|| site_amplification_factors(
-            &v,
-            black_box(20),
-            ArrayView1::from(&fn_[..20]),
-            ArrayViewMut1::from(&mut an[..20]),
-        ))
+        b.iter(|| {
+            site_amplification_factors(
+                &v,
+                black_box(20),
+                ArrayView1::from(&fn_[..20]),
+                ArrayViewMut1::from(&mut an[..20]),
+            )
+        })
     });
 
     group.finish();
@@ -452,7 +506,10 @@ fn bench_geom(c: &mut Criterion) {
                 b.iter(|| {
                     subfault_geometry(
                         &FaultPlane {
-                            origin: GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                            origin: GeoPoint {
+                                lat_deg: -43.0,
+                                lon_deg: 173.0,
+                            },
                             strike_deg: 220.0,
                             dip_deg: 70.0,
                             top_depth_km: 5.0,
@@ -462,7 +519,10 @@ fn bench_geom(c: &mut Criterion) {
                             along_strike_count: nx,
                             down_dip_count: nw,
                         },
-                        GeoPoint { lat_deg: -43.0, lon_deg: 173.1 },
+                        GeoPoint {
+                            lat_deg: -43.0,
+                            lon_deg: 173.1,
+                        },
                     )
                 })
             },

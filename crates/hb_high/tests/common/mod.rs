@@ -53,7 +53,11 @@ impl Golden {
                 path.display()
             )
         });
-        Self { buf, pos: 0, name: format!("{tier}/{name}") }
+        Self {
+            buf,
+            pos: 0,
+            name: format!("{tier}/{name}"),
+        }
     }
 
     fn take<const N: usize>(&mut self) -> [u8; N] {
@@ -232,6 +236,9 @@ impl Divergence {
     }
 
     pub fn report(&self, fixture: &str) {
-        println!("{fixture}: worst relative divergence {:.3e} at {}", self.worst, self.at);
+        println!(
+            "{fixture}: worst relative divergence {:.3e} at {}",
+            self.worst, self.at
+        );
     }
 }

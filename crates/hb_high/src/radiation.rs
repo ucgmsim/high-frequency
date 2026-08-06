@@ -5,7 +5,7 @@
 //! **conically averaged** pattern: perturb the five angles randomly and average. See
 //! `PHYSICS.md` §5.
 
-use ndarray::{azip, ArrayView1, ArrayViewMut1};
+use ndarray::{ArrayView1, ArrayViewMut1, azip};
 
 /// Full width of the horizontal component's perturbation cone: ±45° on each of the five
 /// angles, as Graves & Pitarka (2010) specify.

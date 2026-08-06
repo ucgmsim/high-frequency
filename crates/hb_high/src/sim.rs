@@ -28,22 +28,23 @@
 //! step once a caller starts looping over many stations.
 
 use crate::config::{
-    HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, RUPTURE_VELOCITY_FRACTION_MAX,
+    HfConfig, PathDurationModel, RUPTURE_VELOCITY_FRACTION_MAX, RayKind, RayType,
+    RuptureVelocityTaper,
 };
-use ndarray::{s, Array1, ArrayViewMut1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut1, s};
 use std::f32::consts::PI;
 
 use crate::fft::Complex32;
-use crate::geom::{subfault_geometry, FaultPlane, GeoPoint, SubfaultGeometry};
-use crate::input::{insert_air_layer, Segment, StochModel};
+use crate::geom::{FaultPlane, GeoPoint, SubfaultGeometry, subfault_geometry};
+use crate::input::{Segment, StochModel, insert_air_layer};
 use crate::radiation::{
-    horizontal_radiation_spectrum, vertical_radiation_spectrum, RadiationAngles,
+    RadiationAngles, horizontal_radiation_spectrum, vertical_radiation_spectrum,
 };
 use crate::ray::green_function;
-use crate::rng::{fill_uniform_deviates, normal_deviate, DrawSource, Draws};
+use crate::rng::{DrawSource, Draws, fill_uniform_deviates, normal_deviate};
 use crate::site::{apply_site_amplification, site_amplification_factors};
 use crate::state::{Layer, RayState, VelocityModel, VelocityModelInput, WaveMode};
-use crate::stoc::{radiate_and_invert, stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
+use crate::stoc::{RayPath, SourceModel, SpectrumPlan, radiate_and_invert, stochastic_spectrum};
 
 /// The three output components, in the order they are computed — which is also the order a
 /// caller receives them in.
@@ -160,9 +161,14 @@ pub struct Simulation {
     /// Samples per component.
     pub ndata: usize,
     pub dt: f32,
-    /// Ground motion, **interleaved** 090/000/ver — `ndata * 3` values, component fastest.
-    /// Callers consume the three channels positionally, so the order is part of the interface.
-    pub acc: Vec<f32>,
+    /// Ground motion, shaped `(n_components, ndata)`, rows in [`Component::ALL`] order —
+    /// 090, 000, vertical.
+    ///
+    /// The three components are computed as three separate traces, so this is how they
+    /// already exist. It used to be flattened into one interleaved `Vec` here and
+    /// de-interleaved again by the caller, which was two passes over the whole record to
+    /// arrive back at the shape it started in.
+    pub acc: Array2<f32>,
 }
 
 /// Why a simulation could not be produced.
@@ -190,249 +196,296 @@ pub enum SimError {
     },
 }
 
-/// Simulate one station.
-pub fn simulate(
-    config: &HfConfig,
-    slip: &StochModel,
-    vmod_in: &VelocityModelInput,
-    station: crate::input::Station,
-    seed: u64,
-) -> Result<Simulation, SimError> {
-    // Boore (1983, p. 1869)'s own envelope-shape values, and the ones Graves & Pitarka (2010)
-    // use: the peak sits at 0.2 of the duration, decayed to 0.05 of the peak by the end.
-    let window_peak_fraction = 0.2f32;
-    let window_end_fraction = 0.05f32;
+/// A configured simulation, ready to run stations against.
+///
+/// # Why this is built once
+///
+/// Everything a run needs that does not depend on where the receiver is — the air layer, the
+/// slip-model normalisation, the moment scaling, the rupture taper, the path-duration table,
+/// the per-segment angles — is computed here. [`Simulator::run`] then does only the part that
+/// genuinely varies: the source-to-station geometry and the passes over it.
+///
+/// The caller used to be a loop over stations calling a free function, which redid all of the
+/// above every time, including cloning and re-normalising the entire slip model per station.
+///
+/// # Stations are independent, and that is a contract
+///
+/// `run` takes `&self`, so a batch can be driven from several threads over one `Simulator`.
+/// Each call builds its own generator from its own seed and its own accumulator, so no state
+/// crosses between stations — which is what makes a batch safe to reorder, subset or resume.
+pub struct Simulator {
+    /// Normalised in place by [`normalise_source`]: `slip` holds moment weights, not slip.
+    slip: StochModel,
+    /// The working model, with the air layer inserted and the two `real*4` fields widened.
+    vmod: VelocityModel,
+    rupture: RuptureVelocityTaper,
+    path_duration: PathDuration,
+    /// One per segment, in `slip.segments` order. Station-independent: the angles are the
+    /// fault's own orientation plus a corner-frequency coefficient.
+    angles: Vec<SegmentAngles>,
+    rayset: Vec<RayType>,
+    run: RunScalars,
+    /// `ln` of the site-amplification table's frequency axis.
+    siteamp_log_freq: Array1<f32>,
+}
 
-    let conical_sample_count = 1000usize;
+impl Simulator {
+    /// Prepare a simulation. Fails only if the slip model's segments disagree on subfault size.
+    pub fn new(
+        config: &HfConfig,
+        slip: &StochModel,
+        vmod_in: &VelocityModelInput,
+    ) -> Result<Self, SimError> {
+        // Boore (1983, p. 1869)'s own envelope-shape values, and the ones Graves & Pitarka (2010)
+        // use: the peak sits at 0.2 of the duration, decayed to 0.05 of the peak by the end.
+        let window_peak_fraction = 0.2f32;
+        let window_end_fraction = 0.05f32;
 
-    let fn_hz: Array1<f32> = ndarray::array![
-        0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
-        10.00, 20.00, 30.00, 50.00, 70.00,
-    ];
-    let siteamp_log_freq: Array1<f32> = fn_hz.mapv(f32::ln);
+        let conical_sample_count = 1000usize;
 
-    let czero = config.source.czero;
-    let calpha = config.source.calpha;
-    let (duration_s, dt, f_max_hz, kappa_s, q_exponent) = (
-        config.record.duration_s,
-        config.record.dt_s,
-        config.site.f_max_hz,
-        config.site.kappa_s,
-        config.path.q_exponent,
-    );
+        let fn_hz: Array1<f32> = ndarray::array![
+            0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00,
+            7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
+        ];
+        let siteamp_log_freq: Array1<f32> = fn_hz.mapv(f32::ln);
 
-    // The slip model is normalised in place and the velocity model gains an air
-    // layer, so both are worked on as copies.
-    let mut stoch = slip.clone();
-    let mut vmod_in = vmod_in.clone();
+        let czero = config.source.czero;
+        let calpha = config.source.calpha;
+        let (duration_s, dt, f_max_hz, kappa_s, q_exponent) = (
+            config.record.duration_s,
+            config.record.dt_s,
+            config.site.f_max_hz,
+            config.site.kappa_s,
+            config.path.q_exponent,
+        );
 
-    // Every segment must agree with the FIRST on subfault size, so the first is the
-    // reference and the rest are the candidates -- `split_first` says that, where
-    // re-indexing `segments[0]` inside a loop over `segments` left it to the reader to
-    // notice the index was constant. The reported numbers stay 1-based, to match the input
-    // file's own numbering.
-    if let Some((reference, rest)) = stoch.segments.split_first() {
-        for (index, segment) in rest.iter().enumerate() {
-            // 0-based, matching `segments`, where the original reported the deck's 1-based
-            // numbering.
-            let segment_index = index + 1;
-            for (dimension, found, expected) in [
-                (
-                    "subfault_length_km",
-                    segment.subfault_length_km,
-                    reference.subfault_length_km,
-                ),
-                (
-                    "subfault_width_km",
-                    segment.subfault_width_km,
-                    reference.subfault_width_km,
-                ),
-            ] {
-                if found != expected {
-                    return Err(SimError::InconsistentSegments {
-                        segment: segment_index,
-                        dimension,
-                        found,
-                        expected,
-                    });
+        // The slip model is normalised in place and the velocity model gains an air
+        // layer, so both are worked on as copies.
+        let mut slip_model = slip.clone();
+        let mut vmod_in = vmod_in.clone();
+
+        // Every segment must agree with the FIRST on subfault size, so the first is the
+        // reference and the rest are the candidates -- `split_first` says that, where
+        // re-indexing `segments[0]` inside a loop over `segments` left it to the reader to
+        // notice the index was constant. The reported numbers stay 1-based, to match the input
+        // file's own numbering.
+        if let Some((reference, rest)) = slip_model.segments.split_first() {
+            for (index, segment) in rest.iter().enumerate() {
+                // 0-based, matching `segments`, where the original reported the deck's 1-based
+                // numbering.
+                let segment_index = index + 1;
+                for (dimension, found, expected) in [
+                    (
+                        "subfault_length_km",
+                        segment.subfault_length_km,
+                        reference.subfault_length_km,
+                    ),
+                    (
+                        "subfault_width_km",
+                        segment.subfault_width_km,
+                        reference.subfault_width_km,
+                    ),
+                ] {
+                    if found != expected {
+                        return Err(SimError::InconsistentSegments {
+                            segment: segment_index,
+                            dimension,
+                            found,
+                            expected,
+                        });
+                    }
                 }
             }
         }
-    }
 
-    // ------------------------------------------------- path duration model ---
-    let path_duration = path_duration_table(config.path.path_duration);
+        // ------------------------------------------------- path duration model ---
+        let path_duration = path_duration_table(config.path.path_duration);
 
-    // ------------------------------------------------------- air layer -------
-    insert_air_layer(&mut vmod_in);
+        // ------------------------------------------------------- air layer -------
+        insert_air_layer(&mut vmod_in);
 
-    // Resolved here rather than at parse time: the deep transition depths depend on
-    // the deepest hypocentre, which is only known once the slip model is read.
-    let rv = config
-        .source
-        .rupture_velocity
-        .resolve(stoch.max_hypocentre_depth_km);
+        // Resolved here rather than at parse time: the deep transition depths depend on
+        // the deepest hypocentre, which is only known once the slip model is read.
+        let rupture = config
+            .source
+            .rupture_velocity
+            .resolve(slip_model.max_hypocentre_depth_km);
 
-    // ------------------------------------------------ source normalisation ---
-    let SourceScale {
-        avg_subfault_km,
-        total_moment_dyn_cm,
-        subfault_count,
-    } = normalise_source(&mut stoch, &vmod_in);
+        // ------------------------------------------------ source normalisation ---
+        let SourceScale {
+            avg_subfault_km,
+            total_moment_dyn_cm,
+            subfault_count,
+        } = normalise_source(&mut slip_model, &vmod_in);
 
-    // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
-    // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
-    let subevent_moment = config.source.stress_drop_bars
-        * avg_subfault_km
-        * avg_subfault_km
-        * avg_subfault_km
-        * BARS_KM3_TO_DYN_CM;
+        // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
+        // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
+        let subevent_moment = config.source.stress_drop_bars
+            * avg_subfault_km
+            * avg_subfault_km
+            * avg_subfault_km
+            * BARS_KM3_TO_DYN_CM;
 
-    // `F` in Graves & Pitarka (2010) eq. 12 -- Frankel's (1995) finite-fault factor. It scales
-    // the subfault corner frequency towards the mainshock's while keeping the summed moment
-    // right; `crate::stoc` is where it does its work, and the note on `frank` there shows the
-    // algebra.
-    //
-    // DEVIATION FROM THE PUBLISHED METHOD, AND IT IS A PHYSICS CHOICE. G&P define
-    // `F = M_o / (N * sigma_p * dl^3)` -- LINEAR in subfault count. This uses `sqrt(N)`.
-    // Graves & Pitarka (2015) does not revise `F`, so neither paper licenses the square root;
-    // it may come from the subfault-summation scheme instead. Three other candidate scalings
-    // were tried and abandoned upstream, which is some evidence this was tuned rather than
-    // derived:
-    //
-    //   M_o / (subevent_moment * subfault_count)          linear in N -- what G&P specify
-    //   M_o / (subevent_moment * sqrt(subfault_count))    THE LIVE ONE
-    //   (M_o / subevent_moment)^(2/3)
-    //   (fce_avg / fcmain)^2
-    //
-    // Flagged in `papers/README.md` finding 4 and left alone: changing it would move every
-    // waveform, and it wants a domain judgement rather than a tidy-up.
-    //
-    // The `1.0 *` forces the integer count through a real multiply before the sqrt, and is
-    // load-bearing for the exact result.
-    let moment_scale =
-        total_moment_dyn_cm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
+        // `F` in Graves & Pitarka (2010) eq. 12 -- Frankel's (1995) finite-fault factor. It scales
+        // the subfault corner frequency towards the mainshock's while keeping the summed moment
+        // right; `crate::stoc` is where it does its work, and the note on `frank` there shows the
+        // algebra.
+        //
+        // DEVIATION FROM THE PUBLISHED METHOD, AND IT IS A PHYSICS CHOICE. G&P define
+        // `F = M_o / (N * sigma_p * dl^3)` -- LINEAR in subfault count. This uses `sqrt(N)`.
+        // Graves & Pitarka (2015) does not revise `F`, so neither paper licenses the square root;
+        // it may come from the subfault-summation scheme instead. Three other candidate scalings
+        // were tried and abandoned upstream, which is some evidence this was tuned rather than
+        // derived:
+        //
+        //   M_o / (subevent_moment * subfault_count)          linear in N -- what G&P specify
+        //   M_o / (subevent_moment * sqrt(subfault_count))    THE LIVE ONE
+        //   (M_o / subevent_moment)^(2/3)
+        //   (fce_avg / fcmain)^2
+        //
+        // Flagged in `papers/README.md` finding 4 and left alone: changing it would move every
+        // waveform, and it wants a domain judgement rather than a tidy-up.
+        //
+        // The `1.0 *` forces the integer count through a real multiply before the sqrt, and is
+        // load-bearing for the exact result.
+        let moment_scale =
+            total_moment_dyn_cm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
 
-    // ------------------------------------------------------------ stations ---
-    // No ceiling on the record length: buffers are sized from the requested duration. The
-    // original clamped this to a compile-time maximum and SILENTLY TRUNCATED anything longer.
-    let ndata = (duration_s / dt).trunc() as usize;
+        // ------------------------------------------------------------ stations ---
+        // No ceiling on the record length: buffers are sized from the requested duration. The
+        // original clamped this to a compile-time maximum and SILENTLY TRUNCATED anything longer.
+        let ndata = (duration_s / dt).trunc() as usize;
 
-    let (mut rng, deviates) = seed_and_predraw(seed, conical_sample_count);
+        // The working model widens the two `real*4` input fields to `real*8`.
+        let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();
 
-    // The working model widens the two `real*4` input fields to `real*8`.
-    let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();
-    // Three separate component traces rather than one interleaved 2-D block. The interleaving
-    // that the output format wants happens once, at the end.
-    let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; ndata]);
-
-    // Everything the two passes need that is constant for the whole run, gathered once
-    // so the extracted functions take one reference instead of eighteen scalars.
-    let run = RunScalars {
-        dt,
-        fmax_hz: f_max_hz,
-        kappa_s,
-        q_exponent,
-        window_peak_fraction,
-        window_end_fraction,
-        corner_const: czero,
-        calpha,
-        rupture_velocity_sigma: config.source.rupture_velocity.rv_sig1,
-        avg_subfault_km,
-        subevent_moment,
-        moment_scale,
-        conical_sample_count,
-        site_table_len: fn_hz.len(),
-        ndata,
-    };
-
-    // ------------------------------------------------- the single station ---
-    for seg in &stoch.segments {
-        let angles = SegmentAngles::for_segment(seg, run.calpha, run.corner_const);
-
-        let geom = subfault_geometry(
-            &FaultPlane {
-                origin: GeoPoint {
-                    lat_deg: seg.fault_lat_deg,
-                    lon_deg: seg.fault_lon_deg,
-                },
-                strike_deg: seg.strike_deg,
-                dip_deg: seg.dip_deg,
-                top_depth_km: seg.top_depth_km,
-                along_strike_offset_km: seg.along_strike_offset_km,
-                subfault_length_km: seg.subfault_length_km,
-                subfault_width_km: seg.subfault_width_km,
-                along_strike_count: seg.along_strike_count,
-                down_dip_count: seg.down_dip_count,
-            },
-            GeoPoint {
-                lat_deg: station.latitude,
-                lon_deg: station.longitude,
-            },
-        );
-
-        let windows = time_window_pass(seg, &geom, &vmod, &rv, &path_duration, &angles, &run);
-        // The minimum over ALL segments. The original re-initialised this inside the segment
-        // loop, so on a multi-segment model the reported distance described only the last
-        // segment -- invisible while every fixture was single-segment. Now the minimum,
-        // which is what "closest subfault distance" means.
-
-        let plan = SpectrumPlan::new(
-            windows.tmax,
+        // Everything the two passes need that is constant for the whole run, gathered once
+        // so the extracted functions take one reference instead of eighteen scalars.
+        let run = RunScalars {
             dt,
-            run.q_exponent,
-            run.window_peak_fraction,
-            run.window_end_fraction,
-        );
+            fmax_hz: f_max_hz,
+            kappa_s,
+            q_exponent,
+            window_peak_fraction,
+            window_end_fraction,
+            corner_const: czero,
+            calpha,
+            rupture_velocity_sigma: config.source.rupture_velocity.rv_sig1,
+            avg_subfault_km,
+            subevent_moment,
+            moment_scale,
+            conical_sample_count,
+            site_table_len: fn_hz.len(),
+            ndata,
+        };
 
-        subfault_pass(
-            &mut rng,
-            &mut acc,
-            SegmentPass {
-                seg,
-                geom: &geom,
-                windows: &windows,
-                plan: &plan,
-                angles: &angles,
-            },
-            RunContext {
-                vmod: &vmod,
-                rupture: &rv,
-                run: &run,
-                config,
-                deviates: &deviates,
-                siteamp_log_freq: &siteamp_log_freq,
-            },
-        );
+        let angles = slip_model
+            .segments
+            .iter()
+            .map(|seg| SegmentAngles::for_segment(seg, run.calpha, run.corner_const))
+            .collect();
+
+        Ok(Self {
+            slip: slip_model,
+            vmod,
+            rupture,
+            path_duration,
+            angles,
+            rayset: config.path.rayset.clone(),
+            run,
+            siteamp_log_freq,
+        })
     }
 
-    // An optional output filter is not reachable from here: the switch that would enable it is
-    // a caller-level field, and a non-zero value is refused rather than passed through.
+    /// Simulate one station.
+    pub fn run(&self, station: crate::input::Station, seed: u64) -> Simulation {
+        let (mut rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);
+        // Three separate component traces rather than one interleaved 2-D block.
+        let mut acc: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; self.run.ndata]);
 
-    // A peak-amplitude scan over all three components used to happen here. Nothing consumed
-    // the result, so it is gone.
-    // Interleaved, component fastest: 090/000/ver per time sample.
-    // Interleaved, component fastest: 090/000/ver per time sample. Destructuring the
-    // three traces first is what lets this be a zip -- `acc[c][sample]` over a loop nest
-    // says the same thing while hiding that the three are walked in lockstep.
-    let [e090, n000, vertical] = &acc;
-    let out: Vec<f32> = e090
-        .iter()
-        .zip(n000)
-        .zip(vertical)
-        .flat_map(|((&e, &n), &v)| [e, n, v])
-        .collect();
-    debug_assert_eq!(out.len(), ndata * 3);
+        // ------------------------------------------------- the single station ---
+        for (seg, angles) in self.slip.segments.iter().zip(&self.angles) {
+            let geom = subfault_geometry(
+                &FaultPlane {
+                    origin: GeoPoint {
+                        lat_deg: seg.fault_lat_deg,
+                        lon_deg: seg.fault_lon_deg,
+                    },
+                    strike_deg: seg.strike_deg,
+                    dip_deg: seg.dip_deg,
+                    top_depth_km: seg.top_depth_km,
+                    along_strike_offset_km: seg.along_strike_offset_km,
+                    subfault_length_km: seg.subfault_length_km,
+                    subfault_width_km: seg.subfault_width_km,
+                    along_strike_count: seg.along_strike_count,
+                    down_dip_count: seg.down_dip_count,
+                },
+                GeoPoint {
+                    lat_deg: station.latitude,
+                    lon_deg: station.longitude,
+                },
+            );
 
-    Ok(Simulation {
-        ndata,
-        dt,
-        acc: out,
-    })
+            let windows = time_window_pass(
+                seg,
+                &geom,
+                &self.vmod,
+                &self.rupture,
+                &self.path_duration,
+                angles,
+                &self.run,
+            );
+            // The minimum over ALL segments. The original re-initialised this inside the segment
+            // loop, so on a multi-segment model the reported distance described only the last
+            // segment -- invisible while every fixture was single-segment. Now the minimum,
+            // which is what "closest subfault distance" means.
+
+            let plan = SpectrumPlan::new(
+                windows.tmax,
+                self.run.dt,
+                self.run.q_exponent,
+                self.run.window_peak_fraction,
+                self.run.window_end_fraction,
+            );
+
+            subfault_pass(
+                &mut rng,
+                &mut acc,
+                SegmentPass {
+                    seg,
+                    geom: &geom,
+                    windows: &windows,
+                    plan: &plan,
+                    angles,
+                },
+                RunContext {
+                    vmod: &self.vmod,
+                    rupture: &self.rupture,
+                    run: &self.run,
+                    rayset: &self.rayset,
+                    deviates: &deviates,
+                    siteamp_log_freq: &self.siteamp_log_freq,
+                },
+            );
+        }
+
+        // One row per component, in `Component::ALL` order -- which is the order `acc` was
+        // filled in, so this is a copy rather than a shuffle.
+        let mut out = Array2::zeros((Component::ALL.len(), self.run.ndata));
+        for (mut row, trace) in out.rows_mut().into_iter().zip(&acc) {
+            row.assign(&ArrayView1::from(&trace[..]));
+        }
+
+        Simulation {
+            ndata: self.run.ndata,
+            dt: self.run.dt,
+            acc: out,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// The pieces `simulate` is made of
+// The pieces a run is made of
 // ---------------------------------------------------------------------------
 
 /// Everything derived from the deck and the slip model that is constant for the whole
@@ -614,9 +667,8 @@ fn time_window_pass(
         // Graves & Pitarka (2010) eq. 13: `f_ci = c0 * V_Ri / (alpha_tau * pi * dl)`, with
         // `corner_coeff` carrying `c0 / alpha_tau` and `rupture_fraction * beta` being the local rupture
         // speed `V_Ri`.
-        let corner_frequency_hz =
-            angles.corner_coeff * rupture_fraction * shear_velocity_km_s
-                / (run.avg_subfault_km * PI);
+        let corner_frequency_hz = angles.corner_coeff * rupture_fraction * shear_velocity_km_s
+            / (run.avg_subfault_km * PI);
         // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
         // term. Two details worth stating:
         //
@@ -627,8 +679,7 @@ fn time_window_pass(
         //
         // No upper cap on the window length.
         let source_duration_s = run.moment_scale.sqrt() * (1.0 / corner_frequency_hz);
-        let path_duration_s =
-            bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
+        let path_duration_s = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
         let window = WINDOW_DURATION_FACTOR * (source_duration_s + path_duration_s);
         window_s[seg.grid_index(i, j)] = window;
 
@@ -660,7 +711,8 @@ struct RunContext<'a> {
     vmod: &'a VelocityModel,
     rupture: &'a RuptureVelocityTaper,
     run: &'a RunScalars,
-    config: &'a HfConfig,
+    /// Which ray paths to sum over — the one thing the pass reads from the caller's config.
+    rayset: &'a [RayType],
     deviates: &'a Deviates,
     siteamp_log_freq: &'a Array1<f32>,
 }
@@ -690,7 +742,7 @@ fn subfault_pass(
         vmod,
         rupture,
         run,
-        config,
+        rayset,
         deviates,
         siteamp_log_freq,
     } = ctx;
@@ -747,10 +799,9 @@ fn subfault_pass(
         };
 
         let corner_frequency_hz =
-            angles.corner_coeff * rupture_fraction * shear_velocity_km_s / run.avg_subfault_km
-                / PI;
+            angles.corner_coeff * rupture_fraction * shear_velocity_km_s / run.avg_subfault_km / PI;
 
-        for &ray_type in &config.path.rayset {
+        for &ray_type in rayset {
             let kind = ray_type.kind();
 
             // The tracing runs even for a straight ray -- type 0 borrows type 1's tracing and
@@ -768,8 +819,7 @@ fn subfault_pass(
             let mut travel_time_s = green.stime;
             let mut path_length_km = green.rpath;
             let mut qbar = green.qbar;
-            let mut window_start_s =
-                travel_time_s - run.window_peak_fraction * subfault_window_s;
+            let mut window_start_s = travel_time_s - run.window_peak_fraction * subfault_window_s;
 
             // The straight-ray option throws the traced result away and substitutes a
             // geometric one. The tracer still ran -- see the note at the loop head.
@@ -848,14 +898,16 @@ fn subfault_pass(
             };
             for (component, spec) in Component::ALL.into_iter().zip(spectrum.drain(..)) {
                 match component.radiation_mode() {
-                    RadiationMode::Horizontal { azimuth_offset_deg } => horizontal_radiation_spectrum(
-                        rng,
-                        &arrival,
-                        plan.frequency_hz.view(),
-                        azimuth_offset_deg.to_radians(),
-                        run.conical_sample_count,
-                        radiation.view_mut(),
-                    ),
+                    RadiationMode::Horizontal { azimuth_offset_deg } => {
+                        horizontal_radiation_spectrum(
+                            rng,
+                            &arrival,
+                            plan.frequency_hz.view(),
+                            azimuth_offset_deg.to_radians(),
+                            run.conical_sample_count,
+                            radiation.view_mut(),
+                        )
+                    }
                     RadiationMode::Vertical => vertical_radiation_spectrum(
                         &arrival,
                         plan.frequency_hz.view(),
@@ -868,8 +920,7 @@ fn subfault_pass(
                 // The spectrum moves: out of the Vec, into `radiate_and_invert`, which
                 // consumes it because the inverse transform is in place, and the samples
                 // move on into the accumulator. No copy anywhere on this path.
-                subfault_acc[component.index()] =
-                    radiate_and_invert(spec, radiation.view());
+                subfault_acc[component.index()] = radiate_and_invert(spec, radiation.view());
             }
 
             // Rupture time at this subfault, taken from the slip model. A constant-rupture-
@@ -1199,7 +1250,11 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
     // original stepped by 360 in a loop, and the shift back is the second line.
     let wrapped_rake_deg = {
         let folded = rake_deg.rem_euclid(360.0);
-        if folded > 180.0 { folded - 360.0 } else { folded }
+        if folded > 180.0 {
+            folded - 360.0
+        } else {
+            folded
+        }
     };
 
     let rake_factor = if (0.0..=180.0).contains(&wrapped_rake_deg) {
@@ -1240,7 +1295,11 @@ mod tests {
         }
         fn wrapped(rake_deg: f32) -> f32 {
             let folded = rake_deg.rem_euclid(360.0);
-            let rake_deg = if folded > 180.0 { folded - 360.0 } else { folded };
+            let rake_deg = if folded > 180.0 {
+                folded - 360.0
+            } else {
+                folded
+            };
             if (0.0..=180.0).contains(&rake_deg) {
                 1.0 - (rake_deg - 90.0).abs() / 90.0
             } else {

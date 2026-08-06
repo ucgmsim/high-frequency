@@ -5,7 +5,7 @@
 //! amplification is the impedance contrast between the source region and the column averaged
 //! down to that depth.
 
-use ndarray::{azip, s, ArrayView1, ArrayViewMut1, Axis};
+use ndarray::{ArrayView1, ArrayViewMut1, Axis, azip, s};
 
 use crate::fft::Complex32;
 use crate::state::VelocityModel;

@@ -35,26 +35,22 @@ use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::fft::{Complex32, Complex64};
-use hb_high::geom::{distance_azimuth, subfault_geometry, FaultPlane, GeoPoint};
-use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
-use hb_high::radiation::{radiation_pattern, RadiationAngles};
+use hb_high::fft::{forward, inverse, remove_quadratic_trend};
+use hb_high::geom::{FaultPlane, GeoPoint, distance_azimuth, subfault_geometry};
+use hb_high::input::{Segment, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::radiation::{RadiationAngles, radiation_pattern};
 use hb_high::ray::vertical_slowness;
-use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
+use hb_high::rng::{Pcg32, fill_normal_deviates, fill_uniform_deviates};
 use hb_high::site::apply_site_amplification;
-use ndarray::ArrayView1;
 use libm::tgamma as gamma;
+use ndarray::ArrayView1;
 use proptest::prelude::*;
 
 /// Angular difference in degrees, folded into `[0, 180]`.
 fn angle_gap_deg(a: f32, b: f32) -> f32 {
     let d = (a - b).abs() % 360.0;
-    if d > 180.0 {
-        360.0 - d
-    } else {
-        d
-    }
+    if d > 180.0 { 360.0 - d } else { d }
 }
 
 /// A complex spectrum of `n` bins, filled deterministically from `seed`.
@@ -988,8 +984,9 @@ fn run(seed: u64) -> hb_high::sim::Simulation {
         latitude: -43.1,
         name: "TEST".to_string(),
     };
-    hb_high::sim::simulate(&config(), &slip, &vmod, station, seed)
-        .expect("simulation should succeed")
+    hb_high::sim::Simulator::new(&config(), &slip, &vmod)
+        .expect("the fixture slip model is consistent")
+        .run(station, seed)
 }
 
 #[test]
@@ -997,7 +994,11 @@ fn simulate_produces_a_record_of_the_requested_length() {
     let sim = run(123456789);
     // duration / dt, interleaved over three components.
     assert_eq!(sim.ndata, 4000, "ndata should be duration/dt");
-    assert_eq!(sim.acc.len(), sim.ndata * 3, "acc is ndata*3 interleaved");
+    assert_eq!(
+        sim.acc.dim(),
+        (3, sim.ndata),
+        "acc is one row per component"
+    );
     assert_eq!(sim.dt, 0.005);
 }
 
@@ -1015,13 +1016,8 @@ fn simulate_produces_finite_non_zero_ground_motion() {
     );
     // Every component carries signal, which a mis-indexed accumulation could break for
     // one and not the others.
-    for component in 0..3 {
-        let component_peak = sim
-            .acc
-            .iter()
-            .skip(component)
-            .step_by(3)
-            .fold(0.0f32, |a, v| a.max(v.abs()));
+    for (component, trace) in sim.acc.rows().into_iter().enumerate() {
+        let component_peak = trace.iter().fold(0.0f32, |a, v| a.max(v.abs()));
         assert!(
             component_peak > 0.0,
             "component {component} is entirely zero"
@@ -1062,7 +1058,11 @@ fn a_source_below_the_model_stays_finite() {
     for depth_km in [model_bottom_km + 1.0, model_bottom_km * 2.0, 500.0] {
         let green = hb_high::ray::green_function(
             &mut state,
-            &vmod.iter().copied().map(hb_high::state::Layer::from).collect(),
+            &vmod
+                .iter()
+                .copied()
+                .map(hb_high::state::Layer::from)
+                .collect(),
             depth_km,
             60.0,
             1,

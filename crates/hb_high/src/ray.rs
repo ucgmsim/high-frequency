@@ -35,11 +35,7 @@ pub fn vertical_slowness(ray_parameter: Complex64, velocity_km_s: f64) -> Comple
     // Near the real axis the phase is forced to 0 or pi rather than taken from
     // atan2, which would be ill-conditioned there.
     let phi = if pi.abs() < t1 {
-        if a < 0.0 {
-            std::f64::consts::PI
-        } else {
-            0.0
-        }
+        if a < 0.0 { std::f64::consts::PI } else { 0.0 }
     } else {
         b.atan2(a)
     };
@@ -85,12 +81,7 @@ pub fn build_ray_path(
     state.coefficients.reset_for(n);
 
     // Count how many times each layer is traversed, by wave mode.
-    for (&layer, &mode) in state
-        .rays
-        .layer_indices
-        .iter()
-        .zip(&state.rays.wave_modes)
-    {
+    for (&layer, &mode) in state.rays.layer_indices.iter().zip(&state.rays.wave_modes) {
         if mode == WaveMode::P {
             state.travel.p_traversals[layer] += 1.0;
         }
@@ -139,9 +130,7 @@ pub fn build_ray_path(
                 };
             state.coefficients.directions[i + 1] = match state.coefficients.interactions[i] {
                 Interaction::Reflection => state.coefficients.directions[i].flipped(),
-                Interaction::Transmission | Interaction::Direct => {
-                    state.coefficients.directions[i]
-                }
+                Interaction::Transmission | Interaction::Direct => state.coefficients.directions[i],
             };
         }
     }
@@ -381,18 +370,19 @@ pub fn stationary_ray_parameter(
     range_km: f64,
 ) -> (f64, f64) {
     // Closest branch cut, i.e. the highest velocity the ray samples.
-    let v = traversed_layers(state, vmod).fold(0.0f64, |fastest, TraversedLayer { layer, p, s }| {
-        let fastest = if p > 0.0 {
-            fastest.max(layer.vp_km_s)
-        } else {
-            fastest
-        };
-        if s > 0.0 {
-            fastest.max(layer.vsh_km_s)
-        } else {
-            fastest
-        }
-    });
+    let v =
+        traversed_layers(state, vmod).fold(0.0f64, |fastest, TraversedLayer { layer, p, s }| {
+            let fastest = if p > 0.0 {
+                fastest.max(layer.vp_km_s)
+            } else {
+                fastest
+            };
+            if s > 0.0 {
+                fastest.max(layer.vsh_km_s)
+            } else {
+                fastest
+            }
+        });
 
     let ptest = 1.0 / v;
     let mut p = Complex64::from(ptest - 10.0 * BRANCH_CUT_CLEARANCE);
@@ -532,7 +522,6 @@ impl<'a> RayPath<'a> {
         let kbot = self.descend_to_moho(vmod, receiver, bottom_layer);
         self.ascend_to(kbot, receiver);
     }
-
 }
 
 /// How far a source is nudged clear of a layer interface, km.

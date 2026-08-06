@@ -10,10 +10,10 @@
 //! *amplitude* spectrum from seismology and pair it with a *random phase* spectrum. See
 //! `PHYSICS.md` §1 and §6; `papers/README.md` records the equation-by-equation verification.
 
-use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
-use crate::rng::{fill_normal_deviates, Draws};
-use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
+use crate::fft::{forward, inverse, remove_quadratic_trend};
+use crate::rng::{Draws, fill_normal_deviates};
+use ndarray::{Array1, ArrayView1, ArrayViewMut1, Axis, azip, s};
 use std::f32::consts::{PI, TAU};
 
 /// The three factors of Boore (1983) eq. 2's constant

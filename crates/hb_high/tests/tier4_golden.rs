@@ -12,7 +12,7 @@ use hb_high::fft::Complex32;
 use hb_high::ray::green_function;
 use hb_high::rng::Pcg32;
 use hb_high::state::{RayState, VelocityModel};
-use hb_high::stoc::{stochastic_spectrum, RayPath, SourceModel, SpectrumPlan};
+use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, stochastic_spectrum};
 
 mod common;
 use common::*;
@@ -37,8 +37,7 @@ fn stoc_f_matches_fortran() {
         }
 
         let dfr: Vec<f32> = (0..nf).map(|_| r.f32()).collect();
-        let want: Vec<Complex32> =
-            (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
+        let want: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let mut rng = Pcg32::seed(seed);
@@ -84,7 +83,9 @@ fn stoc_f_matches_fortran() {
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
         // Scale from the Fortran record, so the tolerance does not float with our
         // own output.
-        let scale = want.iter().fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
+        let scale = want
+            .iter()
+            .fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));
         for i in 0..np2 {
             let at = i + 1;
             near32(&format!("{tag} cw[{at}].re"), cw[i].re, want[i].re, scale);
@@ -93,16 +94,21 @@ fn stoc_f_matches_fortran() {
         // Generator position: stochastic_spectrum consumes np2 deviates via
         // normal_deviates, and the shared stream must stay in step.
         for (k, w) in want_after.iter().enumerate() {
-            eq32(&format!("{tag} post-call draw {k} (generator position)"),
-                 rng.next_f32(), *w);
+            eq32(
+                &format!("{tag} post-call draw {k} (generator position)"),
+                rng.next_f32(),
+                *w,
+            );
         }
         cases += 1;
     }
     r.assert_exhausted();
     assert_eq!(cases, 4);
-    assert!(saw_negative_kappa,
-            "no case had akapp <= 0, so the alternative high-cut branch \
-             ((1+omg/omgm)**(-1.0) rather than exp(-pi*f*kappa)) is untested");
+    assert!(
+        saw_negative_kappa,
+        "no case had akapp <= 0, so the alternative high-cut branch \
+             ((1+omg/omgm)**(-1.0) rather than exp(-pi*f*kappa)) is untested"
+    );
 }
 
 #[test]
@@ -123,10 +129,18 @@ fn gf_amp_tt_matches_fortran() {
         let range = r.f32();
 
         let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); j0];
-        for layer in vmod.iter_mut() { layer.thickness_km = r.f64(); }
-        for layer in vmod.iter_mut() { layer.vp_km_s = r.f64(); }
-        for layer in vmod.iter_mut() { layer.vsh_km_s = r.f64(); }
-        for layer in vmod.iter_mut() { layer.attenuation_s = r.f32(); }
+        for layer in vmod.iter_mut() {
+            layer.thickness_km = r.f64();
+        }
+        for layer in vmod.iter_mut() {
+            layer.vp_km_s = r.f64();
+        }
+        for layer in vmod.iter_mut() {
+            layer.vsh_km_s = r.f64();
+        }
+        for layer in vmod.iter_mut() {
+            layer.attenuation_s = r.f32();
+        }
 
         let want_nd = r.usize();
         let want_nh: Vec<i32> = (0..want_nd).map(|_| r.i32()).collect();
@@ -136,19 +150,40 @@ fn gf_amp_tt_matches_fortran() {
         let (w_rp0, w_stime, w_rpath, w_qbar) = (r.f32(), r.f32(), r.f32(), r.f32());
 
         let mut st = RayState::default();
-        let g = green_function(&mut st, &vmod, src_depth, range, itype, WaveMode::from_fortran(md));
+        let g = green_function(
+            &mut st,
+            &vmod,
+            src_depth,
+            range,
+            itype,
+            WaveMode::from_fortran(md),
+        );
 
-        let tag = format!("green_function case {cases} (itype={itype} md={md} \
-                           depth={src_depth} range={range})");
+        let tag = format!(
+            "green_function case {cases} (itype={itype} md={md} \
+                           depth={src_depth} range={range})"
+        );
         // The ray description itself, before the derived quantities: a wrong
         // segment list would otherwise only show up as a wrong travel time.
         assert_eq!(st.rays.segment_count(), want_nd, "{tag} nd");
         for k in 0..want_nd {
             // 0-based layer index against the golden's 1-based layer number.
-            assert_eq!(st.rays.layer_indices[k] as i32 + 1, want_nh[k], "{tag} nh[{k}]");
-            assert_eq!(st.rays.wave_modes[k].as_fortran(), want_nm[k], "{tag} nm[{k}]");
+            assert_eq!(
+                st.rays.layer_indices[k] as i32 + 1,
+                want_nh[k],
+                "{tag} nh[{k}]"
+            );
+            assert_eq!(
+                st.rays.wave_modes[k].as_fortran(),
+                want_nm[k],
+                "{tag} nm[{k}]"
+            );
         }
-        assert_eq!(st.travel.deepest_layer as i32 + 1, want_ndeep, "{tag} ndeep");
+        assert_eq!(
+            st.travel.deepest_layer as i32 + 1,
+            want_ndeep,
+            "{tag} ndeep"
+        );
         assert_eq!(st.love, want_love, "{tag} love");
 
         eq32(&format!("{tag} rp0"), g.rp0, w_rp0);
@@ -161,9 +196,13 @@ fn gf_amp_tt_matches_fortran() {
     assert_eq!(cases, 48);
     // Production only ever passes itype=1 and md=4; the corpus deliberately
     // covers the down-going and Moho-multiple topologies too.
-    assert!(itypes.contains(&1) && itypes.contains(&2),
-            "need both upgoing and down-going ray types, saw {itypes:?}");
-    assert!(itypes.iter().any(|&t| t > 2),
-            "no itype > 2, so the Moho-multiple loops are untested; saw {itypes:?}");
+    assert!(
+        itypes.contains(&1) && itypes.contains(&2),
+        "need both upgoing and down-going ray types, saw {itypes:?}"
+    );
+    assert!(
+        itypes.iter().any(|&t| t > 2),
+        "no itype > 2, so the Moho-multiple loops are untested; saw {itypes:?}"
+    );
     assert!(mds.len() >= 2, "only one wave mode exercised: {mds:?}");
 }

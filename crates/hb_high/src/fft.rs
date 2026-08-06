@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ndarray::{azip, ArrayViewMut1};
+use ndarray::{ArrayViewMut1, azip};
 use rustfft::{Fft, FftDirection, FftPlanner};
 
 pub use rustfft::num_complex::Complex;

@@ -5,11 +5,11 @@ use hb_high::config::{
     SiteParameters, SourceParameters,
 };
 use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
-use hb_high::sim::simulate;
+use hb_high::sim::Simulator;
 use hb_high::state::{InputLayer, VelocityModelInput};
-use numpy::ndarray::Array3;
+use numpy::ndarray::{s, Array3};
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Components per station: 090, 000, vertical.
@@ -293,50 +293,47 @@ fn _simulate_stations<'py>(
     };
 
     let station_count = latitude.len();
+    if station_count == 0 {
+        return Err(PyValueError::new_err(
+            "no stations given, so there is nothing to simulate",
+        ));
+    }
+
+    // Built ONCE for the whole batch. Everything station-independent -- the air layer, the
+    // slip-model normalisation, the moment scaling, the per-segment angles -- happens here
+    // rather than per station.
+    let simulator = Simulator::new(&config, &slip_model.inner, &velocity_model.input)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
     let waveform: Array3<f32> = py.detach(|| {
         // One station first, to learn n_time before allocating the batch. Every station
-        // shares the deck's duration and dt, so ndata is the same for all of them.
+        // shares the duration and dt, so ndata is the same for all of them.
         let mut waveform: Option<Array3<f32>> = None;
 
         for (index, ((&stlat, &stlon), &seed)) in
             latitude.iter().zip(longitude).zip(seeds).enumerate()
         {
-            let station = Station {
-                latitude: stlat,
-                longitude: stlon,
-                name: format!("station-{index}"),
-            };
-            let sim = simulate(
-                &config,
-                &slip_model.inner,
-                &velocity_model.input,
-                station,
+            let sim = simulator.run(
+                Station {
+                    latitude: stlat,
+                    longitude: stlon,
+                    name: format!("station-{index}"),
+                },
                 seed,
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("station {index}: {e}")))?;
+            );
 
             let out = waveform
                 .get_or_insert_with(|| Array3::zeros((COMPONENT_COUNT, station_count, sim.ndata)));
-            if sim.ndata * COMPONENT_COUNT != sim.acc.len() {
-                return Err(PyRuntimeError::new_err(format!(
-                    "station {index} returned {} samples for {} x {} expected",
-                    sim.acc.len(),
-                    COMPONENT_COUNT,
-                    sim.ndata
-                )));
-            }
-            // `acc` is interleaved component-fastest; this is the de-interleave.
-            for (sample, chunk) in sim.acc.chunks_exact(COMPONENT_COUNT).enumerate() {
-                for (component, &value) in chunk.iter().enumerate() {
-                    out[[component, index, sample]] = value;
-                }
+            // `sim.acc` is already (n_components, n_time); this is a row copy per component
+            // into the batch's station slot, where it used to be a de-interleave.
+            for (component, trace) in sim.acc.rows().into_iter().enumerate() {
+                out.slice_mut(s![component, index, ..]).assign(&trace);
             }
         }
 
-        waveform.ok_or_else(|| -> PyErr {
-            PyValueError::new_err("no stations given, so there is nothing to simulate")
-        })
-    })?;
+        waveform.expect("the batch is non-empty, checked above")
+    });
+
     Ok(waveform.into_pyarray(py))
 }
 

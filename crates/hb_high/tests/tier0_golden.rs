@@ -33,8 +33,8 @@
 
 use hb_high::fft::remove_quadratic_trend;
 use hb_high::fft::{Complex32, Complex64};
-use hb_high::geom::{distance_azimuth, GeoPoint};
-use hb_high::radiation::{radiation_pattern, RadiationAngles};
+use hb_high::geom::{GeoPoint, distance_azimuth};
+use hb_high::radiation::{RadiationAngles, radiation_pattern};
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
 use ndarray::ArrayView1;
@@ -50,7 +50,11 @@ fn rdatn_matches_fortran() {
         let (str_, dip, rak, az, th) = (r.f32(), r.f32(), r.f32(), r.f32(), r.f32());
         let (w_sh, w_sv) = (r.f32(), r.f32());
         let coefficients = radiation_pattern(RadiationAngles {
-            strike_rad: str_, dip_rad: dip, rake_rad: rak, azimuth_rad: az, takeoff_rad: th,
+            strike_rad: str_,
+            dip_rad: dip,
+            rake_rad: rak,
+            azimuth_rad: az,
+            takeoff_rad: th,
         });
         let (sh, sv) = (coefficients.sh, coefficients.sv);
         eq32(&format!("radiation_pattern case {n} rdsh"), sh, w_sh);
@@ -98,15 +102,28 @@ fn distance_azimuth_stays_close_to_fortran() {
     while !r.done() {
         let (thei, alei, thsi, alsi) = (r.f32(), r.f32(), r.f32(), r.f32());
         let iflag = r.i32();
-        let [_delt, _deltdg, want_km, _azes, want_azdg, _azse, _azsedg] =
-            [r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32(), r.f32()];
+        let [_delt, _deltdg, want_km, _azes, want_azdg, _azse, _azsedg] = [
+            r.f32(),
+            r.f32(),
+            r.f32(),
+            r.f32(),
+            r.f32(),
+            r.f32(),
+            r.f32(),
+        ];
         // The geocentric-radians branch was dead and is gone; assert the oracle data never
         // exercised it rather than trusting the old comment that said so.
         assert!(iflag <= 0, "case {n} used the dead coord_mode > 0 path");
 
         let g = distance_azimuth(
-            GeoPoint { lat_deg: thei, lon_deg: alei },
-            GeoPoint { lat_deg: thsi, lon_deg: alsi },
+            GeoPoint {
+                lat_deg: thei,
+                lon_deg: alei,
+            },
+            GeoPoint {
+                lat_deg: thsi,
+                lon_deg: alsi,
+            },
         );
 
         // At zero separation the azimuth is arbitrary in both formulations.
@@ -255,13 +272,22 @@ fn flzero_matches_fortran() {
         for i in 0..n {
             eq32(
                 &format!("remove_quadratic_trend n={n} dt={dt} a[{}]", i + 1),
-                a[i], want[i],
+                a[i],
+                want[i],
             );
         }
         // The correction loop starts at Fortran I=3, so the first two samples must come
         // back untouched. Pinned explicitly because it is easy to "fix".
-        eq32(&format!("remove_quadratic_trend n={n} a[1] must be untouched"), a[0], a_in[0]);
-        eq32(&format!("remove_quadratic_trend n={n} a[2] must be untouched"), a[1], a_in[1]);
+        eq32(
+            &format!("remove_quadratic_trend n={n} a[1] must be untouched"),
+            a[0],
+            a_in[0],
+        );
+        eq32(
+            &format!("remove_quadratic_trend n={n} a[2] must be untouched"),
+            a[1],
+            a_in[1],
+        );
         cases += 1;
     }
     r.assert_exhausted();
@@ -280,10 +306,8 @@ fn siteamp_matches_fortran() {
         let dfr: Vec<f32> = (0..=np).map(|_| r.f32()).collect();
         let fn_: Vec<f32> = (0..nn).map(|_| r.f32()).collect();
         let an: Vec<f32> = (0..nn).map(|_| r.f32()).collect();
-        let mut cw: Vec<Complex32> =
-            (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
-        let want: Vec<Complex32> =
-            (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
+        let mut cw: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
+        let want: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
         // The routine now takes LOG frequencies, precomputed per segment by
         // `SpectrumPlan`. `ln` is deterministic, so hoisting it out of the inner loop is
@@ -314,11 +338,13 @@ fn siteamp_matches_fortran() {
             }
             eq32(
                 &format!("apply_site_amplification np2={np2} [{}].re", i + 1),
-                cw[i].re, want[i].re,
+                cw[i].re,
+                want[i].re,
             );
             eq32(
                 &format!("apply_site_amplification np2={np2} [{}].im", i + 1),
-                cw[i].im, want[i].im,
+                cw[i].im,
+                want[i].im,
             );
         }
 

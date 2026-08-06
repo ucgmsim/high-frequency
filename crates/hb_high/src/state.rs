@@ -6,7 +6,6 @@
 //! Layouts are positionally identical across every declaration, so only the
 //! naming needed resolving.
 
-
 /// One layer of the working velocity model, `common /vmod/`.
 ///
 /// The mixed precision is not negotiable and not tidyable: the first five are `real*8`
@@ -294,7 +293,8 @@ impl Coefficients {
     /// Resize both tables to one entry per ray segment and reset them.
     pub fn reset_for(&mut self, segment_count: usize) {
         self.interactions.clear();
-        self.interactions.resize(segment_count, Interaction::default());
+        self.interactions
+            .resize(segment_count, Interaction::default());
         self.directions.clear();
         self.directions.resize(segment_count, Direction::default());
     }

@@ -38,23 +38,19 @@ use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
-use hb_high::sim::simulate;
+use hb_high::input::{Segment, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::sim::Simulator;
+use ndarray::Array2;
 use hb_high::state::VelocityModelInput;
 
 const GOLDEN: &str = "../../harness/golden/snapshot.txt";
 const COMPONENT_COUNT: usize = 3;
 
 /// Seven numbers per component that summarise one record without storing it.
-fn summarise(acc: &[f32], ndata: usize) -> String {
+fn summarise(acc: &Array2<f32>, ndata: usize) -> String {
     let mut fields = Vec::new();
     for component in 0..COMPONENT_COUNT {
-        let samples: Vec<f32> = acc
-            .iter()
-            .skip(component)
-            .step_by(COMPONENT_COUNT)
-            .copied()
-            .collect();
+        let samples: Vec<f32> = acc.row(component).to_vec();
         assert_eq!(samples.len(), ndata);
 
         let (argmax, peak) =
@@ -191,14 +187,9 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
                 latitude: origin.fault_lat_deg + 0.3,
                 name: "TEST".to_string(),
             };
-            let sim = simulate(
-                &production_config(duration),
-                &slip,
-                &vmod,
-                station,
-                seed,
-            )
-            .expect("simulation succeeds");
+            let sim = Simulator::new(&production_config(duration), &slip, &vmod)
+                .expect("the fixture slip model is consistent")
+                .run(station, seed);
 
             // Silence compares equal to silence, so a snapshot of an all-zero record is a
             // gate that cannot fail. This has caught a too-short record twice already.

@@ -17,14 +17,14 @@
 //! snapshot test builds its own: a benchmark wants *fixed* inputs of a known size, and
 //! `subfault_count` is what runtime scales with.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
     SiteParameters, SourceParameters,
 };
-use hb_high::input::{build_velocity_model, Segment, Station, StochModel, Subfault};
+use hb_high::input::{Segment, Station, StochModel, Subfault, build_velocity_model};
 use hb_high::state::{InputLayer, VelocityModelInput};
 
 /// Grid shapes spanning three orders of magnitude in subfault count. The alpine-scale case is
@@ -137,8 +137,9 @@ fn bench_whole(c: &mut Criterion) {
             |b, slip| {
                 b.iter(|| {
                     black_box(
-                        hb_high::sim::simulate(&config, slip, &vmod, station.clone(), 12345)
-                            .expect("simulation succeeds"),
+                        hb_high::sim::Simulator::new(&config, slip, &vmod)
+                            .expect("the fixture slip model is consistent")
+                            .run(station.clone(), 12345),
                     )
                 })
             },
