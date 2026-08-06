@@ -727,19 +727,18 @@ fn subfault_pass(
                 ));
             }
 
-            if config.site.apply_quarter_wavelength_site_amplification {
-                site_amplification_factors(vmod, ksrc, siteamp_log_freq, &mut siteamp_factors);
-                for spec in &mut spectrum {
-                    apply_site_amplification(
-                        spec.as_slice_mut().expect("an owned Array1 is contiguous"),
-                        &plan.log_frequency_hz,
-                        run.site_table_len,
-                        siteamp_log_freq,
-                        &siteamp_factors,
-                    );
-                }
+            // Unconditional. There is no run for which the quarter-wavelength site
+            // amplification should be off, so it is not a choice a caller gets to make.
+            site_amplification_factors(vmod, ksrc, siteamp_log_freq, &mut siteamp_factors);
+            for spec in &mut spectrum {
+                apply_site_amplification(
+                    spec.as_slice_mut().expect("an owned Array1 is contiguous"),
+                    &plan.log_frequency_hz,
+                    run.site_table_len,
+                    siteamp_log_freq,
+                    &siteamp_factors,
+                );
             }
-            // famprand is dead: fasig1 = fasig2 = 0.
 
             // Incidence angle from the ray parameter: sin(i)/vs = p0.
             let p0 = g.rp0;

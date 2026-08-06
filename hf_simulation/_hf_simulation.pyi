@@ -76,7 +76,6 @@ def _simulate_stations(
     kappa_s: float,
     q_frequency_exponent: float,
     rayset: list[int],
-    site_amplification: bool,
     rupture_velocity_fraction: float,
     rupture_velocity_shallow: float,
     rupture_velocity_deep: float,

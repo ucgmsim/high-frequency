@@ -241,10 +241,12 @@ pub struct PathParameters {
 }
 
 /// The near-surface: what happens in the last few hundred metres.
+///
+/// Quarter-wavelength site amplification ([`crate::site`]) is **not** a field here. It used
+/// to be a `bool`, and there is no run for which it should be off, so it is applied
+/// unconditionally rather than offered as a choice that only has one right answer.
 #[derive(Clone, Debug)]
 pub struct SiteParameters {
-    /// Whether to apply quarter-wavelength site amplification ([`crate::site`]).
-    pub apply_quarter_wavelength_site_amplification: bool,
     /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
     pub kappa_s: f32,
     /// `f_max` — the high-cut corner, Hz. See `PHYSICS.md` §3 on the `f_max`-versus-`κ`

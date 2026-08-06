@@ -158,7 +158,6 @@ fn production_config(duration: f32) -> HfConfig {
             path_duration: PathDurationModel::Gp2010,
         },
         site: SiteParameters {
-            apply_quarter_wavelength_site_amplification: true,
             kappa_s: 0.045,
             f_max_hz: 10.0,
         },

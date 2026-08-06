@@ -174,8 +174,6 @@ class HfConfig:
     """Frequency exponent of Q."""
     rayset: tuple[int, ...] = (1,)
     """Ray types to sum. 1 is the direct ray; 2 adds the Moho reflection."""
-    site_amplification: bool = True
-    """Apply the Boore-Joyner 1997 site amplification factors."""
     rupture_velocity_fraction: float = 0.8
     """Rupture velocity as a fraction of shear velocity.
 
