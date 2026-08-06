@@ -41,16 +41,16 @@ use crate::state::VelocityModel;
 pub fn site_amplification_factors(
     vmod: &VelocityModel,
     source_layer: usize,
-    log_frequency: &[f32],
-    factors: &mut [f32],
+    table_log_frequency: ArrayView1<f32>,
+    factors: ArrayViewMut1<f32>,
 ) {
     let vdsrc = (vmod[source_layer].vsh_km_s * vmod[source_layer].density_g_cm3) as f32;
 
     // One factor per frequency; `azip!` asserts the two tables are the same length rather than
     // letting `zip` silently stop at the shorter.
     azip!((
-        factor in ArrayViewMut1::from(factors),
-        &log_freq in ArrayView1::from(log_frequency),
+        factor in factors,
+        &log_freq in table_log_frequency,
     ) {
         // A quarter period of travel time is the target depth criterion.
         let stt = 0.25 / log_freq.exp();
@@ -102,19 +102,20 @@ pub fn apply_site_amplification(
     spectrum: &mut [Complex32],
     // `ln(frequency_hz[i])`, precomputed per segment. Index 0 is never read: `ln(0)` has no
     // meaning as a frequency.
-    log_frequency_hz: &[f32],
-    table_count: usize,
-    log_frequency: &[f32],
-    factors: &[f32],
+    log_frequency_hz: ArrayView1<f32>,
+    table_log_frequency: ArrayView1<f32>,
+    factors: ArrayView1<f32>,
 ) {
     let np2 = spectrum.len();
     let np = np2 / 2;
+    // The table's own length, rather than a count passed alongside it that could disagree.
+    let table_count = factors.len();
 
     // `kn` is the table cursor, and the clamp past the end reads `factors[table_count - 1]`.
     let mut kn = 0usize;
     let mut fm = 0.0f32;
     let mut am = factors[kn];
-    let mut fp = log_frequency[kn];
+    let mut fp = table_log_frequency[kn];
     let mut ap = factors[kn];
 
     // DC. The factors are LOG amplitudes, so this exponentiates like every interior bin does.
@@ -137,7 +138,7 @@ pub fn apply_site_amplification(
                     fp = 1.0e+15;
                     ap = factors[table_count - 1];
                 } else {
-                    fp = log_frequency[kn];
+                    fp = table_log_frequency[kn];
                     ap = factors[kn];
                 }
                 if !(freq > fp && kn < table_count) {

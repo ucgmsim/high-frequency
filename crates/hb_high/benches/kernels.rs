@@ -32,6 +32,7 @@ use hb_high::site::{site_amplification_factors, apply_site_amplification};
 use hb_high::state::{Layer, RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
 use hb_high::state::WaveMode;
+use ndarray::{ArrayView1, ArrayViewMut1};
 
 /// Transform lengths the program actually produces. `np2` is built by doubling
 /// from 2 until it exceeds `2*tmax/dt`, so it is always a power of two; 65536 is
@@ -238,8 +239,8 @@ fn bench_radiation(c: &mut Criterion) {
         let (mut g, _) = Pcg32::seed(7);
         b.iter(|| {
             horizontal_radiation_spectrum(
-                &mut g, &ARRIVAL, &dfr[..nfold],
-                black_box(-90.0f32.to_radians()), NR, &mut rdna[..nfold],
+                &mut g, &ARRIVAL, ArrayView1::from(&dfr[..nfold]),
+                black_box(-90.0f32.to_radians()), NR, ArrayViewMut1::from(&mut rdna[..nfold]),
             )
         })
     });
@@ -251,7 +252,10 @@ fn bench_radiation(c: &mut Criterion) {
     fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
     group.bench_function(BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")), |b| {
         b.iter(|| {
-            vertical_radiation_spectrum(&ARRIVAL, &dfr[..nfold], rna.as_slice(), rnb.as_slice(), NR, &mut rdna[..nfold])
+            vertical_radiation_spectrum(
+                &ARRIVAL, ArrayView1::from(&dfr[..nfold]), rna.as_slice(), rnb.as_slice(), NR,
+                ArrayViewMut1::from(&mut rdna[..nfold]),
+            )
         })
     });
 
@@ -346,10 +350,10 @@ fn bench_spectrum(c: &mut Criterion) {
             let plan = SpectrumPlan {
                 np2,
                 fold_count: nf,
-                log_frequency_hz: log_dfr.clone(),
-                path_exponent: path_exp.clone(),
-                envelope_power: env_pow.clone(),
-                frequency_hz: dfr.clone(),
+                log_frequency_hz: log_dfr.clone().into(),
+                path_exponent: path_exp.clone().into(),
+                envelope_power: env_pow.clone().into(),
+                frequency_hz: dfr.clone().into(),
             };
             let model = SourceModel {
                 dt: DT,
@@ -387,7 +391,12 @@ fn bench_spectrum(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("apply_site_amplification", np2), &np2, |b, &_np2| {
             b.iter_batched_ref(
                 || src.clone(),
-                |cw| apply_site_amplification(cw.as_mut_slice(), log_dfr.as_slice(), 20, fn_.as_slice(), an.as_slice()),
+                |cw| apply_site_amplification(
+                    cw.as_mut_slice(),
+                    ArrayView1::from(log_dfr.as_slice()),
+                    ArrayView1::from(&fn_[..20]),
+                    ArrayView1::from(&an[..20]),
+                ),
                 criterion::BatchSize::SmallInput,
             )
         });
@@ -409,7 +418,12 @@ fn bench_spectrum(c: &mut Criterion) {
     let (fn_, mut an) = site_table();
     group.throughput(Throughput::Elements(1));
     group.bench_function("site_amplification_factors", |b| {
-        b.iter(|| site_amplification_factors(&v, black_box(20), &fn_[..20], &mut an[..20]))
+        b.iter(|| site_amplification_factors(
+            &v,
+            black_box(20),
+            ArrayView1::from(&fn_[..20]),
+            ArrayViewMut1::from(&mut an[..20]),
+        ))
     });
 
     group.finish();

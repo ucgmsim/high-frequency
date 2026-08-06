@@ -93,6 +93,17 @@ pub struct SubfaultGeometry {
 impl SubfaultGeometry {
     /// Subfault `along_strike` (`1..=along_strike_count`) at depth row `down_dip`
     /// (`1..=down_dip_count`).
+    ///
+    /// # The bounds check is not redundant with the slice's
+    ///
+    /// It looks like one — the indexing below is checked, so why assert first? Because the
+    /// two indices are folded into one offset, and an out-of-range `along_strike` **lands
+    /// inside the buffer** on the wrong row rather than off the end of it. On a 4×3 grid,
+    /// `at(5, 1)` computes offset 4, which is a perfectly valid index and returns subfault
+    /// `(1, 2)`. The slice check cannot see the mistake; it sees a number in range.
+    ///
+    /// So this converts a silently wrong subfault into a panic that names the grid. See
+    /// `geometry_rejects_an_index_that_would_land_on_the_wrong_row`, which is the case.
     #[inline]
     pub fn at(&self, along_strike: usize, down_dip: usize) -> SubfaultRay {
         assert!(
@@ -226,5 +237,55 @@ pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeome
         along_strike_count,
         down_dip_count,
         rays,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grid(along_strike_count: usize, down_dip_count: usize) -> SubfaultGeometry {
+        subfault_geometry(
+            &FaultPlane {
+                origin: GeoPoint {
+                    lat_deg: -43.0,
+                    lon_deg: 173.0,
+                },
+                strike_deg: 220.0,
+                dip_deg: 70.0,
+                top_depth_km: 0.0,
+                along_strike_offset_km: 0.0,
+                subfault_length_km: 1.5,
+                subfault_width_km: 1.5,
+                along_strike_count,
+                down_dip_count,
+            },
+            GeoPoint {
+                lat_deg: -43.4,
+                lon_deg: 172.6,
+            },
+        )
+    }
+
+    /// The case that makes [`SubfaultGeometry::at`]'s assert load-bearing rather than
+    /// redundant with the slice bounds check.
+    ///
+    /// On a 4x3 grid, `at(5, 1)` folds to flat offset 4 — in bounds, and the ray for subfault
+    /// (1, 2). Without the assert this returns the wrong subfault and nothing notices.
+    #[test]
+    #[should_panic(expected = "outside the 4x3 grid")]
+    fn geometry_rejects_an_index_that_would_land_on_the_wrong_row() {
+        let geometry = grid(4, 3);
+        // Proof the offset really is in range: this is the ray the caller would have got.
+        let _neighbour = geometry.at(1, 2);
+        let _ = geometry.at(5, 1);
+    }
+
+    /// Zero is out of range at the other end, and would underflow the `- 1` rather than
+    /// overflow the buffer.
+    #[test]
+    #[should_panic(expected = "outside the 4x3 grid")]
+    fn geometry_rejects_a_zero_index() {
+        let _ = grid(4, 3).at(0, 1);
     }
 }

@@ -14,27 +14,31 @@ use crate::fft::{forward, inverse, remove_quadratic_trend};
 use crate::fft::{Complex32, Complex64};
 use crate::rng::{fill_normal_deviates, Draws};
 use ndarray::{azip, s, Array1, ArrayView1, ArrayViewMut1, Axis};
+use std::f32::consts::{PI, TAU};
 
-/// `Gamma(x)`.
+/// The three factors of Boore (1983) eq. 2's constant
+/// `C = R_θφ · FS · PRTITN / (4πρβ³)`.
 ///
-/// Its one purpose in this crate is the `Γ(2b+1)` in Boore (1983) eq. 11, which normalises the
-/// Saragoni–Hart envelope to unit squared area. That is the whole reason a gamma function
-/// appears in a ground-motion simulator.
+/// **Two of them exist only to be cancelled.** [`stochastic_spectrum`] multiplies them in and
+/// [`radiate_and_invert`] divides them straight back out, which leaves the conically averaged
+/// pattern from [`crate::radiation`] standing where Boore's scalar average would have been —
+/// and that is `RP_ij` in Graves & Pitarka (2010) eq. 11. They are shared constants rather
+/// than four literals in two functions precisely so that "change one and you must change its
+/// partner" is not something a reader has to be told. See `PHYSICS.md` §5.
 ///
-/// A named function rather than an inlined `libm::tgamma` because `tests/properties.rs` pins
-/// its recurrence, positivity and agreement with factorials — tests that mean "the gamma this
-/// crate uses", and would become tests of a dependency if the name went away.
-///
-/// # Behaviour at poles
-///
-/// Returns infinity or NaN, which is loud. The routine that calls it never checks, so a
-/// silently finite sentinel would propagate a plausible-looking wrong number into the
-/// spectrum. Unreachable from a real deck in any case: the argument is a constant of the
-/// window shape.
-#[inline]
-pub fn gamma(x: f64) -> f64 {
-    libm::tgamma(x)
-}
+/// `R_θφ` — the shear-wave radiation pattern averaged over the focal sphere. Cancelled.
+pub const AVERAGE_RADIATION_PATTERN: f32 = 0.63;
+
+/// `PRTITN` — the partition of energy between the two horizontal components. Nominally
+/// `1/√2`, written to two digits, and cancelled along with [`AVERAGE_RADIATION_PATTERN`].
+pub const HORIZONTAL_PARTITION: f32 = 0.71;
+
+/// `FS` — free-surface amplification. A shear wave arriving at a free surface doubles. Not
+/// cancelled: this one is real.
+const FREE_SURFACE_AMPLIFICATION: f32 = 2.0;
+
+/// Boore (1983) eq. 2 is CGS throughout, so distances and velocities convert on the way in.
+const CM_PER_KM: f32 = 100_000.0;
 
 /// Transform length, frequency axis, and the transcendentals that depend only on them.
 ///
@@ -47,19 +51,19 @@ pub struct SpectrumPlan {
     pub np2: usize,
     /// Positive-frequency bin count, `np2/2 + 1`, and the length of every table below.
     pub fold_count: usize,
-    pub frequency_hz: Vec<f32>,
+    pub frequency_hz: Array1<f32>,
 
     /// `ln(frequency_hz[i])`, for the site-amplification interpolation. Index 0 is `-inf` and
     /// is never read — `ln(0)` has no meaning as a frequency.
-    pub log_frequency_hz: Vec<f32>,
+    pub log_frequency_hz: Array1<f32>,
     /// `frequency_hz[i]^(1 - q_exponent)` — the frequency dependence of path attenuation,
     /// which arises because `Q(f) = Q₀·f^x`. See `PHYSICS.md` §3.
-    pub path_exponent: Vec<f32>,
+    pub path_exponent: Array1<f32>,
     /// `(i·dt)^b` — the power-law factor of the Saragoni–Hart envelope, Boore (1983) eq. 7.
     ///
     /// `b` comes from the window shape, fixed for the whole run, so this is `np2` values that
     /// were otherwise recomputed for every subfault, ray and component.
-    pub envelope_power: Vec<f32>,
+    pub envelope_power: Array1<f32>,
 }
 
 impl SpectrumPlan {
@@ -68,26 +72,23 @@ impl SpectrumPlan {
     /// The factor of two is Boore (1983, p. 1869): the record is made about twice the duration
     /// of strong shaking, so that the windowed transient fits inside it with room to decay.
     pub fn new(tmax_s: f32, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+        // At least 2 bins, so a degenerate `tmax_s` still gives a transform the rest of the
+        // module can index. `next_power_of_two` is exact where the doubling loop was a search:
+        // both give the smallest power of two at or above `ntmax`.
         let ntmax = (2.0 * tmax_s / dt).trunc() as usize;
-        let mut np2 = 2usize;
-        while np2 < ntmax {
-            np2 *= 2;
-        }
+        let np2 = ntmax.next_power_of_two().max(2);
         let fold_count = np2 / 2 + 1;
 
         let df = 1.0 / (np2 as f32 * dt);
-        let frequency_hz: Vec<f32> = (0..fold_count).map(|bin| df * bin as f32).collect();
+        let frequency_hz = Array1::from_iter((0..fold_count).map(|bin| df * bin as f32));
 
-        let log_frequency_hz: Vec<f32> = frequency_hz.iter().map(|f| f.ln()).collect();
-        let path_exponent: Vec<f32> = frequency_hz
-            .iter()
-            .map(|f| f.powf(1.0 - q_exponent))
-            .collect();
+        let log_frequency_hz = frequency_hz.mapv(f32::ln);
+        let path_exponent = frequency_hz.mapv(|f| f.powf(1.0 - q_exponent));
 
         // Boore (1983) eq. 8, the envelope shape parameter, from the window shape alone.
         // Duplicated in `stochastic_spectrum`, which needs `b` again to form `c`.
         let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
-        let envelope_power: Vec<f32> = (0..np2).map(|i| (i as f32 * dt).powf(b)).collect();
+        let envelope_power = Array1::from_iter((0..np2).map(|i| (i as f32 * dt).powf(b)));
 
         SpectrumPlan {
             np2,
@@ -217,27 +218,8 @@ pub fn stochastic_spectrum(
     } = plan;
     let (np2, fold_count) = (*np2, *fold_count);
 
-    let pai = std::f32::consts::PI;
-
-    // `rp`, `fs` and `prtitn` are the three factors of Boore (1983) eq. 2,
-    // `C = R_θφ · FS · PRTITN / (4πρβ³)`: average radiation pattern, free-surface
-    // amplification, and the partition of energy between two horizontal components
-    // (nominally 1/√2, written as two digits). They combine into `cc` below.
-    //
-    // `rp` AND `prtitn` ARE CANCELLED LATER, and that is their only purpose.
-    // `radiate_and_invert` divides by exactly `0.63 * 0.71` after multiplying in the
-    // conically averaged pattern from `crate::radiation`, so what survives is that pattern
-    // standing where Boore's scalar average would have been — which is `RP_ij` in Graves &
-    // Pitarka (2010) eq. 11. **Change one of these four numbers and you must change its
-    // partner.** See `PHYSICS.md` §5.
-    let rp = 0.63f32;
-
     let fc2 = corner_frequency_hz * corner_frequency_hz;
-
-    let fs = 2.0f32;
-    let prtitn = 0.71f32;
-
-    let distance_cm = distance_km * 100000.0;
+    let distance_cm = distance_km * CM_PER_KM;
 
     // The Saragoni & Hart (1974) shaping window, `w(t) = a·t^b·e^(−ct)·H(t)`, in the
     // parameterisation of Boore (1983) eq. 7–11. `b` and `c` are eq. 8 and 9; they place the
@@ -249,7 +231,7 @@ pub fn stochastic_spectrum(
     // to unit squared area. The mixed precision is deliberate: `2b+1` is formed in `f32`, the
     // division and sqrt happen in `f64`, and the result narrows back.
     let gsa = (2.0 * b + 1.0) as f64;
-    let gm = gamma(gsa);
+    let gm = libm::tgamma(gsa);
     let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
 
     // Evaluate the envelope on the sample grid `t = i·dt`.
@@ -278,10 +260,12 @@ pub fn stochastic_spectrum(
         })
         .collect();
 
-    let beta = shear_velocity_km_s * 100000.0;
-    let cc = rp * fs * prtitn / (4.0 * pai * density_g_cm3 * (beta * beta * beta));
-    let omgc = 2.0 * pai * corner_frequency_hz;
-    let omgm = 2.0 * pai * fmax_hz;
+    // Boore (1983) eq. 2's `C`, in CGS.
+    let beta = shear_velocity_km_s * CM_PER_KM;
+    let cc = AVERAGE_RADIATION_PATTERN * FREE_SURFACE_AMPLIFICATION * HORIZONTAL_PARTITION
+        / (4.0 * PI * density_g_cm3 * (beta * beta * beta));
+    let omgc = TAU * corner_frequency_hz;
+    let omgm = TAU * fmax_hz;
 
     // The spectral shape, bin by bin. DC stays zero; bins `1..fold_count` get the shape.
     //
@@ -297,14 +281,14 @@ pub fn stochastic_spectrum(
     let mut as_ = vec![0.0f64; np2];
     azip!((
         shape in ArrayViewMut1::from(&mut as_[1..fold_count]),
-        &fr in ArrayView1::from(&frequency_hz[1..fold_count]),
-        &path_fr in ArrayView1::from(&path_exponent[1..fold_count]),
+        &fr in frequency_hz.slice(s![1..fold_count]),
+        &path_fr in path_exponent.slice(s![1..fold_count]),
     ) {
         let fr2 = fr * fr;
 
         // Boore (1983) eq. 3, the ω-squared source spectrum, "following Aki (1967) and Brune
         // (1970)": `S(ω,ω_c) = ω²/(1 + (ω/ω_c)²)`. Rises as f² below the corner, flat above.
-        let omg = 2.0 * pai * fr;
+        let omg = TAU * fr;
         let a1 = (cc * subevent_moment * (omg * omg / (1.0 + (omg / omgc) * (omg / omgc)))) as f64;
 
         // Near-surface and whole-path attenuation, plus 1/R geometric spreading.
@@ -327,10 +311,10 @@ pub fn stochastic_spectrum(
         let path_attenuation = qbar * path_fr;
         let a2a3 = if kappa_s <= 0.0 {
             let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
-            let a3 = ((-pai * path_attenuation).exp() / distance_cm) as f64;
+            let a3 = ((-PI * path_attenuation).exp() / distance_cm) as f64;
             a2 * a3
         } else {
-            ((-pai * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
+            ((-PI * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
         };
 
         // Frankel's (1995) finite-fault factor, as given by Graves & Pitarka (2010) eq. 12:
@@ -420,13 +404,13 @@ pub fn stochastic_spectrum(
 /// covers the positive frequencies, so `radiation.len()` *is* `fold_count`, and the mirrored
 /// half is `radiation[1..fold_count-1]` walked backwards.
 ///
-/// # `RADIATION_NORM` and `PARTITION_FACTOR` exist to be cancelled
+/// # The division here is the cancellation
 ///
-/// They are the same `0.63` and `0.71` that [`stochastic_spectrum`] multiplied in as part of
-/// Boore (1983) eq. 2's constant `C`. Dividing by them here leaves the conically averaged
-/// pattern in their place, which is exactly what Graves & Pitarka (2010) eq. 11 asks for.
-/// **The four constants are a matched set — change one and you must change its partner.**
-/// See `PHYSICS.md` §5.
+/// [`AVERAGE_RADIATION_PATTERN`] and [`HORIZONTAL_PARTITION`] are multiplied in by
+/// [`stochastic_spectrum`] as part of Boore (1983) eq. 2's constant `C`, and divided back out
+/// here so that the conically averaged pattern stands in their place — which is what Graves &
+/// Pitarka (2010) eq. 11 asks for. They are two shared constants rather than four literals, so
+/// the pairing cannot drift.
 ///
 /// # The taper constant was a typo in the original, and is fixed here
 ///
@@ -439,9 +423,6 @@ pub fn radiate_and_invert(
     mut spectrum: Array1<Complex32>,
     radiation: ArrayView1<f32>,
 ) -> Array1<f32> {
-    const RADIATION_NORM: f32 = 0.63;
-    const PARTITION_FACTOR: f32 = 0.71;
-
     let np2 = spectrum.len();
     let fold_count = radiation.len();
     // Always `fold_count - 2`. Sliced explicitly rather than as `fold_count..` because the two
@@ -466,7 +447,7 @@ pub fn radiate_and_invert(
             .expect("an owned Array1 is contiguous"),
     );
 
-    let scale = 1.0 / (RADIATION_NORM * PARTITION_FACTOR * np2 as f32);
+    let scale = 1.0 / (AVERAGE_RADIATION_PATTERN * HORIZONTAL_PARTITION * np2 as f32);
     let mut samples = spectrum.mapv(|bin| scale * bin.re);
 
     // Raised-cosine taper over the final tenth, so the transient closes smoothly instead of
@@ -483,7 +464,7 @@ pub fn radiate_and_invert(
 
 #[cfg(test)]
 mod tests {
-    use super::gamma;
+    use libm::tgamma as gamma;
 
     /// The one gamma argument production actually evaluates, pinned so that a future change of
     /// implementation has to look at the value that matters rather than at the thousand that

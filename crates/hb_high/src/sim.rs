@@ -30,7 +30,7 @@
 use crate::config::{
     HfConfig, PathDurationModel, RayKind, RuptureVelocityTaper, RUPTURE_VELOCITY_FRACTION_MAX,
 };
-use ndarray::{s, Array1, ArrayView1, ArrayViewMut1};
+use ndarray::{s, Array1, ArrayViewMut1};
 use std::f32::consts::PI;
 
 use crate::fft::Complex32;
@@ -155,7 +155,7 @@ pub fn simulate(
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
         10.00, 20.00, 30.00, 50.00, 70.00,
     ];
-    let siteamp_log_freq: Vec<f32> = fn_hz[..nsfac].iter().map(|hz| hz.ln()).collect();
+    let siteamp_log_freq: Array1<f32> = fn_hz.iter().map(|hz| hz.ln()).collect();
 
     let czero = config.source.czero;
     let calpha = config.source.calpha;
@@ -594,7 +594,7 @@ struct RunContext<'a> {
     run: &'a RunScalars,
     config: &'a HfConfig,
     deviates: &'a Deviates,
-    siteamp_log_freq: &'a [f32],
+    siteamp_log_freq: &'a Array1<f32>,
 }
 
 /// Subfault pass — `hb_high_ref.f`'s second subfault loop.
@@ -647,8 +647,8 @@ fn subfault_pass(
     // three-pointer allocation is made once here and reused; `drain` leaves the capacity.
     let mut spectrum: Vec<Array1<Complex32>> = Vec::with_capacity(3);
     let mut subfault_acc: [Array1<f32>; 3] = std::array::from_fn(|_| Array1::zeros(np2));
-    let mut radiation = vec![0.0f32; plan.fold_count];
-    let mut siteamp_factors = vec![0.0f32; run.site_table_len];
+    let mut radiation: Array1<f32> = Array1::zeros(plan.fold_count);
+    let mut siteamp_factors: Array1<f32> = Array1::zeros(run.site_table_len);
     let mut ray = RayState::default();
 
     for (i, j) in seg.strike_major() {
@@ -729,14 +729,18 @@ fn subfault_pass(
 
             // Unconditional. There is no run for which the quarter-wavelength site
             // amplification should be off, so it is not a choice a caller gets to make.
-            site_amplification_factors(vmod, ksrc, siteamp_log_freq, &mut siteamp_factors);
+            site_amplification_factors(
+                vmod,
+                ksrc,
+                siteamp_log_freq.view(),
+                siteamp_factors.view_mut(),
+            );
             for spec in &mut spectrum {
                 apply_site_amplification(
                     spec.as_slice_mut().expect("an owned Array1 is contiguous"),
-                    &plan.log_frequency_hz,
-                    run.site_table_len,
-                    siteamp_log_freq,
-                    &siteamp_factors,
+                    plan.log_frequency_hz.view(),
+                    siteamp_log_freq.view(),
+                    siteamp_factors.view(),
                 );
             }
 
@@ -774,25 +778,25 @@ fn subfault_pass(
                     Some(offset_deg) => horizontal_radiation_spectrum(
                         rng,
                         &arrival,
-                        &plan.frequency_hz,
+                        plan.frequency_hz.view(),
                         offset_deg.to_radians(),
                         run.radv_sample_count,
-                        &mut radiation,
+                        radiation.view_mut(),
                     ),
                     None => vertical_radiation_spectrum(
                         &arrival,
-                        &plan.frequency_hz,
+                        plan.frequency_hz.view(),
                         &deviates.radv_uniform_a,
                         &deviates.radv_uniform_b,
                         run.radv_sample_count,
-                        &mut radiation,
+                        radiation.view_mut(),
                     ),
                 };
                 // The spectrum moves: out of the Vec, into `radiate_and_invert`, which
                 // consumes it because the inverse transform is in place, and the samples
                 // move on into the accumulator. No copy anywhere on this path.
                 subfault_acc[component.index()] =
-                    radiate_and_invert(spec, ArrayView1::from(&radiation[..]));
+                    radiate_and_invert(spec, radiation.view());
             }
 
             // Rupture time at this subfault, taken from the slip model. A constant-rupture-

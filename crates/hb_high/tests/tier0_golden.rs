@@ -37,6 +37,7 @@ use hb_high::geom::{distance_azimuth, GeoPoint};
 use hb_high::radiation::{radiation_pattern, RadiationAngles};
 use hb_high::ray::vertical_slowness;
 use hb_high::site::apply_site_amplification;
+use ndarray::ArrayView1;
 
 mod common;
 use common::*;
@@ -288,7 +289,12 @@ fn siteamp_matches_fortran() {
         // `SpectrumPlan`. `ln` is deterministic, so hoisting it out of the inner loop is
         // bit-exact and this golden still holds.
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
-        apply_site_amplification(cw.as_mut_slice(), log_dfr.as_slice(), nn, fn_.as_slice(), an.as_slice());
+        apply_site_amplification(
+            cw.as_mut_slice(),
+            ArrayView1::from(log_dfr.as_slice()),
+            ArrayView1::from(&fn_[..nn]),
+            ArrayView1::from(&an[..nn]),
+        );
 
         // §2.6 defect 2: the Fortran scales the DC bin (1) and the Nyquist bin
         // (np2/2 + 1) by the raw factor while exponentiating every bin between, two

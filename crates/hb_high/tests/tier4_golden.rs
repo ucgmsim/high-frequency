@@ -54,7 +54,7 @@ fn stoc_f_matches_fortran() {
             log_frequency_hz: dfr.iter().map(|f| f.ln()).collect(),
             path_exponent: dfr.iter().map(|f| f.powf(1.0 - qfe)).collect(),
             envelope_power: (0..np2).map(|i| (i as f32 * dt).powf(b)).collect(),
-            frequency_hz: dfr.clone(),
+            frequency_hz: dfr.clone().into(),
         };
         // `dlm` was argument 11 and unused; §5.3 deleted it from the signature. The golden
         // still records it, so it is still read off the record and simply not passed.

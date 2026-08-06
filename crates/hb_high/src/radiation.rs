@@ -181,10 +181,10 @@ pub fn sv_radiation(angles: RadiationAngles) -> f32 {
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
     angles: &RadiationAngles,
-    frequency_hz: &[f32],
+    frequency_hz: ArrayView1<f32>,
     component_rad: f32,
     sample_count: usize,
-    radiation: &mut [f32],
+    radiation: ArrayViewMut1<f32>,
 ) -> f32 {
     let &RadiationAngles {
         strike_rad,
@@ -244,8 +244,8 @@ pub fn horizontal_radiation_spectrum(
     // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
     // log-linear blend between. Inert as written -- see `radmin` above.
     azip!((
-        gain in ArrayViewMut1::from(radiation),
-        &freq in ArrayView1::from(frequency_hz),
+        gain in radiation,
+        &freq in frequency_hz,
     ) {
         let blend = if freq <= blend_low_hz {
             conical_floor
@@ -275,11 +275,11 @@ pub fn horizontal_radiation_spectrum(
 /// back into the caller's low-cut, and is inert for the same reason.
 pub fn vertical_radiation_spectrum(
     angles: &RadiationAngles,
-    frequency_hz: &[f32],
+    frequency_hz: ArrayView1<f32>,
     uniform_a: &[f32],
     uniform_b: &[f32],
     sample_count: usize,
-    radiation: &mut [f32],
+    radiation: ArrayViewMut1<f32>,
 ) -> f32 {
     let &RadiationAngles {
         strike_rad,
@@ -327,8 +327,8 @@ pub fn vertical_radiation_spectrum(
     // linear blend between. Written as one expression per bin so the piecewise structure is
     // visible rather than emerging from a fall-through.
     azip!((
-        gain in ArrayViewMut1::from(radiation),
-        &freq in ArrayView1::from(frequency_hz),
+        gain in radiation,
+        &freq in frequency_hz,
     ) {
         *gain = if freq <= blend_low_hz {
             theoretical_gain

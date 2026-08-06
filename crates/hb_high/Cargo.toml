@@ -36,6 +36,9 @@ ndarray = "0.17.2"
 # resolution must succeed offline.
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11"
+# The gamma properties test `libm::tgamma` directly: `stoc.rs` no longer wraps it, and a
+# wrapper existing only to give a test something to name is not a reason to keep one.
+libm = "0.2"
 
 [lib]
 name = "hb_high"

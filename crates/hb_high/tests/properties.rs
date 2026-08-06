@@ -23,8 +23,6 @@
 //! * **Scaling conventions.** The vendored transform is unnormalised, so a round-trip
 //!   multiplies by `n`. `realfft` may differ. So the test asserts the round trip is
 //!   *proportional* to the input with one constant, and never says what it is.
-//! * **Error sentinels.** `gamma` currently returns `1.0e75` on a pole. That is a
-//!   Fortran artifact due to be deleted, so the goldens can own it.
 //! * **Idempotence of `remove_quadratic_trend`.** Measured, and it does not hold —
 //!   a second pass moves the signal a further ~6% at n=64. Asserting it would have
 //!   been wishful.
@@ -45,7 +43,8 @@ use hb_high::radiation::{radiation_pattern, RadiationAngles};
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{fill_normal_deviates, fill_uniform_deviates, Pcg32};
 use hb_high::site::apply_site_amplification;
-use hb_high::stoc::gamma;
+use ndarray::ArrayView1;
+use libm::tgamma as gamma;
 use proptest::prelude::*;
 
 /// Angular difference in degrees, folded into `[0, 180]`.
@@ -683,7 +682,12 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
+        apply_site_amplification(
+            spec.as_mut_slice(),
+            ArrayView1::from(frequency.as_slice()),
+            ArrayView1::from(&log_frequency[..6]),
+            ArrayView1::from(&factors[..6]),
+        );
 
         let want = level.exp();
         for i in 2..=np2 / 2 {
@@ -705,7 +709,12 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
+        apply_site_amplification(
+            spec.as_mut_slice(),
+            ArrayView1::from(frequency.as_slice()),
+            ArrayView1::from(&log_frequency[..6]),
+            ArrayView1::from(&factors[..6]),
+        );
         for i in 2..=np2 / 2 {
             prop_assume!(original[i].norm() > 1e-3);
             let before = original[i].im.atan2(original[i].re);
@@ -726,7 +735,12 @@ proptest! {
         let np2 = 1usize << exponent;
         let mut spec = spectrum(np2, 53);
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(spec.as_mut_slice(), frequency.as_slice(), 6, log_frequency.as_slice(), factors.as_slice());
+        apply_site_amplification(
+            spec.as_mut_slice(),
+            ArrayView1::from(frequency.as_slice()),
+            ArrayView1::from(&log_frequency[..6]),
+            ArrayView1::from(&factors[..6]),
+        );
         // Bin `i` counted from DC, so `spec[i]` is the positive frequency and
         // `spec[np2 - i]` its Hermitian partner. 0-based, the Fortran's `i + 1` and
         // `np2 - i + 1` lose their offsets.
