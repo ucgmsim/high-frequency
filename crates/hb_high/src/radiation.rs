@@ -222,11 +222,11 @@ pub fn horizontal_radiation_spectrum(
         // decide the draw order there, so reordering the fields for readability would
         // silently move every waveform. Here the order is a sequence of statements, which is
         // not something anyone reorders by accident.
-        let takeoff = takeoff_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
-        let azimuth = azimuth_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
-        let strike = strike_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
-        let dip = dip_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
-        let rake = rake_rad + CONE_WIDTH_RAD * (0.5 - rng.next_f32());
+        let takeoff = takeoff_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
+        let azimuth = azimuth_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
+        let strike = strike_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
+        let dip = dip_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
+        let rake = rake_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
 
         let sample = radiation_pattern(RadiationAngles {
             strike_rad: strike,

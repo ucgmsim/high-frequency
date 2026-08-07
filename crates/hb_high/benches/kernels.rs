@@ -31,7 +31,7 @@ use hb_high::ray::{
     Takeoff, build_ray_path, cagniard_time, cagniard_time_derivative, geometric_spreading,
     green_function, stationary_ray_parameter, vertical_slowness,
 };
-use hb_high::rng::{Pcg32, fill_normal_deviates, fill_uniform_deviates};
+use hb_high::rng::{Draws, LegacyPcg, Pcg};
 use hb_high::site::{apply_site_amplification, site_amplification_factors};
 use hb_high::state::WaveMode;
 use hb_high::state::{Layer, RayState, VelocityModel};
@@ -39,10 +39,13 @@ use hb_high::stoc::stochastic_spectrum;
 use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, radiate_and_invert};
 use ndarray::{ArrayView1, ArrayViewMut1};
 
-/// Transform lengths the program actually produces. `np2` is built by doubling
-/// from 2 until it exceeds `2*tmax/dt`, so it is always a power of two; 65536 is
-/// what the 2827-subfault alpine fault reaches.
-const NP2S: &[usize] = &[1024, 4096, 16384, 65536];
+/// Transform lengths the program actually produces.
+///
+/// `np2` comes from [`hb_high::fft::good_length`] on a subfault's own window, so it is a
+/// rung of the four-per-octave ladder rather than a power of two. Two of these are not
+/// powers of two on purpose: 1280 and 81920 are `5·2^8` and `5·2^14`, the latter being what
+/// an Alpine Fault subfault recorded at 600 km reaches.
+const NP2S: &[usize] = &[1024, 1280, 4096, 16384, 65536, 81920];
 
 /// `nr` in the main program: the sample count for the conical radiation average.
 const NR: usize = 1000;
@@ -108,9 +111,9 @@ fn dfr_axis(np2: usize) -> Vec<f32> {
 
 /// Complex spectrum of plausible magnitude, deterministic so runs are comparable.
 fn spectrum(np2: usize) -> Vec<Complex32> {
-    let mut g = Pcg32::seed(20260804);
+    let mut g = LegacyPcg::seed(20260804);
     (0..np2)
-        .map(|_| Complex32::new(g.next_f32() - 0.5, g.next_f32() - 0.5))
+        .map(|_| Complex32::new(g.uniform() - 0.5, g.uniform() - 0.5))
         .collect()
 }
 
@@ -122,10 +125,10 @@ fn site_table() -> (Vec<f32>, Vec<f32>) {
     ];
     let mut fn_ = vec![0.0; HZ.len()];
     let mut an = vec![0.0; HZ.len()];
-    let mut g = Pcg32::seed(11);
+    let mut g = LegacyPcg::seed(11);
     for i in 0..20 {
         fn_[i] = HZ[i].ln();
-        an[i] = 0.5 * g.next_f32();
+        an[i] = 0.5 * g.uniform();
     }
     (fn_, an)
 }
@@ -168,28 +171,35 @@ fn bench_rng(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("next_u32", |b| {
-        let mut g = Pcg32::seed(1);
+        let mut g = LegacyPcg::seed(1);
         b.iter(|| black_box(g.next_u32()))
     });
-    group.bench_function("next_f32", |b| {
-        let mut g = Pcg32::seed(1);
-        b.iter(|| black_box(g.next_f32()))
+    group.bench_function("uniform", |b| {
+        let mut g = LegacyPcg::seed(1);
+        b.iter(|| black_box(g.uniform()))
     });
 
-    // normal_deviates is called once per stochastic_spectrum, i.e. three times per
-    // subfault per ray, with n = np2. Box-Muller plus a full renormalisation
-    // pass, so it is not a trivial wrapper.
+    // `fill_normal` is called once per stochastic_spectrum, i.e. three times per subfault
+    // per ray, with n = np2. It is the largest single consumer of RNG traffic in the
+    // program, which is why both implementations are benched side by side: `legacy_normal`
+    // is Box-Muller plus a full renormalisation pass, `normal` is the ziggurat production
+    // runs. The ratio between them is what `rng::Pcg`'s docs claim.
     for &n in &[1024usize, 4096, 65536] {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("normal", n), &n, |b, &n| {
-            let mut g = Pcg32::seed(1);
+            let mut g = Pcg::seed(1);
             let mut acc = vec![0.0; n];
-            b.iter(|| fill_normal_deviates(&mut g, black_box(n), acc.as_mut_slice()))
+            b.iter(|| g.fill_normal(black_box(acc.as_mut_slice())))
+        });
+        group.bench_with_input(BenchmarkId::new("legacy_normal", n), &n, |b, &n| {
+            let mut g = LegacyPcg::seed(1);
+            let mut acc = vec![0.0; n];
+            b.iter(|| g.fill_normal(black_box(acc.as_mut_slice())))
         });
         group.bench_with_input(BenchmarkId::new("uniform_deviates", n), &n, |b, &n| {
-            let mut g = Pcg32::seed(1);
+            let mut g = LegacyPcg::seed(1);
             let mut rn = vec![0.0; n];
-            b.iter(|| fill_uniform_deviates(&mut g, black_box(n), rn.as_mut_slice()))
+            b.iter(|| g.fill_uniform(black_box(rn.as_mut_slice())))
         });
     }
     group.finish();
@@ -239,7 +249,7 @@ fn bench_radiation(c: &mut Criterion) {
     group.bench_function(
         BenchmarkId::new("horizontal_radiation_spectrum", format!("nr{NR}")),
         |b| {
-            let mut g = Pcg32::seed(7);
+            let mut g = LegacyPcg::seed(7);
             b.iter(|| {
                 horizontal_radiation_spectrum(
                     &mut g,
@@ -253,11 +263,11 @@ fn bench_radiation(c: &mut Criterion) {
         },
     );
 
-    let mut g = Pcg32::seed(3);
+    let mut g = LegacyPcg::seed(3);
     let mut rna = vec![0.0; NR];
     let mut rnb = vec![0.0; NR];
-    fill_uniform_deviates(&mut g, NR, rna.as_mut_slice());
-    fill_uniform_deviates(&mut g, NR, rnb.as_mut_slice());
+    g.fill_uniform(rna.as_mut_slice());
+    g.fill_uniform(rnb.as_mut_slice());
     group.bench_function(
         BenchmarkId::new("vertical_radiation_spectrum", format!("nr{NR}")),
         |b| {
@@ -382,7 +392,7 @@ fn bench_spectrum(c: &mut Criterion) {
             BenchmarkId::new("stochastic_spectrum", np2),
             &np2,
             |b, &np2| {
-                let mut g = Pcg32::seed(5);
+                let mut g = LegacyPcg::seed(5);
                 let plan = SpectrumPlan {
                     np2,
                     fold_count: nf,

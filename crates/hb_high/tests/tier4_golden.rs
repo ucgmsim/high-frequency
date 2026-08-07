@@ -10,7 +10,7 @@
 
 use hb_high::fft::Complex32;
 use hb_high::ray::green_function;
-use hb_high::rng::Pcg32;
+use hb_high::rng::{Draws, LegacyPcg};
 use hb_high::state::{RayState, VelocityModel};
 use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, stochastic_spectrum};
 use ndarray::Array1;
@@ -41,7 +41,7 @@ fn stoc_f_matches_fortran() {
         let want: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
-        let mut rng = Pcg32::seed(seed);
+        let mut rng = LegacyPcg::seed(seed);
         // The per-segment tables `SpectrumPlan` precomputes in the program. Built here from
         // the golden's own inputs by struct literal rather than through `SpectrumPlan::new`,
         // for two reasons: the golden records `np2` directly where `new` derives it from a
@@ -99,7 +99,7 @@ fn stoc_f_matches_fortran() {
         for (k, w) in want_after.iter().enumerate() {
             eq32(
                 &format!("{tag} post-call draw {k} (generator position)"),
-                rng.next_f32(),
+                rng.uniform(),
                 *w,
             );
         }

@@ -41,10 +41,12 @@ use crate::radiation::{
     RadiationAngles, horizontal_radiation_spectrum, vertical_radiation_spectrum,
 };
 use crate::ray::green_function;
-use crate::rng::{DrawSource, Draws, fill_uniform_deviates, normal_deviate};
+use crate::rng::{DrawSource, Draws};
 use crate::site::{apply_site_amplification, site_amplification_factors};
 use crate::state::{Layer, RayState, VelocityModel, VelocityModelInput, WaveMode};
-use crate::stoc::{RayPath, SourceModel, SpectrumPlan, radiate_and_invert, stochastic_spectrum};
+use crate::stoc::{
+    PlanCache, RayPath, SourceModel, SpectrumPlan, radiate_and_invert, stochastic_spectrum,
+};
 
 /// The three output components, in the order they are computed — which is also the order a
 /// caller receives them in.
@@ -451,6 +453,14 @@ impl Simulator {
         // One row per component, which is the shape this is returned in.
         let mut acc: Array2<f32> = Array2::zeros((Component::ALL.len(), self.run.ndata));
         let mut clipping = Clipping::default();
+        // Shared across every segment of this station, because the lengths repeat across
+        // segments as well as within one. See `PlanCache` for why it is per station.
+        let mut plans = PlanCache::new(
+            self.run.dt,
+            self.run.q_exponent,
+            self.run.window_peak_fraction,
+            self.run.window_end_fraction,
+        );
 
         // ------------------------------------------------- the single station ---
         for ((seg, angles), weights) in self
@@ -495,22 +505,14 @@ impl Simulator {
             // segment -- invisible while every fixture was single-segment. Now the minimum,
             // which is what "closest subfault distance" means.
 
-            let plan = SpectrumPlan::new(
-                windows.tmax,
-                self.run.dt,
-                self.run.q_exponent,
-                self.run.window_peak_fraction,
-                self.run.window_end_fraction,
-            );
-
             clipping += subfault_pass(
                 &mut rng,
+                &mut plans,
                 acc.view_mut(),
                 SegmentPass {
                     seg,
                     geom: &geom,
                     windows: &windows,
-                    plan: &plan,
                     angles,
                     weights,
                 },
@@ -621,8 +623,8 @@ fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviate
     // interleaved.
     let mut radv_uniform_a = vec![0.0f32; radv_sample_count];
     let mut radv_uniform_b = vec![0.0f32; radv_sample_count];
-    fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_a);
-    fill_uniform_deviates(&mut rng, radv_sample_count, &mut radv_uniform_b);
+    rng.fill_uniform(&mut radv_uniform_a);
+    rng.fill_uniform(&mut radv_uniform_b);
 
     (
         rng,
@@ -751,7 +753,6 @@ struct SegmentPass<'a> {
     seg: &'a Segment,
     geom: &'a SubfaultGeometry,
     windows: &'a WindowPass,
-    plan: &'a SpectrumPlan,
     angles: &'a SegmentAngles,
     /// This segment's moment weights, indexed by [`Segment::grid_index`].
     weights: &'a [MomentWeight],
@@ -779,6 +780,7 @@ struct RunContext<'a> {
 /// See `PORTING_RULES.md` §5.
 fn subfault_pass(
     rng: &mut impl Draws,
+    plans: &mut PlanCache,
     mut acc: ArrayViewMut2<'_, f32>,
     segment: SegmentPass<'_>,
     ctx: RunContext<'_>,
@@ -787,7 +789,6 @@ fn subfault_pass(
         seg,
         geom,
         windows,
-        plan,
         angles,
         weights,
     } = segment;
@@ -800,7 +801,6 @@ fn subfault_pass(
         siteamp_log_freq,
     } = ctx;
 
-    let np2 = plan.np2;
     // Fixed for the whole run, so it is built once here rather than per call. Six of
     // `stochastic_spectrum`'s nineteen former arguments were these, re-passed on every one
     // of the hundreds of thousands of calls in a run.
@@ -812,12 +812,21 @@ fn subfault_pass(
         kappa_s: run.kappa_s,
         moment_scale: run.moment_scale,
     };
-    // One row per component, allocated once for the whole pass. Both are pure scratch: every
-    // element is written before it is read, on every subfault and every ray.
+    // Sized for the LONGEST window in the segment, then used a prefix at a time -- each
+    // subfault works in `spectrum[.., ..np2]` for its own `np2`. One allocation per segment
+    // rather than one per subfault, which is what it always was; what has changed is that
+    // the length in use now varies within the pass.
+    //
+    // The tail beyond a subfault's own prefix holds the PREVIOUS subfault's numbers, so these
+    // are only scratch within a prefix. Every read below goes through a view sliced to the
+    // current `np2`, and that is what makes the stale tail unreachable rather than merely
+    // unread.
+    let longest = plans.for_length(SpectrumPlan::length_for(windows.tmax, run.dt));
+    let (np2_max, fold_max) = (longest.np2, longest.fold_count);
     let components = Component::ALL.len();
-    let mut spectrum: Array2<Complex32> = Array2::zeros((components, np2));
-    let mut subfault_acc: Array2<f32> = Array2::zeros((components, np2));
-    let mut radiation: Array1<f32> = Array1::zeros(plan.fold_count);
+    let mut spectrum: Array2<Complex32> = Array2::zeros((components, np2_max));
+    let mut subfault_acc: Array2<f32> = Array2::zeros((components, np2_max));
+    let mut radiation: Array1<f32> = Array1::zeros(fold_max);
     let mut siteamp_factors: Array1<f32> = Array1::zeros(run.site_table_len);
     let mut ray = RayState::default();
     let mut clipping = Clipping::default();
@@ -831,13 +840,19 @@ fn subfault_pass(
         let ray_geometry = geom.at(i, j);
         let subfault_window_s = windows.window_s[seg.grid_index(i, j)];
 
+        // THIS SUBFAULT'S OWN transform length, not the segment's longest. See
+        // `SpectrumPlan::length_for` for what that changes and why it is the right reading of
+        // Boore's factor of two. Built at most once per distinct length per station.
+        let plan = plans.for_window(subfault_window_s);
+        let (np2, fold_count) = (plan.np2, plan.fold_count);
+
         let source_layer = source_layer_for(vmod, ray_geometry.depth_km);
         let shear_velocity_km_s = vmod[source_layer].vsh_km_s as f32;
         let density_g_cm3 = vmod[source_layer].density_g_cm3 as f32;
 
         let base_rvf = rupture.factor(ray_geometry.depth_km);
         let rupture_fraction = if run.rupture_velocity_sigma > 0.0 {
-            (base_rvf * (normal_deviate(rng) * run.rupture_velocity_sigma).exp())
+            (base_rvf * (rng.normal() * run.rupture_velocity_sigma).exp())
                 .min(RUPTURE_VELOCITY_FRACTION_MAX)
         } else {
             base_rvf
@@ -899,7 +914,7 @@ fn subfault_pass(
                         fmax_hz: component.capped_fmax(run.fmax_hz),
                         qbar,
                     },
-                    spectrum.row_mut(component.index()),
+                    spectrum.row_mut(component.index()).slice_mut(s![..np2]),
                 );
             }
 
@@ -913,7 +928,9 @@ fn subfault_pass(
             );
             for mut spec in spectrum.rows_mut() {
                 apply_site_amplification(
-                    spec.as_slice_mut().expect("a row of a C-order Array2"),
+                    spec.slice_mut(s![..np2])
+                        .into_slice()
+                        .expect("a prefix of a row of a C-order Array2 is contiguous"),
                     plan.log_frequency_hz.view(),
                     siteamp_log_freq.view(),
                     siteamp_factors.view(),
@@ -955,7 +972,7 @@ fn subfault_pass(
                             plan.frequency_hz.view(),
                             azimuth_offset_deg.to_radians(),
                             run.conical_sample_count,
-                            radiation.view_mut(),
+                            radiation.slice_mut(s![..fold_count]),
                         )
                     }
                     RadiationMode::Vertical => vertical_radiation_spectrum(
@@ -964,16 +981,16 @@ fn subfault_pass(
                         &deviates.radv_uniform_a,
                         &deviates.radv_uniform_b,
                         run.conical_sample_count,
-                        radiation.view_mut(),
+                        radiation.slice_mut(s![..fold_count]),
                     ),
                 };
                 // In place on both rows: the inverse transform overwrites the spectrum,
                 // and the real samples land straight in the accumulator's row. No
                 // allocation and no copy anywhere on this path.
                 radiate_and_invert(
-                    spectrum.row_mut(component.index()),
-                    radiation.view(),
-                    subfault_acc.row_mut(component.index()),
+                    spectrum.row_mut(component.index()).slice_mut(s![..np2]),
+                    radiation.slice(s![..fold_count]),
+                    subfault_acc.row_mut(component.index()).slice_mut(s![..np2]),
                 );
             }
 
@@ -991,12 +1008,17 @@ fn subfault_pass(
             // per (subfault, ray), and every sample drawn after it depends on where the stream
             // ends up. Deleting this as obviously-dead code changes every waveform in the
             // program. See `PHYSICS.md` §9.
-            let _stream_advance = rng.next_f32();
+            let _stream_advance = rng.uniform();
 
             clipping += Clipping::for_arrival(kst, subfault_window_s, run);
 
             if let Some(at) = Placement::clip(kst, np2, run.ndata) {
-                accumulate_subfault(acc.view_mut(), subfault_acc.view(), weight, &at);
+                accumulate_subfault(
+                    acc.view_mut(),
+                    subfault_acc.slice(s![.., ..np2]),
+                    weight,
+                    &at,
+                );
             }
         }
     }

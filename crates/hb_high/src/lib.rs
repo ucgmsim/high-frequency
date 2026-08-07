@@ -50,8 +50,8 @@
 //!   while the vertical does not.
 //! * **Same-version determinism** — one seed, one build, one answer. Free to change *across*
 //!   versions, since results are regenerable by pinning a commit, but never within one.
-//! * **[`rng::Pcg32::next_f32`]'s 24-bit conversion**, which keeps deviates inside `[0, 1)`.
-//!   The zero-rejection loops depend on it.
+//! * **[`rng::Draws::uniform`]'s 24-bit conversion**, which keeps deviates inside `[0, 1)`.
+//!   Box-Muller's zero-rejection loops in [`rng::LegacyPcg`] depend on it.
 //!
 //! `PHYSICS.md` §9 lists the rest of what looks like a bug and is not.
 

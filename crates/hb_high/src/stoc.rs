@@ -12,7 +12,9 @@
 
 use crate::fft::{Complex32, Complex64};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
-use crate::rng::{Draws, fill_normal_deviates};
+use std::collections::HashMap;
+
+use crate::rng::Draws;
 use ndarray::{Array1, ArrayView1, ArrayViewMut1, Axis, azip, s};
 use std::f32::consts::{PI, TAU};
 
@@ -42,11 +44,12 @@ const CM_PER_KM: f32 = 100_000.0;
 
 /// Transform length, frequency axis, and the transcendentals that depend only on them.
 ///
-/// One of these is built per fault segment and reused across every subfault, ray and component
-/// in it. The three precomputed tables were between them the largest single cost in the
-/// program — 5.5M `powf`, 2.75M `powf` and 2.75M `ln` per medium-fault run, each computing at
-/// most `np2` or `fold_count` *distinct* values. Hoisting them is exact: `powf` and `ln` are
-/// deterministic, so evaluating a pure function once and reusing it gives the identical `f32`.
+/// One of these is built per **distinct transform length** and reused across every subfault,
+/// ray and component that needs that length — see [`PlanCache`]. The three precomputed tables
+/// were between them the largest single cost in the program — 5.5M `powf`, 2.75M `powf` and
+/// 2.75M `ln` per medium-fault run, each computing at most `np2` or `fold_count` *distinct*
+/// values. Hoisting them is exact: `powf` and `ln` are deterministic, so evaluating a pure
+/// function once and reusing it gives the identical `f32`.
 pub struct SpectrumPlan {
     pub np2: usize,
     /// Positive-frequency bin count, `np2/2 + 1`, and the length of every table below.
@@ -67,32 +70,53 @@ pub struct SpectrumPlan {
 }
 
 impl SpectrumPlan {
-    /// Smallest power of two at or above `2 · tmax_s / dt`, and the frequency axis to match.
+    /// The transform length a window of `window_s` seconds needs.
     ///
     /// The factor of two is Boore (1983, p. 1869): the record is made about twice the duration
     /// of strong shaking, so that the windowed transient fits inside it with room to decay.
     ///
-    /// # `np2` IS THE DRAW COUNT, so it is not a buffer size to tune
+    /// # `np2` IS THE DRAW COUNT, so it is not a buffer size to tune casually
     ///
-    /// [`stochastic_spectrum`] draws exactly `np2` normal deviates per call. Rounding to a
-    /// different length — a 5-smooth "fast" size, say, which for a 131 s window would be
-    /// 52488 against this 65536, a 20% saving — would change how many numbers come off
-    /// the shared generator, and therefore **every waveform computed after it**. It also
-    /// moves `df = 1/(np2·dt)`, the frequency axis the spectral shape is evaluated on.
+    /// [`stochastic_spectrum`] draws exactly `np2` normal deviates per call, and `np2` also
+    /// sets `df = 1/(np2·dt)`, the frequency axis the spectral shape is evaluated on. So this
+    /// is physics wearing the costume of an allocation: changing it moves **every waveform
+    /// computed after it**, and `ENGINEERING_RULES` §4 requires the reasoning to be written
+    /// down rather than assumed.
     ///
-    /// So this is physics wearing the costume of an allocation, and `PHYSICS.md` §9 and
-    /// `ENGINEERING_RULES` §5 both say the draw count is part of the answer. Changing it is
-    /// a LONG-tier question, not an optimisation.
+    /// It has been changed twice, deliberately, and here is the reasoning.
     ///
-    /// Nothing here needs a *power* of two in particular — the Hermitian mirror below only
-    /// needs `np2` even, and `rustfft` plans any length (mixed-radix, Bluestein for primes),
-    /// which is also why it offers no `next_fast_len` to delegate to.
-    pub fn new(tmax_s: f32, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
-        // At least 2 bins, so a degenerate `tmax_s` still gives a transform the rest of the
-        // module can index. `next_power_of_two` is exact where the doubling loop was a search:
-        // both give the smallest power of two at or above `ntmax`.
-        let ntmax = (2.0 * tmax_s / dt).trunc() as usize;
-        let np2 = ntmax.next_power_of_two().max(2);
+    /// * **The length is now 7-smooth rather than a power of two** — see
+    ///   [`crate::fft::good_length`]. Nothing here ever needed a power of two; the Hermitian
+    ///   mirror needs `np2` even and `rustfft` plans any length.
+    ///
+    /// * **The window is the subfault's own, not the segment's longest.** This used to be
+    ///   called once per segment with the maximum over all its subfaults, so a subfault whose
+    ///   envelope had decayed to `η²` of its peak by sample 8,000 still drew 131,072 deviates
+    ///   and transformed all of them. Every subfault now gets the same *relative* headroom —
+    ///   twice its own window — that the longest one always had, which is what the factor of
+    ///   two means in the first place. The waste it removes is the difference between the two,
+    ///   and on an Alpine Fault deck recorded at 600 km that is most of the run.
+    ///
+    /// The consequence to be aware of is that `df` is now coarser for a short-window subfault
+    /// than it was. That is the intended reading of Boore's construction rather than a
+    /// degradation of it: the frequency resolution a transient needs is set by its own
+    /// duration, and resolving an 8,000-sample envelope on a 131,072-point grid buys nothing
+    /// the envelope contains.
+    #[must_use]
+    pub fn length_for(window_s: f32, dt: f32) -> usize {
+        crate::fft::good_length((2.0 * window_s / dt).trunc() as usize)
+    }
+
+    /// Build the tables for a transform of `np2` points.
+    ///
+    /// `np2` comes from [`Self::length_for`] on the production path. It is taken directly
+    /// rather than derived here so that the tier-4 golden — whose fixtures record `np2` as an
+    /// input — can build a plan for exactly the length the Fortran used.
+    pub fn new(np2: usize, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+        assert!(
+            np2 >= 2 && np2.is_multiple_of(2),
+            "a spectrum plan needs an even length of at least 2, got {np2}"
+        );
         let fold_count = np2 / 2 + 1;
 
         let df = 1.0 / (np2 as f32 * dt);
@@ -114,6 +138,79 @@ impl SpectrumPlan {
             path_exponent,
             envelope_power,
         }
+    }
+}
+
+/// The plans a station needs, built on demand and keyed by transform length.
+///
+/// # Why a cache, and why it is per station rather than per run
+///
+/// [`SpectrumPlan::length_for`] gives a *different* length for nearly every subfault, and a
+/// plan costs `np2` `powf` calls plus `fold_count` more `powf` and `ln`. Rebuilding one per
+/// subfault would put those transcendentals straight back on the hot path — the exact cost
+/// the tables were hoisted out of it to avoid. Sharing by length recovers the hoist: the
+/// lengths repeat heavily, because [`crate::fft::good_length`] quantises them onto a ladder
+/// of four rungs per octave. An Alpine Fault station lands 1,854 subfaults on **23**
+/// distinct lengths, holding about 5.7 MB of tables — see that function for why the ladder
+/// is as coarse as it is, which is a decision this cache's memory footprint drove.
+///
+/// It is per station, and deliberately not on [`crate::sim::Simulator`], because a
+/// `Simulator` is shared across a dask thread pool behind `&self`. Caching there would need
+/// either a lock on the hottest path in the program or interior mutability that is not
+/// `Sync`, and the cost of not doing it is one plan build per distinct length per station —
+/// measured at under 2% of a station, against 1,854 subfaults' worth of tables it saves.
+/// `crate::fft`'s own plan cache is thread-local for the same reason.
+pub struct PlanCache {
+    dt: f32,
+    q_exponent: f32,
+    window_eps: f32,
+    window_eta: f32,
+    /// Keyed by `np2`. A `HashMap` rather than a sorted `Vec` because the lengths arrive in
+    /// no useful order and the count is small either way.
+    plans: HashMap<usize, SpectrumPlan>,
+}
+
+impl PlanCache {
+    /// A cache for a run with these fixed window and path parameters.
+    #[must_use]
+    pub fn new(dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+        Self {
+            dt,
+            q_exponent,
+            window_eps,
+            window_eta,
+            plans: HashMap::new(),
+        }
+    }
+
+    /// The plan for a subfault whose window is `window_s` seconds long.
+    pub fn for_window(&mut self, window_s: f32) -> &SpectrumPlan {
+        let np2 = SpectrumPlan::length_for(window_s, self.dt);
+        self.for_length(np2)
+    }
+
+    /// The plan for an explicit transform length.
+    ///
+    /// Public so that a caller sizing scratch buffers can ask for the longest plan it will
+    /// need before the subfault loop starts.
+    pub fn for_length(&mut self, np2: usize) -> &SpectrumPlan {
+        let (dt, q_exponent, window_eps, window_eta) =
+            (self.dt, self.q_exponent, self.window_eps, self.window_eta);
+        self.plans
+            .entry(np2)
+            .or_insert_with(|| SpectrumPlan::new(np2, dt, q_exponent, window_eps, window_eta))
+    }
+
+    /// How many distinct lengths have been built. For tests and profiling.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.plans.len()
+    }
+
+    /// Whether nothing has been built yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
     }
 }
 
@@ -359,7 +456,7 @@ pub fn stochastic_spectrum(
     // The random phase spectrum. `remove_quadratic_trend` removes the quadratic acceleration
     // trend so that final velocity and displacement come out at zero.
     let mut a = vec![0.0f32; np2];
-    fill_normal_deviates(rng, np2, &mut a);
+    rng.fill_normal(&mut a);
     remove_quadratic_trend(dt, &mut a);
 
     // Windowed noise: the envelope times the deviates, as the real part of the signal,
@@ -489,6 +586,7 @@ pub fn radiate_and_invert(
 
 #[cfg(test)]
 mod tests {
+    use super::PlanCache;
     use libm::tgamma as gamma;
 
     /// The one gamma argument production actually evaluates, pinned so that a future change of
@@ -522,5 +620,75 @@ mod tests {
                 gamma(pole)
             );
         }
+    }
+
+    /// A cache built for a run's parameters.
+    fn cache() -> PlanCache {
+        PlanCache::new(0.005, 0.6, 0.2, 0.05)
+    }
+
+    /// A shorter window gets a shorter transform. This is the whole point of the change, so
+    /// it is asserted rather than assumed.
+    #[test]
+    fn a_shorter_window_gets_a_shorter_transform() {
+        let mut plans = cache();
+        let short = plans.for_window(2.0).np2;
+        let long = plans.for_window(200.0).np2;
+        assert!(
+            short < long,
+            "a 2 s window got {short} points and a 200 s window {long}"
+        );
+        // `long` is what the segment maximum used to impose on EVERY subfault, including
+        // the 2 s one. That ratio is the waste this change removes.
+        assert_eq!((short, long), (896, 81_920));
+    }
+
+    /// The cache returns one plan per length, not one per request.
+    ///
+    /// If this regresses, every subfault rebuilds `np2` `powf` calls and the tables are no
+    /// longer hoisted out of the hot path at all.
+    #[test]
+    fn the_cache_builds_one_plan_per_distinct_length() {
+        let mut plans = cache();
+        // Windows chosen to straddle the 7-smooth ladder: many of them, few lengths.
+        for step in 0..400 {
+            plans.for_window(10.0 + step as f32 * 0.01);
+        }
+        assert!(
+            plans.len() < 20,
+            "400 nearby windows produced {} plans",
+            plans.len()
+        );
+        // And the same window twice is free.
+        let before = plans.len();
+        plans.for_window(10.0);
+        assert_eq!(plans.len(), before, "a repeated window built a second plan");
+    }
+
+    /// Every plan's tables agree with its length, whichever way it was asked for.
+    #[test]
+    fn a_plans_tables_match_its_length() {
+        let mut plans = cache();
+        for window_s in [0.001, 0.5, 3.0, 40.0, 175.0, 400.0] {
+            let plan = plans.for_window(window_s);
+            assert_eq!(plan.fold_count, plan.np2 / 2 + 1);
+            assert_eq!(plan.frequency_hz.len(), plan.fold_count);
+            assert_eq!(plan.log_frequency_hz.len(), plan.fold_count);
+            assert_eq!(plan.path_exponent.len(), plan.fold_count);
+            assert_eq!(plan.envelope_power.len(), plan.np2);
+            assert_eq!(plan.np2 % 2, 0, "np2 must be even for the Hermitian mirror");
+        }
+    }
+
+    /// A window so short it rounds to nothing still gives an indexable transform.
+    ///
+    /// Reachable: `window_s` comes from a corner frequency and a path duration, and a
+    /// subfault directly beneath a station has both small.
+    #[test]
+    fn a_degenerate_window_still_gives_a_usable_plan() {
+        let mut plans = cache();
+        let plan = plans.for_window(0.0);
+        assert_eq!(plan.np2, 2);
+        assert_eq!(plan.fold_count, 2);
     }
 }

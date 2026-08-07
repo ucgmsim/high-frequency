@@ -36,6 +36,62 @@ Four stations cost exactly 4× one (26.16 vs 26.19 s each), confirming the batch
 serial by design: the GIL is released so a dask thread pool scales across chunks, and there is
 no internal thread pool to compete with it.
 
+## Sizing the transform per subfault, and the ladder it snaps to
+
+Measured on a real production deck — `AlpineF2K_REL33.stoch`, 1,854 subfaults over 7
+segments, `dt = 0.005`, a 174.5 s record, `path_duration_model = 11` — at two stations that
+bracket the geometry. **far** is the deck's own first station, about 250 km south of the
+fault's southern end and 600 km from its northern one; **near** sits on top of segment 5.
+Release build, one station per measurement.
+
+| | far | near |
+| --- | ---: | ---: |
+| before | 39.0 s | 24.3 s |
+| per-subfault window + ziggurat, powers of two | 16.6 s | 8.8 s |
+| **plus the four-rung ladder** | **12.5 s** | **5.7 s** |
+| | **3.12x** | **4.30x** |
+
+Three changes, and the attribution:
+
+* **The transform is sized per subfault**, not per segment. `tmax` was the maximum window
+  over every subfault in a segment, and every subfault in it got a buffer that long, so a
+  subfault whose envelope had decayed to `η²` of its peak by sample 8,000 still drew 131,072
+  normal deviates and transformed all of them. Worth roughly **1.85x** — the residual of the
+  2.35x second row after the ziggurat's share below.
+
+* **Ziggurat normals instead of Box-Muller**, `rng::Pcg` against `rng::LegacyPcg`. Directly
+  benched at `rng/normal` vs `rng/legacy_normal`: **3.2x** on the fill itself (235 µs against
+  691 µs at n = 65536, a 69% reduction). That loop was 31% of a baseline station, so about
+  **1.27x** of the whole.
+
+* **A four-rung length ladder** instead of powers of two — `fft::good_length`. Worth
+  **1.33x** at the far station and **1.55x** at the near one, measured by rebuilding with
+  `LENGTH_MULTIPLIERS = [1]` and changing nothing else. It helps the near station more
+  because its windows vary more, so more of them land just above a rung.
+
+### The numbers moved, and the level did not
+
+All three changes alter the draw structure, so `harness/golden/snapshot.txt` moved and was
+re-recorded. Its four RMS fields moved by +7.6%, −6.5%, −3.5% and +1.3% — mixed signs.
+
+That is a realisation change rather than a level change, and it was checked rather than
+asserted. Over **12 seeds at the far station**, record RMS:
+
+| | mean RMS | sd | sd/mean |
+| --- | ---: | ---: | ---: |
+| before | 0.29701 | 0.01843 | 6.20% |
+| after | 0.29887 | 0.01511 | 5.06% |
+
+A **+0.63%** shift in the mean against a ±2.3% standard error on the difference:
+indistinguishable from zero. A single seed had shown record energy dropping 21%, which
+looked alarming and is not — energy is RMS², so 21% is a 10% RMS excursion, under two
+standard deviations of the scatter above.
+
+**This does not replace the statistical campaign.** It is one station, one seed count and one
+statistic — record RMS, not a spectral intensity measure. What it rules out is a gross level
+shift, which is the failure that would have made the change obviously wrong. `ENGINEERING_RULES`
+§6 has the recipe for the real adjudication.
+
 ## Building the simulator once buys almost nothing, and that is the finding
 
 `Simulator::new` hoists everything station-independent out of the station loop: the air
