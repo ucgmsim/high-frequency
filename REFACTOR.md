@@ -1626,3 +1626,150 @@ could check, and most of the rest is comment recording decisions — the Vec-not
 reasoning, the conjugation-commutes argument, the three reductions that must not move.
 `ENGINEERING_RULES` §1 calls the line delta a signal rather than a gate, and this is the case
 it describes: twenty lines to delete a hazard is a good trade.
+
+# Stage 6 — the subfault pass, and the work it was throwing away
+
+Stage 5 left `sim.rs` correct and readable at the module level and untouched at the level that
+matters for a production run: one 190-line block per `(subfault, ray)` in which the geometry,
+the medium, the ray, the spectrum and the placement were computed in whatever order the
+original had needed them. The placement was last. So a station computed three transforms and
+three blocks of normal deviates for every contribution and only then asked whether any of it
+could reach the record.
+
+On a real Alpine Fault deck — `Rupture 71072`, 189 segments, 7,865 subfaults, 470 s at
+dt = 0.005 — that was **2.19× of the runtime**. `PROFILE.md` has the table.
+
+## §6.0 — the baseline, and two numbers that were wrong
+
+`benches/alpine.rs` and `sim::Census`. Nothing here is defensible without them, and the census
+counters — pairs attempted, pairs whose window fell entirely outside the record, transform
+samples computed against samples accumulated — are what every substage below is judged on.
+They are integers and immune to machine load, where the wall clock on this box drifts by more
+than several of the effects being measured.
+
+**Two prior estimates did not survive contact with it**, both made from the deck by an
+independent script before any code moved:
+
+- Culling arrivals that land past the record was predicted at 11.4% of pairs. **Measured: 3.2%
+  to 10.2%**, and the reason is worth keeping. The rupture cascade is *anti-correlated with
+  distance* — the subfaults that rupture late are the northern ones, which are close to the
+  northern stations. Franz Josef and Taupo, the two ends of the fault, lose the most;
+  Wellington, mid-azimuth, loses least. **The pruning stage is a 3–10% win, not a step change,
+  and it was planned as though it were the main event.**
+- The waste in the transform length was predicted at 78% and measured at 50–81%. That one
+  held, and it was the prize.
+
+The lesson is not that the estimates were bad — they were within a factor of the truth and
+they pointed at the right lever. It is that the *ordering* of effort came from the estimate
+that was wrong by the larger factor.
+
+## §6.1–6.2 — the pipeline, and streams that stopped depending on order
+
+`subfault_pass`'s body is now `SubfaultSource::gather` → `trace_ray` → `arrival_time_and_angles`
+→ `Arrival::placement` → synthesis. Two things fell out of the extraction rather than being
+designed into it:
+
+- **`TracedRay` merged two decisions that sat sixty lines apart.** The straight-ray branch
+  chose the path length, `q̄` and the window start near the top; the take-off angle was chosen
+  from the same `RayKind` *after* the spectrum synthesis. They are one choice — the
+  approximation discards the traced result — and reading them apart invited the second to look
+  like a correction to the first.
+- **`arrival_time_and_angles` is where `kst` moved from**, which is the entire point of the
+  stage.
+
+The obstacle was the generator. A station was one stream, so the deviates a subfault received
+depended on **how many subfaults had drawn before it**, and skipping one moved every waveform
+after it. Work that provably changed nothing could not be removed without changing everything.
+`Draws::respawn` gives each `(subfault, ray)` a stream seeded from its own identity, so the
+draws are a function of *which* subfault it is and not *when* it ran.
+
+That also retired the `_stream_advance` draw — `PHYSICS.md` §9's "one draw, and it must stay".
+Its hazard was precisely that it advanced the shared generator; as the last draw of a stream
+nothing else reads, it is unobservable. **It was deleted on its own terms, not overridden.**
+
+The snapshot moved and was adjudicated as `PROFILE.md`'s earlier draw-structure change was: 12
+seeds at the far station, record RMS **0.050455 ± 0.002664 → 0.051675 ± 0.002033**, a +2.42%
+shift against a ±1.92% standard error on the difference, t = 1.26. That rules out a gross
+level shift, which is the failure that would have made the change obviously wrong. **It does
+not rule out a 2% one**, and at n = 12 against 5% scatter it could not have.
+
+## §6.3–6.4 — the work that was not geometry
+
+Both bit-exact, both verified against the Fortran goldens rather than against the snapshot,
+which was already red from §6.2 — `siteamp_matches_fortran` and `stoc_f_matches_fortran` are
+what say the arithmetic did not move.
+
+- **`site_gain_curve`.** The quarter-wavelength gain is a function of the source layer and the
+  transform length. It is not a function of the component, and it was being interpolated and
+  exponentiated inside the per-component loop: `fold_count` exponentials, three times, per
+  subfault, per ray.
+- **`SpectrumShape`.** Same shape of error one level up. The envelope and the amplitude do not
+  depend on the random phase, and for the two horizontals they do not differ at all — `f_max`
+  is the only per-component input and only the vertical caps it. Where `f_max` is already at
+  or below the vertical's ceiling, as it is in production at 10 Hz, **all three components
+  share one shape**.
+
+  It also owns its buffers. The three vectors were allocated and freed *per call* at
+  `np2 ≈ 144,000`, which is tens of gigabytes of allocator traffic per station for numbers
+  overwritten immediately. This retires the `as_`-sizing note in `PROFILE.md`'s rejected list
+  rather than violating it: with no `calloc` per call, the mmap-threshold argument for sizing
+  at `np2` no longer applies. What survives is that **bin 0 is never written and must stay
+  zero**, now maintained by construction.
+
+  Worth 1.48× cumulative, and the buffer reuse was the larger half.
+
+## §6.5 — the transform sized to the arrival, which was the whole thing
+
+`SpectrumPlan::length_for_arrival`. **2.19× cumulative, and it halved the instruction count on
+its own.**
+
+The shaping window is `2.12·(source + path duration)` with no upper cap, so at 500 km it runs
+to 200 s and more; the transform is twice that; and the result is placed into a 470 s record
+and clipped. The mean transform was 144,319 samples of which 22% reached the record at the far
+stations.
+
+**The design decision that matters is what was *not* done.** Cutting to the landing duration is
+what "size it to what fits" literally means, and it would be wrong: Boore's factor of two is a
+guard, not padding — it is what gives the windowed transient room to decay and keeps the
+shaping filter's response from wrapping around the period. Cutting it away turns a spectral
+shaping into a circular convolution with its own tail. So the factor stays and is measured
+against the duration that can land. It costs about half the theoretical saving and is the
+difference between a defensible change and a truncation.
+
+This moves the numbers — `np2` sets `df`, so the retained samples change too — and is the same
+trade `length_for` already records one rung down, with the same argument: the frequency
+resolution a transient needs is set by the duration it occupies.
+
+## §6.6 — pruning, which is the stage that was oversold
+
+`SubfaultSource::earliest_start_sample`: straight-line distance over the model's fastest shear
+velocity, which no traced path can beat, so a contribution ruled out here is ruled out for
+real. Truncation toward zero is monotonic, so the bound survives it. Two divisions gate an
+iterative root-find and a per-layer spreading integral.
+
+**It has a decisive cheap check rather than only a proof.** The prune catches a subset of what
+the exact post-trace test catches, so `pairs_outside_record` must come out *identical*; a wrong
+bound would make it rise. It does, at all five stations.
+
+The cost is that `Clipping::worst_overrun_s` becomes a lower bound for pruned pairs, reported
+against the earliest start they could have had. The count stays exact and the bound errs
+towards "your record is too short", which is the direction a caller sizing one needs.
+
+### The spatial index was analysed and deliberately not built
+
+The plan called for a kd-tree or BVH over subfaults. **At 7,865 subfaults it is not worth
+building, and that is a measurement rather than a preference.** Per station the flat scan is
+7,865 tests at ~10 ns — around 50 µs, against seconds of surviving transform work. A tree
+would take that to 5 µs and be unmeasurable.
+
+Two conditions would change the answer, and they are written down here so the next person does
+not have to re-derive them:
+
+- **N_sub above ~10⁶** — a much finer dicing, or a whole catalogue in one simulator — where the
+  O(N) scan begins to show against the surviving work.
+- **Inverting the loop to subfault-major.** Stations outnumber subfaults about 10:1 in a
+  production campaign (77,696 south of Taupo against 7,865 subfaults). If a future batch API
+  accumulated station-major and looped subfaults outermost, the right structure is a tree over
+  the **stations**, queried once per subfault, and it pays immediately. §6.2's per-identity
+  seeding is what would unblock that: it is what makes a subfault's draws independent of the
+  order stations and subfaults are visited in.

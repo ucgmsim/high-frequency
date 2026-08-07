@@ -4,7 +4,91 @@ Re-measured at Stage 4 §4.6. The previous version of this file was written at �
 described a program that no longer exists — it quoted `fast` at 48.5% self time for a
 function deleted in §2.1, and its whole-program numbers timed a subprocess.
 
+## The production baseline, and what it says the work is
+
+Stage 6 §6.0. Everything below this section predates it and measures synthetic faults; this
+measures a real one, and it is the number any later optimisation is compared against.
+
+`benches/alpine.rs`, deck `Rupture 71072` — the NSHM Alpine-to-Wairarapa cascade. 189
+segments, **7,865 subfaults** diced at 1.6 km, one ray, rupture times running to 383 s,
+recorded for **470 s at dt = 0.005** (`ndata = 94,000`). Five stations bracketing the
+geometry rather than sampled from it, because runtime is a function of where the station is.
+
+| station | | wall | pairs | outside | samples computed | useful | plans | peaks lost |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| FJDS | on the fault | 46.0 s | 7,790 | 527 (6.8%) | 714,932,224 | 49.0% | 13 | 1,098 |
+| HMCS | Hokitika | 46.0 s | 7,790 | 342 (4.4%) | 726,245,376 | 50.3% | 12 | 891 |
+| dJRHSCA | Christchurch | 47.5 s | 7,790 | 275 (3.5%) | 751,951,872 | 49.7% | 13 | 656 |
+| kBN8GWE | Wellington | 59.9 s | 7,790 | 249 (3.2%) | 940,343,296 | 36.1% | 13 | 487 |
+| TPPS | Taupo | 84.1 s | 7,790 | 793 (10.2%) | 1,279,557,632 | 18.8% | 11 | 1,337 |
+
+Whole run: **283.5 s**, 3,881,557,582,109 instructions, 1,145,956,135,361 cycles.
+
+`pairs` is `(subfault, ray)` pairs above the moment-weight threshold — 7,790 of 7,865, the
+same 75 rejections an independent count of the deck finds. `outside` is those whose window
+landed entirely past the end of the record. `useful` is the fraction of computed transform
+samples that reached it. All three come from [`sim::Census`], which exists because wall clock
+on this box drifts by more than several of the effects being adjudicated and these do not.
+
+### What Stage 6 did to it
+
+Same deck, same five stations, same box. `outside` is identical at every station across every
+row, which is the check that none of the pruning below drops a contribution that would have
+landed — a wrong bound would make that count *rise*.
+
+| | instructions | cycles | wall | vs baseline |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | 3,881,557,582,109 | 1,145,956,135,361 | 283.5 s | — |
+| §6.1–6.3 refactor, sub-streams, site gain | 3,134,434,856,531 | 920,831,651,084 | 227.6 s | 1.25× |
+| §6.4 shared spectral shape, reused buffers | 2,736,063,662,920 | 773,425,672,311 | 191.2 s | 1.48× |
+| §6.5 transform sized to the arrival | **1,919,653,613,329** | **523,063,563,124** | **129.7 s** | **2.19×** |
+
+Per station, baseline → §6.5: FJDS 46.0 → 22.7 s, HMCS 46.0 → 24.7, dJRHSCA 47.5 → 25.9,
+kBN8GWE 59.9 → 31.2, **TPPS 84.1 → 25.3**.
+
+**The far station stopped being the expensive one**, which is the whole shape of the result.
+Taupo was 1.8× Franz Josef and is now level with it, because what made it expensive was
+computing a 600 s transform to place into a 470 s record. Anyone extrapolating campaign cost
+from the old table should note that runtime is now much flatter in distance.
+
+Two costs to know about. `plans` — distinct transform lengths per station — rose from 11–13 to
+33–45, because the length now depends on where the arrival lands as well as on the window, so
+`PlanCache` holds proportionally more tables. And `useful` reaching only 45–74% rather than
+100% is by design: the transform is twice the landing duration, and the factor of two is
+Boore's guard against the shaping filter wrapping, not slack.
+
+**Two columns that are not comparable across the rows above.** `samples` and `useful` count
+only pairs that survive the placement check from §6.1 onward, where the baseline counted every
+attempted pair. The baseline's 49.0% at FJDS and §6.1's 56.7% are the same program measured
+two ways. `outside`, `pairs` and the instruction counts are comparable throughout.
+
+**Three things this changes about where to spend effort.**
+
+**Culling arrivals that land past the record is worth 3–10%, not a step change.** The
+intuition that a 470 s record must be discarding most of a 383 s cascade is wrong, and the
+reason is that the cascade is *anti-correlated* with distance: the subfaults that rupture
+late are the northern ones, which are near the northern stations, so their travel time is
+short. Franz Josef and Taupo are the two ends of the fault and lose the most (6.8%, 10.2%);
+Wellington, in the middle of the azimuth range, loses 3.2%.
+
+**Half to four-fifths of every transform is computed and thrown away, and that is the
+prize.** The shaping window is `2.12·(source + path duration)` with no upper cap, and at 500
+km the path term alone is ~90 s, so `np2` is sized for a 200–600 s window that is then placed
+into a 470 s record and clipped. Taupo computes 1.28 billion samples per component and keeps
+18.8% of them. This is the same waste `SpectrumPlan::length_for`'s note already describes one
+rung down — sizing per subfault instead of per segment was worth 1.85× — and the next rung is
+sizing to what can actually land.
+
+**`peaks lost` is a physics finding, not a performance one, and it is large.** 1,337 of
+7,790 subfault arrivals at Taupo have their envelope *peak* past the end of the record, not
+merely their tail. That is `Clipping` doing its job: a 470 s record materially understates
+far-field shaking for this rupture, and no amount of optimisation changes it. See
+`papers/README.md` finding 7.
+
 ## Whole program, one station
+
+Synthetic faults, Stage 4 §4.6. Kept because the scaling argument below is still the right
+warning; superseded by the production baseline above for anything absolute.
 
 | fault | subfaults | median |
 | --- | ---: | ---: |
