@@ -244,6 +244,12 @@ pub struct Clipping {
     /// Subfault-ray contributions whose envelope peak fell past the end of the record.
     pub peaks_lost: usize,
     /// How far past the end the latest of them fell, seconds. Zero when none were lost.
+    ///
+    /// **A lower bound, not an exact figure.** A contribution ruled out before it is traced —
+    /// see [`SubfaultSource::earliest_start_sample`] — is reported against the earliest start
+    /// it could have had, and its real start is at or after that. So the record is short by
+    /// *at least* this much, which is the direction a caller sizing a record needs it to err
+    /// in. The count above is exact either way.
     pub worst_overrun_s: f32,
 }
 
@@ -476,6 +482,12 @@ impl Simulator {
             conical_sample_count,
             site_table_len: fn_hz.len(),
             ndata,
+            // The air layer is in `vmod` by now and is the slowest thing in it, so the maximum
+            // is unaffected by its presence.
+            max_shear_velocity_km_s: vmod
+                .iter()
+                .map(|layer| layer.vsh_km_s as f32)
+                .fold(f32::MIN, f32::max),
         };
 
         let angles = slip_model
@@ -639,6 +651,13 @@ struct RunScalars {
     /// Length of the site-amplification frequency table.
     site_table_len: usize,
     ndata: usize,
+    /// The fastest shear-wave velocity in the model, km/s.
+    ///
+    /// Not physics — a **bound**. No traced ray can travel faster than the quickest medium it
+    /// could possibly cross, so straight-line distance over this is a lower bound on any
+    /// subfault's travel time, and that is what lets an arrival be ruled out before it is
+    /// traced. See [`SubfaultSource::earliest_start_sample`].
+    max_shear_velocity_km_s: f32,
 }
 
 /// Per-segment angles, plus the corner-frequency coefficient hoisted out of the subfault
@@ -948,6 +967,29 @@ impl SubfaultSource {
                 / PI,
         })
     }
+
+    /// The earliest sample any ray from this subfault could start on.
+    ///
+    /// # Why this is exact rather than heuristic
+    ///
+    /// [`arrival_time_and_angles`] forms the real start from the **traced** travel time. No
+    /// traced path is shorter than the straight line between its endpoints, and no medium on
+    /// it is faster than the fastest layer in the model, so `slant_km / max_shear_velocity`
+    /// is a lower bound on that travel time. Truncation toward zero is monotonic, so the
+    /// bound survives it, and the envelope lead-in `ε·window` is subtracted identically in
+    /// both. A contribution ruled out here is ruled out for real: this prunes, it does not
+    /// approximate.
+    ///
+    /// # What it saves
+    ///
+    /// It gates the **ray tracing**, not just the synthesis. `trace_ray` runs an iterative
+    /// root-find for the stationary ray parameter and a per-layer spreading integral, and a
+    /// contribution that cannot reach the record needs neither. Two divisions decide it.
+    fn earliest_start_sample(&self, run: &RunScalars) -> i32 {
+        let travel_time_s = self.geometry.slant_km / run.max_shear_velocity_km_s;
+        let window_start_s = travel_time_s - run.window_peak_fraction * self.window_s;
+        (self.rupture_time_s / run.dt).trunc() as i32 + (window_start_s / run.dt).trunc() as i32
+    }
 }
 
 /// One ray path from a subfault to the station, after tracing.
@@ -1143,6 +1185,23 @@ fn subfault_pass(
         let Some(source) = SubfaultSource::gather(&mut subfault_rng, &segment, i, j, &ctx) else {
             continue;
         };
+
+        // Ruled out before a single ray is traced, and the bound is exact rather than a
+        // heuristic — see `SubfaultSource::earliest_start_sample`. Every ray of this subfault
+        // shares the bound, because it is built from the straight-line distance rather than
+        // from any particular path.
+        let earliest = source.earliest_start_sample(run);
+        if earliest > run.ndata as i32 {
+            census.pairs_attempted += rayset.len();
+            census.pairs_outside_record += rayset.len();
+            // The peak is past the end for all of them, and by at least this much: the real
+            // start is at or after `earliest`, so the real overrun is at or above the one
+            // reported here. See `Clipping::worst_overrun_s`.
+            for _ in rayset {
+                clipping += Clipping::for_arrival(earliest, source.window_s, run);
+            }
+            continue;
+        }
 
         for (ray_index, &ray_type) in rayset.iter().enumerate() {
             let mut rng = rng.respawn(ray_stream_seed(subfault_seed, ray_index));
