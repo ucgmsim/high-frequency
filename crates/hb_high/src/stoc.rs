@@ -107,6 +107,49 @@ impl SpectrumPlan {
         crate::fft::good_length((2.0 * window_s / dt).trunc() as usize)
     }
 
+    /// The transform length for a contribution that starts at `start_sample` of an
+    /// `ndata`-sample record.
+    ///
+    /// # Boore's factor of two applies to the part that lands
+    ///
+    /// [`Self::length_for`] gives twice the shaping window, which at long path distance is
+    /// twice a path duration of 200 s or more — and that is then placed into a record it does
+    /// not fit in and clipped. On a 470 s Alpine Fault record the mean transform was 144,000
+    /// samples of which 22% reached the record at the far stations: most of every FFT, and
+    /// most of every block of normal deviates, was computed and discarded.
+    ///
+    /// This takes twice the duration that can **land** instead, when that is shorter. The
+    /// factor of two is unchanged and so is its purpose: Boore (1983, p. 1869) makes the
+    /// record about twice the duration of strong shaking so the windowed transient has room to
+    /// decay inside it and the shaping filter's response does not wrap around the period. Both
+    /// still hold, measured against the duration being synthesised rather than against a
+    /// window whose tail was never going to be kept.
+    ///
+    /// # This moves every waveform, and here is why the new numbers are right
+    ///
+    /// `np2` sets `df = 1/(np2·dt)`, so a shorter transform resolves the spectral shape on a
+    /// coarser grid — the retained samples change, not merely the discarded ones. That is the
+    /// same trade [`Self::length_for`]'s own note records for sizing per subfault rather than
+    /// per segment, one rung down the same ladder, and the argument is the one made there: the
+    /// frequency resolution a transient needs is set by the duration it actually occupies.
+    ///
+    /// **The guard is what makes it defensible rather than merely cheaper.** Cutting to the
+    /// landing duration alone would remove the headroom Boore's factor of two exists to
+    /// provide, and the shaping filter's tail would wrap. Keeping the factor is what stops
+    /// this being a truncation.
+    ///
+    /// `start_sample` is 1-based and may be negative; a contribution starting before the
+    /// origin still only has `ndata` samples of record to reach.
+    #[must_use]
+    pub fn length_for_arrival(window_s: f32, dt: f32, start_sample: i32, ndata: usize) -> usize {
+        // How many of this contribution's own samples could land, at most. Clamped at one so a
+        // contribution starting on the last sample still gets a transform rather than a zero
+        // length; one that starts past the end is the caller's to reject, and cheaper to
+        // reject before asking for a length at all.
+        let landing = (ndata as i64 - start_sample.max(1) as i64 + 1).max(1) as usize;
+        Self::length_for(window_s, dt).min(crate::fft::good_length(2 * landing))
+    }
+
     /// Build the tables for a transform of `np2` points.
     ///
     /// `np2` comes from [`Self::length_for`] on the production path. It is taken directly

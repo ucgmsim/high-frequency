@@ -1144,12 +1144,6 @@ fn subfault_pass(
             continue;
         };
 
-        // THIS SUBFAULT'S OWN transform length, not the segment's longest. See
-        // `SpectrumPlan::length_for` for what that changes and why it is the right reading of
-        // Boore's factor of two. Built at most once per distinct length per station.
-        let plan = plans.for_window(source.window_s);
-        let (np2, fold_count) = (plan.np2, plan.fold_count);
-
         for (ray_index, &ray_type) in rayset.iter().enumerate() {
             let mut rng = rng.respawn(ray_stream_seed(subfault_seed, ray_index));
 
@@ -1159,9 +1153,26 @@ fn subfault_pass(
             clipping += Clipping::for_arrival(arrival.start_sample, source.window_s, run);
             census.pairs_attempted += 1;
 
-            // Cheap, and it gates everything below: three transforms and three blocks of
-            // `np2` normal deviates. A contribution that starts past the end of the record
-            // cannot reach it however it is synthesised.
+            // Decided before a transform length is chosen, because no length makes a
+            // contribution that begins past the end of the record reach it. This is the gate
+            // in front of three transforms and three blocks of `np2` normal deviates.
+            if arrival.start_sample > run.ndata as i32 {
+                census.pairs_outside_record += 1;
+                continue;
+            }
+
+            // THIS SUBFAULT'S OWN transform length, clipped to what can land. See
+            // `SpectrumPlan::length_for_arrival` for why that is Boore's factor of two rather
+            // than a truncation of it. Built at most once per distinct length per station.
+            let plan = plans.for_length(SpectrumPlan::length_for_arrival(
+                source.window_s,
+                run.dt,
+                arrival.start_sample,
+                run.ndata,
+            ));
+            let (np2, fold_count) = (plan.np2, plan.fold_count);
+
+            // The other way a contribution can miss: it ends before the record begins.
             let Some(placement) = arrival.placement(np2, run.ndata) else {
                 census.pairs_outside_record += 1;
                 continue;
