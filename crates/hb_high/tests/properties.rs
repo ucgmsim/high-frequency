@@ -42,9 +42,9 @@ use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocit
 use hb_high::radiation::{RadiationAngles, radiation_pattern};
 use hb_high::ray::vertical_slowness;
 use hb_high::rng::{Draws, LegacyPcg};
-use hb_high::site::apply_site_amplification;
+use hb_high::site::{apply_site_amplification, site_gain_curve};
 use libm::tgamma as gamma;
-use ndarray::ArrayView1;
+use ndarray::{ArrayView1, ArrayViewMut1};
 use proptest::prelude::*;
 
 /// Angular difference in degrees, folded into `[0, 180]`.
@@ -677,12 +677,7 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(
-            spec.as_mut_slice(),
-            ArrayView1::from(frequency.as_slice()),
-            ArrayView1::from(&log_frequency[..6]),
-            ArrayView1::from(&factors[..6]),
-        );
+        amplify(spec.as_mut_slice(), &frequency, &log_frequency[..6], &factors[..6]);
 
         let want = level.exp();
         for i in 2..=np2 / 2 {
@@ -704,12 +699,7 @@ proptest! {
         let mut spec = spectrum(np2, 41);
         let original = spec.clone();
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(
-            spec.as_mut_slice(),
-            ArrayView1::from(frequency.as_slice()),
-            ArrayView1::from(&log_frequency[..6]),
-            ArrayView1::from(&factors[..6]),
-        );
+        amplify(spec.as_mut_slice(), &frequency, &log_frequency[..6], &factors[..6]);
         for i in 2..=np2 / 2 {
             prop_assume!(original[i].norm() > 1e-3);
             let before = original[i].im.atan2(original[i].re);
@@ -730,12 +720,7 @@ proptest! {
         let np2 = 1usize << exponent;
         let mut spec = spectrum(np2, 53);
         let (frequency, log_frequency, factors) = site_table(np2, level);
-        apply_site_amplification(
-            spec.as_mut_slice(),
-            ArrayView1::from(frequency.as_slice()),
-            ArrayView1::from(&log_frequency[..6]),
-            ArrayView1::from(&factors[..6]),
-        );
+        amplify(spec.as_mut_slice(), &frequency, &log_frequency[..6], &factors[..6]);
         // Bin `i` counted from DC, so `spec[i]` is the positive frequency and
         // `spec[np2 - i]` its Hermitian partner. 0-based, the Fortran's `i + 1` and
         // `np2 - i + 1` lose their offsets.
@@ -752,6 +737,24 @@ proptest! {
             );
         }
     }
+}
+
+/// Resample the table and apply it, which is what `apply_site_amplification` did in one call
+/// before the curve was split out of it. The properties below are about the pair.
+fn amplify(
+    spectrum: &mut [Complex32],
+    log_frequency_hz: &[f32],
+    table_log_frequency: &[f32],
+    factors: &[f32],
+) {
+    let mut gain = vec![0.0f32; spectrum.len() / 2 + 1];
+    site_gain_curve(
+        ArrayView1::from(log_frequency_hz),
+        ArrayView1::from(table_log_frequency),
+        ArrayView1::from(factors),
+        ArrayViewMut1::from(gain.as_mut_slice()),
+    );
+    apply_site_amplification(spectrum, ArrayView1::from(gain.as_slice()));
 }
 
 /// A frequency axis and a flat site table at `level`, spanning the whole axis so no

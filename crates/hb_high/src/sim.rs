@@ -35,17 +35,18 @@ use ndarray::{Array1, Array2, ArrayView2, ArrayViewMut2, s};
 use std::f32::consts::PI;
 
 use crate::fft::Complex32;
-use crate::geom::{FaultPlane, GeoPoint, SubfaultGeometry, subfault_geometry};
+use crate::geom::{FaultPlane, GeoPoint, SubfaultGeometry, SubfaultRay, subfault_geometry};
 use crate::input::{Segment, StochModel, insert_air_layer};
 use crate::radiation::{
     RadiationAngles, horizontal_radiation_spectrum, vertical_radiation_spectrum,
 };
 use crate::ray::green_function;
 use crate::rng::{DrawSource, Draws};
-use crate::site::{apply_site_amplification, site_amplification_factors};
+use crate::site::{apply_site_amplification, site_amplification_factors, site_gain_curve};
 use crate::state::{Layer, RayState, VelocityModel, VelocityModelInput, WaveMode};
 use crate::stoc::{
-    PlanCache, RayPath, SourceModel, SpectrumPlan, radiate_and_invert, stochastic_spectrum,
+    PlanCache, RayPath, SourceModel, SpectrumPlan, SpectrumShape, radiate_and_invert,
+    stochastic_spectrum,
 };
 
 /// The three output components, in the order they are computed — which is also the order a
@@ -167,6 +168,60 @@ pub struct Simulation {
     pub acc: Array2<f32>,
     /// What did not fit in the record. See [`Clipping`].
     pub clipping: Clipping,
+    /// How much of the work reached the record. See [`Census`].
+    pub census: Census,
+}
+
+/// How much of what a run computed actually reached the record.
+///
+/// [`Clipping`] answers "was the record long enough"; this answers the neighbouring question
+/// "how much did that cost". The two are separate because a run can be entirely complete by
+/// `Clipping`'s standard and still spend most of its time on samples that are discarded: the
+/// shaping window at long path distance is set by the path-duration model and has no upper
+/// cap, so it routinely runs longer than the record it is being placed into.
+///
+/// The counters are `usize` adds against transforms of order 10⁵ samples, so they are free.
+///
+/// `samples_computed` and `samples_accumulated` are **per component** — all three share one
+/// transform length and one placement, so the ratio between them is the same whether you count
+/// one component or all three.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Census {
+    /// `(subfault, ray)` pairs that passed the moment-weight threshold.
+    pub pairs_attempted: usize,
+    /// Of those, the ones whose window landed entirely outside the record — every sample
+    /// computed for them was discarded.
+    pub pairs_outside_record: usize,
+    /// Transform samples computed, summed over pairs.
+    pub samples_computed: usize,
+    /// Transform samples that landed in the record.
+    pub samples_accumulated: usize,
+    /// Distinct transform lengths the station's [`PlanCache`] built.
+    pub transform_lengths: usize,
+}
+
+impl Census {
+    /// Fraction of computed samples that reached the record, in `0..=1`.
+    ///
+    /// Zero for a station that computed nothing, rather than a division by zero.
+    pub fn useful_fraction(&self) -> f64 {
+        if self.samples_computed == 0 {
+            return 0.0;
+        }
+        self.samples_accumulated as f64 / self.samples_computed as f64
+    }
+}
+
+impl std::ops::AddAssign for Census {
+    fn add_assign(&mut self, other: Self) {
+        self.pairs_attempted += other.pairs_attempted;
+        self.pairs_outside_record += other.pairs_outside_record;
+        self.samples_computed += other.samples_computed;
+        self.samples_accumulated += other.samples_accumulated;
+        // Not summed: it is a property of the station's one cache, not of a segment. The
+        // segment-level values are all zero and `run` sets the real one.
+        self.transform_lengths = self.transform_lengths.max(other.transform_lengths);
+    }
 }
 
 /// Arrivals the record was too short to hold.
@@ -449,10 +504,14 @@ impl Simulator {
 
     /// Simulate one station.
     pub fn run(&self, station: crate::input::Station, seed: u64) -> Simulation {
-        let (mut rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);
+        // The station's own stream fills the vertical tables and is then used only as the
+        // template `Draws::respawn` builds sub-streams from, so where it ends up does not
+        // matter — which is why it needs no `mut` past this line.
+        let (rng, deviates) = seed_and_predraw(seed, self.run.conical_sample_count);
         // One row per component, which is the shape this is returned in.
         let mut acc: Array2<f32> = Array2::zeros((Component::ALL.len(), self.run.ndata));
         let mut clipping = Clipping::default();
+        let mut census = Census::default();
         // Shared across every segment of this station, because the lengths repeat across
         // segments as well as within one. See `PlanCache` for why it is per station.
         let mut plans = PlanCache::new(
@@ -463,12 +522,13 @@ impl Simulator {
         );
 
         // ------------------------------------------------- the single station ---
-        for ((seg, angles), weights) in self
+        for (index, ((seg, angles), weights)) in self
             .slip
             .segments
             .iter()
             .zip(&self.angles)
             .zip(&self.weights)
+            .enumerate()
         {
             let geom = subfault_geometry(
                 &FaultPlane {
@@ -505,11 +565,12 @@ impl Simulator {
             // segment -- invisible while every fixture was single-segment. Now the minimum,
             // which is what "closest subfault distance" means.
 
-            clipping += subfault_pass(
-                &mut rng,
+            let (segment_clipping, segment_census) = subfault_pass(
+                &rng,
                 &mut plans,
                 acc.view_mut(),
                 SegmentPass {
+                    index,
                     seg,
                     geom: &geom,
                     windows: &windows,
@@ -523,15 +584,23 @@ impl Simulator {
                     rayset: &self.rayset,
                     deviates: &deviates,
                     siteamp_log_freq: &self.siteamp_log_freq,
+                    station_seed: seed,
                 },
             );
+            clipping += segment_clipping;
+            census += segment_census;
         }
+
+        // A property of the station's one cache, so it is read here rather than accumulated
+        // out of the per-segment reports.
+        census.transform_lengths = plans.len();
 
         Simulation {
             ndata: self.run.ndata,
             dt: self.run.dt,
             acc,
             clipping,
+            census,
         }
     }
 }
@@ -743,13 +812,16 @@ fn time_window_pass(
     WindowPass { window_s, tmax }
 }
 
-/// The five per-segment things the subfault pass reads.
+/// The per-segment things the subfault pass reads.
 ///
 /// Bundled with [`RunContext`] to get `subfault_pass` from thirteen positional arguments
 /// to four. The two bundles are the natural cut: this one changes once per segment, that
-/// one not at all.
+/// one once per station.
 #[derive(Clone, Copy)]
 struct SegmentPass<'a> {
+    /// Position in `slip.segments`. Part of a subfault's identity, and so part of its
+    /// [`substream_seed`].
+    index: usize,
     seg: &'a Segment,
     geom: &'a SubfaultGeometry,
     windows: &'a WindowPass,
@@ -758,7 +830,7 @@ struct SegmentPass<'a> {
     weights: &'a [MomentWeight],
 }
 
-/// Everything the subfault pass reads that is fixed for the whole run.
+/// Everything the subfault pass reads that does not vary within a station.
 #[derive(Clone, Copy)]
 struct RunContext<'a> {
     vmod: &'a VelocityModel,
@@ -768,37 +840,264 @@ struct RunContext<'a> {
     rayset: &'a [RayType],
     deviates: &'a Deviates,
     siteamp_log_freq: &'a Array1<f32>,
+    /// The station's seed, from which every sub-stream below is derived.
+    station_seed: u64,
 }
 
-/// Subfault pass — `hb_high_ref.f`'s second subfault loop.
+/// SplitMix64's finalising mix (Steele et al. 2014).
 ///
-/// **Strike-major: `i` outer, `j` inner, the OPPOSITE of [`time_window_pass`], and here
-/// the order IS the contract.** `irandcnt` advances once per surviving subfault and
-/// indexes the pre-drawn normals, and every `stochastic_spectrum` and
-/// `horizontal_radiation_spectrum` call draws from the live stream. Walking the grid the
-/// other way pairs a different deviate with every subfault and changes every waveform.
-/// See `PORTING_RULES.md` §5.
+/// A **bijection** on `u64`, which is the property the seeding below needs: distinct inputs
+/// stay distinct, so two subfaults cannot be handed the same stream by an unlucky collision.
+#[inline]
+fn mix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The golden-ratio odd constant SplitMix64 steps by. Used here to keep small indices from
+/// mapping to small perturbations of the seed.
+const SEED_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The seed for one subfault's own stream.
+///
+/// A subfault's identity is `(station, segment, grid position)` and nothing about the *order*
+/// it was walked in, which is the whole point: see [`Draws::respawn`] for what that decouples.
+fn substream_seed(station_seed: u64, segment: usize, subfault: usize) -> u64 {
+    mix64(mix64(station_seed ^ (segment as u64).wrapping_mul(SEED_GAMMA)) ^ subfault as u64)
+}
+
+/// The seed for one ray path's stream within a subfault.
+///
+/// Derived from the subfault's seed rather than from the station's, so a ray path is
+/// identified relative to the subfault it leaves — and so that adding a ray type to the
+/// rayset cannot renumber another subfault's streams.
+fn ray_stream_seed(subfault_seed: u64, ray: usize) -> u64 {
+    mix64(subfault_seed ^ (ray as u64).wrapping_add(1).wrapping_mul(SEED_GAMMA))
+}
+
+/// One subfault as a source: where it is, how strong it is, and the medium it sits in.
+///
+/// Everything here is fixed before a ray path is chosen. That is the cut that lets the ray
+/// loop read as a pipeline — trace, place, synthesise, accumulate — rather than as one block
+/// in which the geometry, the medium and the spectrum are computed in whatever order the
+/// original happened to need them.
+struct SubfaultSource {
+    /// Source-to-station geometry.
+    geometry: SubfaultRay,
+    /// This subfault's share of the total moment.
+    weight: MomentWeight,
+    /// Rupture arrival at the subfault, s after origin.
+    rupture_time_s: f32,
+    /// Shaping-window length, Boore (1983) `T_w`.
+    window_s: f32,
+    /// Velocity-model layer the subfault sits in.
+    layer: usize,
+    /// `β` and `ρ` at the subfault, not at the station.
+    shear_velocity_km_s: f32,
+    density_g_cm3: f32,
+    /// `f_ci`, Graves & Pitarka (2010) eq. 13, carrying this subfault's perturbed rupture
+    /// speed.
+    corner_frequency_hz: f32,
+}
+
+impl SubfaultSource {
+    /// Gather one subfault, or `None` when its moment is too small to radiate.
+    ///
+    /// **Draws exactly one normal deviate**, and only when the rupture-velocity sigma is
+    /// non-zero — the perturbation and its draw are the same switch. It comes from the
+    /// subfault's own stream, so it is a function of which subfault this is rather than of how
+    /// many ran before it.
+    fn gather(
+        rng: &mut impl Draws,
+        segment: &SegmentPass<'_>,
+        along_strike: usize,
+        down_dip: usize,
+        ctx: &RunContext<'_>,
+    ) -> Option<Self> {
+        let grid = segment.seg.grid_index(along_strike, down_dip);
+        let weight = segment.weights[grid];
+        if weight < SUBFAULT_WEIGHT_THRESHOLD {
+            return None;
+        }
+
+        let geometry = segment.geom.at(along_strike, down_dip);
+        let layer = source_layer_for(ctx.vmod, geometry.depth_km);
+        let shear_velocity_km_s = ctx.vmod[layer].vsh_km_s as f32;
+
+        let base = ctx.rupture.factor(geometry.depth_km);
+        let rupture_fraction = if ctx.run.rupture_velocity_sigma > 0.0 {
+            (base * (rng.normal() * ctx.run.rupture_velocity_sigma).exp())
+                .min(RUPTURE_VELOCITY_FRACTION_MAX)
+        } else {
+            base
+        };
+
+        Some(Self {
+            geometry,
+            weight,
+            rupture_time_s: segment.seg.at(along_strike, down_dip).rupture_time_s,
+            window_s: segment.windows.window_s[grid],
+            layer,
+            shear_velocity_km_s,
+            density_g_cm3: ctx.vmod[layer].density_g_cm3 as f32,
+            corner_frequency_hz: segment.angles.corner_coeff
+                * rupture_fraction
+                * shear_velocity_km_s
+                / ctx.run.avg_subfault_km
+                / PI,
+        })
+    }
+}
+
+/// One ray path from a subfault to the station, after tracing.
+///
+/// # The straight ray is an alternative, not a patch
+///
+/// Three of these four fields are computed differently under the straight-ray approximation,
+/// and the fourth — the take-off angle — is too. Those two decisions used to sit sixty lines
+/// apart with the spectrum synthesis between them, which made it easy to read the second as a
+/// correction to the first. Producing the whole struct in one place is what says they are one
+/// choice.
+struct TracedRay {
+    /// Path length along the ray, km. **Not** epicentral distance.
+    path_length_km: f32,
+    /// `q̄`, the travel-time weighted `Σ t/q` along the path (Ou & Herrmann 1990).
+    qbar: f32,
+    /// Where the trace starts relative to the origin time, s. Can be negative — the envelope
+    /// leads its own peak by `ε` of the window.
+    window_start_s: f32,
+    /// Take-off angle at the source, radians.
+    takeoff_rad: f32,
+}
+
+/// Trace one ray from a subfault to the station.
+fn trace_ray(
+    state: &mut RayState,
+    source: &SubfaultSource,
+    ray_type: RayType,
+    ctx: &RunContext<'_>,
+) -> TracedRay {
+    // The tracing runs even for a straight ray, which then discards the result — ray type 0
+    // borrows type 1's tracing. It draws nothing, so what that costs is time rather than a
+    // position in a stream.
+    let green = green_function(
+        state,
+        ctx.vmod,
+        source.geometry.depth_km,
+        source.geometry.horiz_km,
+        ray_type.trace_type(),
+        WaveMode::Sh,
+    );
+
+    // Incidence angle from the ray parameter: `sin(i)/β = p`.
+    let sine = source.shear_velocity_km_s * green.rp0;
+    let incidence = if sine > 1.0 { 0.5 * PI } else { sine.asin() };
+
+    let kind = ray_type.kind();
+    let (path_length_km, qbar, window_start_s) = if kind == RayKind::StraightRay {
+        let path_length_km = source.geometry.slant_km;
+        (
+            path_length_km,
+            path_length_km / (source.shear_velocity_km_s * STRAIGHT_RAY_Q),
+            STRAIGHT_RAY_WINDOW_START_FRACTION * path_length_km / STRAIGHT_RAY_VELOCITY_KM_S,
+        )
+    } else {
+        (
+            green.rpath,
+            green.qbar,
+            green.stime - ctx.run.window_peak_fraction * source.window_s,
+        )
+    };
+
+    TracedRay {
+        path_length_km,
+        qbar,
+        window_start_s,
+        takeoff_rad: match kind {
+            // The approximation ignores the traced ray parameter and takes the geometric
+            // take-off angle, for the same reason it ignores the traced path length.
+            RayKind::StraightRay => source.geometry.takeoff_rad,
+            RayKind::Upgoing => PI - incidence,
+            RayKind::Downgoing => incidence,
+        },
+    }
+}
+
+/// When one subfault's contribution reaches the record, and through what geometry.
+struct Arrival {
+    /// 1-based sample the contribution's first sample lands on. **Can be negative**: both
+    /// terms below truncate toward zero, so a window starting before the origin time gives a
+    /// negative start. [`Arrival::placement`] is what handles that, and relies on it.
+    start_sample: i32,
+    /// The double-couple geometry this contribution radiates through.
+    angles: RadiationAngles,
+}
+
+/// Place a traced ray in time, and orient it.
+///
+/// **This is the function the whole pass is arranged around.** It is cheap — two divisions
+/// and a struct — and it decides whether the expensive work that follows can reach the record
+/// at all. Everything downstream of it costs a transform per component.
+fn arrival_time_and_angles(
+    ray: &TracedRay,
+    source: &SubfaultSource,
+    segment: &SegmentAngles,
+    run: &RunScalars,
+) -> Arrival {
+    Arrival {
+        start_sample: (source.rupture_time_s / run.dt).trunc() as i32
+            + (ray.window_start_s / run.dt).trunc() as i32,
+        angles: RadiationAngles {
+            strike_rad: segment.strike_rad,
+            dip_rad: segment.dip_rad,
+            rake_rad: segment.rake_rad,
+            azimuth_rad: source.geometry.azimuth_rad,
+            takeoff_rad: ray.takeoff_rad,
+        },
+    }
+}
+
+impl Arrival {
+    /// Where an `np2`-sample window starting here lands in an `ndata`-sample record.
+    fn placement(&self, np2: usize, ndata: usize) -> Option<Placement> {
+        Placement::clip(self.start_sample, np2, ndata)
+    }
+}
+
+/// Sum every subfault of one segment into the station's accumulator.
+///
+/// # The walk order is no longer a contract, and that is deliberate
+///
+/// It used to be. Every subfault drew from one shared per-station stream, so the deviates a
+/// subfault received depended on how many had drawn before it, and walking the grid the other
+/// way moved every waveform. Each `(subfault, ray)` now draws from a stream seeded by its own
+/// identity — see [`substream_seed`] — so the order is free, and what that buys is the
+/// `continue` below: a contribution that cannot reach the record can be skipped, and the ones
+/// that can are bit-identical.
+///
+/// Strike-major is kept because it is the order the grid is laid out in.
 fn subfault_pass(
-    rng: &mut impl Draws,
+    rng: &impl Draws,
     plans: &mut PlanCache,
     mut acc: ArrayViewMut2<'_, f32>,
     segment: SegmentPass<'_>,
     ctx: RunContext<'_>,
-) -> Clipping {
+) -> (Clipping, Census) {
     let SegmentPass {
         seg,
-        geom,
         windows,
         angles,
-        weights,
+        ..
     } = segment;
     let RunContext {
         vmod,
-        rupture,
         run,
         rayset,
         deviates,
         siteamp_log_freq,
+        station_seed,
+        ..
     } = ctx;
 
     // Fixed for the whole run, so it is built once here rather than per call. Six of
@@ -828,147 +1127,119 @@ fn subfault_pass(
     let mut subfault_acc: Array2<f32> = Array2::zeros((components, np2_max));
     let mut radiation: Array1<f32> = Array1::zeros(fold_max);
     let mut siteamp_factors: Array1<f32> = Array1::zeros(run.site_table_len);
-    let mut ray = RayState::default();
+    // The site gain resampled onto this subfault's frequency axis -- see `site_gain_curve` for
+    // why it is built once per (subfault, ray) rather than once per component.
+    let mut site_gain: Array1<f32> = Array1::zeros(fold_max);
+    // Sized for the segment's longest transform for the same reason the two above are.
+    let mut shape = SpectrumShape::with_capacity(np2_max);
+    let mut ray_state = RayState::default();
     let mut clipping = Clipping::default();
+    let mut census = Census::default();
 
     for (i, j) in seg.strike_major() {
-        let subfault = seg.at(i, j);
-        let weight = weights[seg.grid_index(i, j)];
-        if weight < SUBFAULT_WEIGHT_THRESHOLD {
-            continue; // goto 4 lands on the inner loop's terminator
-        }
-        let ray_geometry = geom.at(i, j);
-        let subfault_window_s = windows.window_s[seg.grid_index(i, j)];
+        let subfault_seed = substream_seed(station_seed, segment.index, seg.grid_index(i, j));
+        let mut subfault_rng = rng.respawn(subfault_seed);
+
+        let Some(source) = SubfaultSource::gather(&mut subfault_rng, &segment, i, j, &ctx) else {
+            continue;
+        };
 
         // THIS SUBFAULT'S OWN transform length, not the segment's longest. See
         // `SpectrumPlan::length_for` for what that changes and why it is the right reading of
         // Boore's factor of two. Built at most once per distinct length per station.
-        let plan = plans.for_window(subfault_window_s);
+        let plan = plans.for_window(source.window_s);
         let (np2, fold_count) = (plan.np2, plan.fold_count);
 
-        let source_layer = source_layer_for(vmod, ray_geometry.depth_km);
-        let shear_velocity_km_s = vmod[source_layer].vsh_km_s as f32;
-        let density_g_cm3 = vmod[source_layer].density_g_cm3 as f32;
+        for (ray_index, &ray_type) in rayset.iter().enumerate() {
+            let mut rng = rng.respawn(ray_stream_seed(subfault_seed, ray_index));
 
-        let base_rvf = rupture.factor(ray_geometry.depth_km);
-        let rupture_fraction = if run.rupture_velocity_sigma > 0.0 {
-            (base_rvf * (rng.normal() * run.rupture_velocity_sigma).exp())
-                .min(RUPTURE_VELOCITY_FRACTION_MAX)
-        } else {
-            base_rvf
-        };
+            let ray = trace_ray(&mut ray_state, &source, ray_type, &ctx);
+            let arrival = arrival_time_and_angles(&ray, &source, angles, run);
 
-        let corner_frequency_hz =
-            angles.corner_coeff * rupture_fraction * shear_velocity_km_s / run.avg_subfault_km / PI;
+            clipping += Clipping::for_arrival(arrival.start_sample, source.window_s, run);
+            census.pairs_attempted += 1;
 
-        for &ray_type in rayset {
-            let kind = ray_type.kind();
-
-            // The tracing runs even for a straight ray -- type 0 borrows type 1's tracing and
-            // then the straight-line values below overwrite the results. Wasteful, but the
-            // tracer also advances no random state, so removing it is safe only if you are
-            // sure of that.
-            let green = green_function(
-                &mut ray,
-                vmod,
-                ray_geometry.depth_km,
-                ray_geometry.horiz_km,
-                ray_type.trace_type(),
-                WaveMode::Sh,
-            );
-            // The straight-ray option discards the traced result entirely and substitutes a
-            // geometric one, so the two are alternatives rather than a default and a patch.
-            // The tracer still ran either way -- see the note at the loop head.
-            // The travel time itself is not one of them: it only ever fed `window_start_s`,
-            // which the two arms compute differently anyway.
-            let (path_length_km, qbar, window_start_s) = if kind == RayKind::StraightRay {
-                let path_length_km = ray_geometry.slant_km;
-                let travel_time_s = path_length_km / STRAIGHT_RAY_VELOCITY_KM_S;
-                (
-                    path_length_km,
-                    path_length_km / (shear_velocity_km_s * STRAIGHT_RAY_Q),
-                    STRAIGHT_RAY_WINDOW_START_FRACTION * travel_time_s,
-                )
-            } else {
-                (
-                    green.rpath,
-                    green.qbar,
-                    green.stime - run.window_peak_fraction * subfault_window_s,
-                )
+            // Cheap, and it gates everything below: three transforms and three blocks of
+            // `np2` normal deviates. A contribution that starts past the end of the record
+            // cannot reach it however it is synthesised.
+            let Some(placement) = arrival.placement(np2, run.ndata) else {
+                census.pairs_outside_record += 1;
+                continue;
             };
+            census.samples_computed += np2;
+            census.samples_accumulated += placement.count;
 
-            // Three calls in component order: each draws `np2` normal deviates. The only
-            // field that differs between them is `fmax_hz`, which the vertical caps. Each
-            // writes a full row, so there is nothing to reset between rays.
+            // Three phase realisations in component order: each draws `np2` normal deviates,
+            // and each writes a full row, so there is nothing to reset between rays.
+            //
+            // The SHAPE behind them is rebuilt only when `f_max` changes it, which means twice
+            // at most and — whenever `f_max` is already at or below the vertical's ceiling —
+            // once. `capped_fmax` is the only per-component input to it.
+            let mut built_for = f32::NAN;
             for component in Component::ALL {
+                let fmax_hz = component.capped_fmax(run.fmax_hz);
+                // NaN compares unequal to everything, so the first component always builds.
+                if fmax_hz != built_for {
+                    shape.refresh(
+                        plan,
+                        &model,
+                        &RayPath {
+                            distance_km: ray.path_length_km,
+                            window_s: source.window_s,
+                            shear_velocity_km_s: source.shear_velocity_km_s,
+                            density_g_cm3: source.density_g_cm3,
+                            corner_frequency_hz: source.corner_frequency_hz,
+                            fmax_hz,
+                            qbar: ray.qbar,
+                        },
+                    );
+                    built_for = fmax_hz;
+                }
                 stochastic_spectrum(
-                    rng,
+                    &mut rng,
                     plan,
-                    &model,
-                    &RayPath {
-                        distance_km: path_length_km,
-                        window_s: subfault_window_s,
-                        shear_velocity_km_s,
-                        density_g_cm3,
-                        corner_frequency_hz,
-                        fmax_hz: component.capped_fmax(run.fmax_hz),
-                        qbar,
-                    },
+                    &mut shape,
                     spectrum.row_mut(component.index()).slice_mut(s![..np2]),
                 );
             }
 
             // Unconditional. There is no run for which the quarter-wavelength site
             // amplification should be off, so it is not a choice a caller gets to make.
+            //
+            // Built ONCE for the three components. The curve depends on the source layer and
+            // the transform length; the component it multiplies is not one of its inputs, so
+            // computing it inside the per-component loop was `fold_count` exponentials done
+            // three times over.
             site_amplification_factors(
                 vmod,
-                source_layer,
+                source.layer,
                 siteamp_log_freq.view(),
                 siteamp_factors.view_mut(),
+            );
+            site_gain_curve(
+                plan.log_frequency_hz.view(),
+                siteamp_log_freq.view(),
+                siteamp_factors.view(),
+                site_gain.slice_mut(s![..fold_count]),
             );
             for mut spec in spectrum.rows_mut() {
                 apply_site_amplification(
                     spec.slice_mut(s![..np2])
                         .into_slice()
                         .expect("a prefix of a row of a C-order Array2 is contiguous"),
-                    plan.log_frequency_hz.view(),
-                    siteamp_log_freq.view(),
-                    siteamp_factors.view(),
+                    site_gain.slice(s![..fold_count]),
                 );
             }
 
-            // Incidence angle from the ray parameter: sin(i)/vs = ray_parameter.
-            let ray_parameter = green.rp0;
-            let incidence = if shear_velocity_km_s * ray_parameter > 1.0 {
-                0.5 * PI
-            } else {
-                (shear_velocity_km_s * ray_parameter).asin()
-            };
-            let th = match kind {
-                // The straight-ray approximation ignores the traced ray parameter and
-                // uses the geometric take-off angle.
-                RayKind::StraightRay => ray_geometry.takeoff_rad,
-                RayKind::Upgoing => PI - incidence,
-                RayKind::Downgoing => incidence,
-            };
-            let pa = ray_geometry.azimuth_rad;
-
-            // The ONLY difference between the three components is which radiation
-            // routine runs, and the `Option` carries it: `Some` is a horizontal, which
-            // draws 5,000 deviates; `None` is the vertical, which draws none.
-            let arrival = RadiationAngles {
-                strike_rad: angles.strike_rad,
-                dip_rad: angles.dip_rad,
-                rake_rad: angles.rake_rad,
-                azimuth_rad: pa,
-                takeoff_rad: th,
-            };
+            // The ONLY difference between the three components is which radiation routine
+            // runs: a horizontal draws 5,000 deviates, the vertical draws none and reads the
+            // pre-filled tables instead.
             for component in Component::ALL {
                 match component.radiation_mode() {
                     RadiationMode::Horizontal { azimuth_offset_deg } => {
                         horizontal_radiation_spectrum(
-                            rng,
-                            &arrival,
+                            &mut rng,
+                            &arrival.angles,
                             plan.frequency_hz.view(),
                             azimuth_offset_deg.to_radians(),
                             run.conical_sample_count,
@@ -976,7 +1247,7 @@ fn subfault_pass(
                         )
                     }
                     RadiationMode::Vertical => vertical_radiation_spectrum(
-                        &arrival,
+                        &arrival.angles,
                         plan.frequency_hz.view(),
                         &deviates.radv_uniform_a,
                         &deviates.radv_uniform_b,
@@ -994,36 +1265,16 @@ fn subfault_pass(
                 );
             }
 
-            // Both terms truncate TOWARD ZERO, not toward negative infinity, so a negative
-            // `window_start_s` makes `kst` smaller and possibly negative. `accumulate_subfault`
-            // relies on that and clips; see `PORTING_RULES.md` §7.
-            let kst = (subfault.rupture_time_s / run.dt).trunc() as i32
-                + (window_start_s / run.dt).trunc() as i32;
-
-            // ONE DRAW, AND IT MUST STAY. A sub-event loop here once drew a uniform and
-            // turned it into a time offset, but the sub-event count was frozen at 1 and the
-            // offset was then unconditionally zeroed -- computed and thrown away.
-            //
-            // The arithmetic is gone. THE DRAW IS NOT. It advances the shared generator once
-            // per (subfault, ray), and every sample drawn after it depends on where the stream
-            // ends up. Deleting this as obviously-dead code changes every waveform in the
-            // program. See `PHYSICS.md` §9.
-            let _stream_advance = rng.uniform();
-
-            clipping += Clipping::for_arrival(kst, subfault_window_s, run);
-
-            if let Some(at) = Placement::clip(kst, np2, run.ndata) {
-                accumulate_subfault(
-                    acc.view_mut(),
-                    subfault_acc.slice(s![.., ..np2]),
-                    weight,
-                    &at,
-                );
-            }
+            accumulate_subfault(
+                acc.view_mut(),
+                subfault_acc.slice(s![.., ..np2]),
+                source.weight,
+                &placement,
+            );
         }
     }
 
-    clipping
+    (clipping, census)
 }
 
 /// Where a subfault's `np2`-sample window lands in the record, after clipping to it.

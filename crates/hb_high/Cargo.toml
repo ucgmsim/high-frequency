@@ -58,5 +58,11 @@ harness = false
 name = "whole"
 harness = false
 
+# Not criterion: one iteration is minutes on the real deck, so there is nothing for a
+# sampling harness to sample. It prints one line per station and exits.
+[[bench]]
+name = "alpine"
+harness = false
+
 [lints]
 workspace = true

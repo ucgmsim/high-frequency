@@ -12,7 +12,7 @@ use hb_high::fft::Complex32;
 use hb_high::ray::green_function;
 use hb_high::rng::{Draws, LegacyPcg};
 use hb_high::state::{RayState, VelocityModel};
-use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, stochastic_spectrum};
+use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, SpectrumShape, stochastic_spectrum};
 use ndarray::Array1;
 
 mod common;
@@ -60,8 +60,11 @@ fn stoc_f_matches_fortran() {
         // still records it, so it is still read off the record and simply not passed.
         let _ = dlm;
         let mut cw: Array1<Complex32> = Array1::zeros(np2);
-        stochastic_spectrum(
-            &mut rng,
+        // The deterministic shape is `SpectrumShape::refresh` since Stage 6 §6.4, so this
+        // golden now drives the pair. The split is bit-exact -- the same arithmetic in the
+        // same order -- which is what this fixture checks.
+        let mut shape = SpectrumShape::with_capacity(np2);
+        shape.refresh(
             &plan,
             &SourceModel {
                 dt,
@@ -80,8 +83,8 @@ fn stoc_f_matches_fortran() {
                 fmax_hz: fmx,
                 qbar: qb,
             },
-            cw.view_mut(),
         );
+        stochastic_spectrum(&mut rng, &plan, &mut shape, cw.view_mut());
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
         // Scale from the Fortran record, so the tolerance does not float with our

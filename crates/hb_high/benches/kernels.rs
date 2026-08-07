@@ -32,11 +32,11 @@ use hb_high::ray::{
     green_function, stationary_ray_parameter, vertical_slowness,
 };
 use hb_high::rng::{Draws, LegacyPcg, Pcg};
-use hb_high::site::{apply_site_amplification, site_amplification_factors};
+use hb_high::site::{apply_site_amplification, site_amplification_factors, site_gain_curve};
 use hb_high::state::WaveMode;
 use hb_high::state::{Layer, RayState, VelocityModel};
 use hb_high::stoc::stochastic_spectrum;
-use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, radiate_and_invert};
+use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, SpectrumShape, radiate_and_invert};
 use ndarray::{ArrayView1, ArrayViewMut1};
 
 /// Transform lengths the program actually produces.
@@ -419,7 +419,14 @@ fn bench_spectrum(c: &mut Criterion) {
                     qbar: 0.02,
                 };
                 let mut spectrum: ndarray::Array1<Complex32> = ndarray::Array1::zeros(np2);
-                b.iter(|| stochastic_spectrum(&mut g, &plan, &model, &path, spectrum.view_mut()))
+                // The shape is refreshed inside the loop so this still measures the whole
+                // per-component cost, which is what it always measured. `spectrum_shape` below
+                // is what shows how much of it the two horizontals now share.
+                let mut shape = SpectrumShape::with_capacity(np2);
+                b.iter(|| {
+                    shape.refresh(&plan, &model, &path);
+                    stochastic_spectrum(&mut g, &plan, &mut shape, spectrum.view_mut())
+                })
             },
         );
 
@@ -446,20 +453,34 @@ fn bench_spectrum(c: &mut Criterion) {
             },
         );
 
+        // Benched apart because they now run at different rates. The curve is built once per
+        // (subfault, ray) and the multiply runs three times, once per component, so the split
+        // is what shows whether moving the interpolation out of the per-component loop was
+        // worth anything.
+        group.bench_with_input(
+            BenchmarkId::new("site_gain_curve", np2),
+            &np2,
+            |b, &_np2| {
+                let mut gain: ndarray::Array1<f32> = ndarray::Array1::zeros(np2 / 2 + 1);
+                b.iter(|| {
+                    site_gain_curve(
+                        ArrayView1::from(log_dfr.as_slice()),
+                        ArrayView1::from(&fn_[..20]),
+                        ArrayView1::from(&an[..20]),
+                        gain.view_mut(),
+                    )
+                })
+            },
+        );
+
         group.bench_with_input(
             BenchmarkId::new("apply_site_amplification", np2),
             &np2,
             |b, &_np2| {
+                let gain: ndarray::Array1<f32> = ndarray::Array1::from_elem(np2 / 2 + 1, 1.7);
                 b.iter_batched_ref(
                     || src.clone(),
-                    |cw| {
-                        apply_site_amplification(
-                            cw.as_mut_slice(),
-                            ArrayView1::from(log_dfr.as_slice()),
-                            ArrayView1::from(&fn_[..20]),
-                            ArrayView1::from(&an[..20]),
-                        )
-                    },
+                    |cw| apply_site_amplification(cw.as_mut_slice(), gain.view()),
                     criterion::BatchSize::SmallInput,
                 )
             },

@@ -48,6 +48,33 @@ pub use pcg::Pcg;
 /// and the production path keeps a direct call. The normal-draw loop is the largest single
 /// consumer of RNG traffic in the program; it should not pay a branch to be testable.
 pub trait Draws {
+    /// A fresh source **of the same kind**, started at `seed`.
+    ///
+    /// # Why sub-streams exist
+    ///
+    /// A station used to be one stream, and the position in it therefore depended on how many
+    /// subfaults had already drawn from it. That made the draw sequence a function of *which
+    /// subfaults ran*, so skipping one — because its contribution lands past the end of the
+    /// record and is discarded anyway — moved every waveform after it. Work that provably
+    /// changes nothing could not be removed without changing everything.
+    ///
+    /// Giving each `(subfault, ray)` its own stream cuts that dependency: a subfault's draws
+    /// are a function of its own identity and nothing else, so the ones that contribute
+    /// nothing can be dropped and the rest are bit-identical. See [`sim::substream_seed`] for
+    /// how the identity is formed.
+    ///
+    /// [`sim::substream_seed`]: crate::sim
+    ///
+    /// # Why it takes `&self` rather than being an associated function
+    ///
+    /// [`DrawSource`] decides which implementation to use by reading the environment, and
+    /// that decision is made once per run. Rebuilding through the existing value carries the
+    /// decision with it — a sub-stream is always the same kind as its parent — where a bare
+    /// constructor would have to repeat the environment lookup once per subfault.
+    fn respawn(&self, seed: u64) -> Self
+    where
+        Self: Sized;
+
     /// A uniform deviate on `[0, 1)`, advancing the stream.
     ///
     /// **The half-open range is a contract, not a convention.** Box-Muller rejects zeros
@@ -133,6 +160,15 @@ impl DrawSource {
 }
 
 impl Draws for DrawSource {
+    /// The same variant, reseeded — which is what carries `for_station`'s environment
+    /// decision into every sub-stream without repeating the lookup.
+    fn respawn(&self, seed: u64) -> Self {
+        match self {
+            Self::Modern(g) => Self::Modern(g.respawn(seed)),
+            Self::Fixture(g) => Self::Fixture(g.respawn(seed)),
+        }
+    }
+
     #[inline]
     fn uniform(&mut self) -> f32 {
         match self {

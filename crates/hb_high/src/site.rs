@@ -83,31 +83,39 @@ pub fn site_amplification_factors(
     });
 }
 
-/// Apply the amplification factors to a spectrum, in place. (orig. `hb_high_ref.f:3120`)
+/// Resample the amplification table onto a transform's frequency axis, as a **linear gain per
+/// bin**. (orig. `hb_high_ref.f:3120`)
 ///
-/// Piecewise-linear interpolation of `factors` against `ln(frequency)`, exponentiated and
-/// multiplied onto each positive-frequency bin, then Hermitian symmetry re-imposed over the
-/// negative half.
+/// Piecewise-linear interpolation of `factors` against `ln(frequency)`, then exponentiated.
+/// Both inputs are natural logs — of frequency and of amplification respectively — which is why
+/// the interpolation is linear in `ln f` and the result is exponentiated at the end.
 ///
-/// Both `log_frequency` and `factors` are natural logs — of frequency and of amplification
-/// respectively — which is why the interpolation is linear in `ln f` and the result is
-/// exponentiated at the end.
+/// # Why this is separate from applying it
 ///
-/// # `log_frequency` must be sorted ascending
+/// The curve is a function of the **source layer and the transform length, and of nothing
+/// else** — not the component, not the ray, not the spectrum it multiplies. It used to be
+/// computed inside the application, which ran once per component, so the same `fold_count`
+/// exponentials and the same interpolation walk were repeated three times for every subfault
+/// and every ray. Building the curve once and multiplying by it three times is the same
+/// arithmetic in the same order, to the bit.
 ///
-/// The interpolation cursor only ever advances, so an unsorted table silently produces wrong
-/// factors rather than an error. [`site_amplification_factors`] is the only producer and does
+/// `gain` is `np2/2 + 1` long: the positive half of the spectrum plus Nyquist. The negative
+/// half is not a free choice — [`apply_site_amplification`] mirrors it.
+///
+/// # `log_frequency_hz` must be sorted ascending
+///
+/// The interpolation cursor only ever advances, so an unsorted axis silently produces wrong
+/// factors rather than an error. [`crate::stoc::SpectrumPlan`] is the only producer and does
 /// emit ascending frequencies.
-pub fn apply_site_amplification(
-    spectrum: &mut [Complex32],
-    // `ln(frequency_hz[i])`, precomputed per segment. Index 0 is never read: `ln(0)` has no
+pub fn site_gain_curve(
+    // `ln(frequency_hz[i])`, from the transform's plan. Index 0 is never read: `ln(0)` has no
     // meaning as a frequency.
     log_frequency_hz: ArrayView1<f32>,
     table_log_frequency: ArrayView1<f32>,
     factors: ArrayView1<f32>,
+    mut gain: ArrayViewMut1<f32>,
 ) {
-    let np2 = spectrum.len();
-    let np = np2 / 2;
+    let np = gain.len() - 1;
     // The table's own length, rather than a count passed alongside it that could disagree.
     let table_count = factors.len();
 
@@ -120,7 +128,11 @@ pub fn apply_site_amplification(
 
     // DC. The factors are LOG amplitudes, so this exponentiates like every interior bin does.
     // There is nothing to interpolate at zero frequency, so the bottom table entry is used.
-    spectrum[0] *= factors[0].exp();
+    gain[0] = factors[0].exp();
+    // Nyquist takes the top of the table, exponentiated for the same reason as DC. Unlike DC —
+    // which `stochastic_spectrum` leaves at zero, making any gain unobservable there — this
+    // bin carries a value, so the gain applied to it is observable in the output.
+    gain[np] = factors[table_count - 1].exp();
 
     for i in 1..np {
         let freq = log_frequency_hz[i];
@@ -147,9 +159,32 @@ pub fn apply_site_amplification(
             }
         }
 
-        let fac = (am + (freq - fm) * (ap - am) / (fp - fm)).exp();
-        spectrum[i] *= fac;
+        gain[i] = (am + (freq - fm) * (ap - am) / (fp - fm)).exp();
     }
+}
+
+/// Multiply a spectrum by a gain curve and re-impose Hermitian symmetry, in place.
+///
+/// `gain` comes from [`site_gain_curve`] and covers bins `0..=np2/2`; the negative half is
+/// mirrored rather than multiplied, so passing a curve of any other length is a bug the length
+/// assertion catches.
+pub fn apply_site_amplification(spectrum: &mut [Complex32], gain: ArrayView1<f32>) {
+    let np2 = spectrum.len();
+    let np = np2 / 2;
+    assert_eq!(
+        gain.len(),
+        np + 1,
+        "a gain curve covers the positive half plus Nyquist, {} bins for a {np2}-point transform",
+        np + 1
+    );
+
+    // Bins `0..=np`, which is DC, the interior, and Nyquist in one pass. Nyquist is multiplied
+    // before the mirror rather than after it, and that is not a reordering: the mirror reads
+    // bins `1..np` and never bin `np`, so the two do not interact.
+    azip!((
+        bin in &mut ArrayViewMut1::from(&mut spectrum[..=np]),
+        &g in gain,
+    ) *bin *= g);
 
     // Re-impose Hermitian symmetry: bin `np2 - k` takes `conj(bin k)` for k in `1..np`. The two
     // halves are disjoint, so this is a reversed view of the head assigned into the tail -- the
@@ -157,16 +192,8 @@ pub fn apply_site_amplification(
     // purpose.
     //
     // Checked on np2 = 16, where np = 8: dest runs 9..15 while src runs 7 down to 1, so dest 9
-    // takes src 7 and dest 15 takes src 1. A reversed view cannot be off by one. Bin `np` is
-    // its own mirror and is not written here; the Nyquist line below is what touches it.
-    {
-        let mut view = ArrayViewMut1::from(&mut *spectrum);
-        let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
-        azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
-    }
-
-    // Nyquist takes the top of the table, exponentiated for the same reason as DC. Unlike DC --
-    // which `stochastic_spectrum` leaves at zero, making any gain unobservable there -- this
-    // bin carries a value, so the gain applied to it is observable in the output.
-    spectrum[np] *= factors[table_count - 1].exp();
+    // takes src 7 and dest 15 takes src 1. A reversed view cannot be off by one.
+    let mut view = ArrayViewMut1::from(spectrum);
+    let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
+    azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
 }

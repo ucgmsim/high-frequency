@@ -40,6 +40,12 @@ impl Pcg {
 }
 
 impl Draws for Pcg {
+    /// `seed_from_u64` is a SplitMix64 expansion, so nearby sub-stream seeds land on
+    /// unrelated states rather than at nearby offsets of one.
+    fn respawn(&self, seed: u64) -> Self {
+        Self::seed(seed)
+    }
+
     #[inline]
     fn uniform(&mut self) -> f32 {
         unit_interval_from(self.generator.next_u32())

@@ -298,173 +298,243 @@ pub struct RayPath {
 /// scale**: `fsa` is measured from the very sequence that produced `ac`, so a scale factor `s`
 /// in the generator gives `ac` a factor `s`, `fsa` a factor `s²`, and `amp` a factor `1/s`.
 /// The product is invariant. One less thing tying the result to a particular generator.
+/// The deterministic half of one subfault's spectrum, plus the scratch its phase
+/// realisations are drawn into.
+///
+/// # Why the shape is a value rather than a step
+///
+/// Nothing in the envelope or the amplitude depends on the random phase, and for the **two
+/// horizontals nothing in them differs at all**: `f_max` is the only per-component input to
+/// either, and only the vertical caps it. Both were nevertheless rebuilt for each of the three
+/// components of every subfault and every ray. Building them once and drawing three phase
+/// realisations against them is the same arithmetic in the same order.
+///
+/// # Why it owns its buffers
+///
+/// The three vectors were allocated and freed **per call**, so at a realistic `np2` of ~144,000
+/// a station churned tens of gigabytes through the allocator to hold numbers it overwrote
+/// immediately. They are sized once for the longest transform a segment will use and then used
+/// a prefix at a time, which is what every other buffer on this path already does.
+///
+/// The tail beyond the current prefix holds the previous subfault's numbers. Every read below
+/// goes through a slice of the current length, which is what makes the stale tail unreachable
+/// rather than merely unread.
+pub struct SpectrumShape {
+    /// The Saragoni–Hart envelope on the sample grid, `w(t) = a·t^b·e^(−ct)`.
+    envelope: Vec<f32>,
+    /// Boore (1983) eq. 1's amplitude spectrum.
+    ///
+    /// **Bin 0 is never written and must stay zero.** It is zeroed at construction and the
+    /// fill below starts at 1, which is what leaves DC at zero in the finished spectrum.
+    amplitude: Vec<f64>,
+    /// The normal deviates one realisation draws, held so the draw does not allocate.
+    deviates: Vec<f32>,
+    /// Sample interval, carried from the last [`SpectrumShape::refresh`] because the phase
+    /// realisation needs it too.
+    dt: f32,
+}
+
+impl SpectrumShape {
+    /// Buffers for transforms of up to `np2_max` points.
+    #[must_use]
+    pub fn with_capacity(np2_max: usize) -> Self {
+        Self {
+            envelope: vec![0.0; np2_max],
+            amplitude: vec![0.0; np2_max],
+            deviates: vec![0.0; np2_max],
+            dt: 0.0,
+        }
+    }
+
+    /// Rebuild the envelope and the amplitude for one `(subfault, ray, f_max)`.
+    ///
+    /// See [`stochastic_spectrum`] for the physics; everything here was its first half.
+    pub fn refresh(&mut self, plan: &SpectrumPlan, model: &SourceModel, path: &RayPath) {
+        // Destructured so that the arithmetic below reads as arithmetic, under the names the
+        // derivation uses.
+        let &SourceModel {
+            dt,
+            window_eps,
+            window_eta,
+            subevent_moment,
+            kappa_s,
+            moment_scale,
+        } = model;
+        let &RayPath {
+            distance_km,
+            window_s,
+            shear_velocity_km_s,
+            density_g_cm3,
+            corner_frequency_hz,
+            fmax_hz,
+            qbar,
+        } = path;
+        let SpectrumPlan {
+            np2,
+            fold_count,
+            frequency_hz,
+            path_exponent,
+            envelope_power,
+            ..
+        } = plan;
+        let (np2, fold_count) = (*np2, *fold_count);
+
+        let fc2 = corner_frequency_hz * corner_frequency_hz;
+        let distance_cm = distance_km * CM_PER_KM;
+
+        // The Saragoni & Hart (1974) shaping window, `w(t) = a·t^b·e^(−ct)·H(t)`, in the
+        // parameterisation of Boore (1983) eq. 7–11. `b` and `c` are eq. 8 and 9; they place the
+        // envelope peak at a fraction `ε` of the duration and bring it down to a fraction `η` of
+        // the peak by the end.
+        let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
+        let c = b / window_eps / window_s;
+        // Boore (1983) eq. 11, `a = [(2c)^(2b+1) / Γ(2b+1)]^(1/2)`, which normalises the envelope
+        // to unit squared area. The mixed precision is deliberate: `2b+1` is formed in `f32`, the
+        // division and sqrt happen in `f64`, and the result narrows back.
+        let gsa = (2.0 * b + 1.0) as f64;
+        let gm = libm::tgamma(gsa);
+        let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
+
+        // Evaluate the envelope on the sample grid `t = i·dt`.
+        //
+        // `exp(-c·t)` on an evenly spaced grid is a geometric sequence with ratio `exp(-c·dt)`, so
+        // it advances by one multiply per sample instead of one `expf` per sample -- `np2`
+        // transcendentals removed per call, three calls per subfault. THE RATIO IS ACCUMULATED IN
+        // `f64` DELIBERATELY: relative error grows like `n·eps`, which over 16384 samples is ~1e-3
+        // in `f32` (visible) against ~2e-12 in `f64`. Underflow is harmless and matches the direct
+        // form -- once the product reaches zero it stays there, as `expf` of a large negative
+        // argument would.
+        //
+        // `t^b` has no such recurrence for real `b` and does not need one: it is a per-segment
+        // constant and arrives precomputed in `envelope_power`.
+        //
+        // `scan` rather than a loop because that is the shape of the computation: `aa * power` is
+        // per-element, `decay` is carried. Building by scan also avoids zero-filling `np2` floats
+        // and immediately overwriting them.
+        let decay_per_sample = (-(c as f64) * dt as f64).exp();
+        let mut decay = 1.0f64;
+        for (slot, &power) in self.envelope[..np2].iter_mut().zip(envelope_power.iter()) {
+            *slot = aa * power * decay as f32;
+            decay *= decay_per_sample; // exp(0) at the first sample, so this advances after
+        }
+
+        // Boore (1983) eq. 2's `C`, in CGS.
+        let beta = shear_velocity_km_s * CM_PER_KM;
+        let cc = AVERAGE_RADIATION_PATTERN * FREE_SURFACE_AMPLIFICATION * HORIZONTAL_PARTITION
+            / (4.0 * PI * density_g_cm3 * (beta * beta * beta));
+        let omgc = TAU * corner_frequency_hz;
+        let omgm = TAU * fmax_hz;
+
+        // The spectral shape, bin by bin. DC stays zero; bins `1..fold_count` get the shape.
+        //
+        // SIZED AT `np2`, NOT `fold_count`, ON PURPOSE, even though the top half is never read.
+        // Shrinking it MEASURED SLOWER: at np2 = 16384 the `f64` buffer is exactly 128 KB, glibc's
+        // mmap threshold, so `alloc_zeroed` hands back fresh already-zero pages for free. At
+        // `fold_count` it is 64 KB, comes off the heap, and must be memset for real -- +5.4M
+        // instructions per run in exchange for using less memory. It stays a `Vec` rather than an
+        // `Array1` for the same reason: `vec![0.0f64; n]` is what reaches `alloc_zeroed`.
+        //
+        // `azip!` asserts the three lengths agree, where a nested `zip` would silently stop at the
+        // shortest -- a real check, since `frequency_hz` and `path_exponent` are caller-supplied.
+        azip!((
+            shape in ArrayViewMut1::from(&mut self.amplitude[1..fold_count]),
+            &fr in frequency_hz.slice(s![1..fold_count]),
+            &path_fr in path_exponent.slice(s![1..fold_count]),
+        ) {
+            let fr2 = fr * fr;
+
+            // Boore (1983) eq. 3, the ω-squared source spectrum, "following Aki (1967) and Brune
+            // (1970)": `S(ω,ω_c) = ω²/(1 + (ω/ω_c)²)`. Rises as f² below the corner, flat above.
+            let omg = TAU * fr;
+            let a1 = (cc * subevent_moment * (omg * omg / (1.0 + (omg / omgc) * (omg / omgc)))) as f64;
+
+            // Near-surface and whole-path attenuation, plus 1/R geometric spreading.
+            //
+            // `κ > 0` -- the production branch -- is Anderson & Hough (1984), `exp(−πκf)`, and
+            // Graves & Pitarka (2010) eq. 16. It is combined with the path term in a single
+            // `exp`, which is an arithmetic identity rather than an approximation:
+            //
+            //   path Q      exp(−ωR/2Qβ)  with  Q(f) = Q₀f^x  and  q̄ = R/(Q₀β)
+            //             = exp(−π·q̄·f^(1−x))              G&P eq. 14
+            //   combined    exp(−πfκ)·exp(−π·q̄·f^(1−x))
+            //             = exp(−π(fκ + q̄·f^(1−x)))       one `expf` instead of two
+            //
+            // `κ ≤ 0` IS A DIFFERENT FILTER, and not Boore's. Boore (1983) eq. 4 is an eight-pole
+            // form `[1+(ω/ω_m)^8]^(−1/2)`; this is a single pole, `1/(1 + ω/ω_m)`. Production
+            // always has `κ = 0.045`, so only the tier-4 golden's negative-κ case reaches it.
+            //
+            // Unlike the envelope recurrence above, nothing here assumes the frequency axis is
+            // evenly spaced -- `frequency_hz` is caller-supplied data.
+            let path_attenuation = qbar * path_fr;
+            let a2a3 = if kappa_s <= 0.0 {
+                let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
+                let a3 = ((-PI * path_attenuation).exp() / distance_cm) as f64;
+                a2 * a3
+            } else {
+                ((-PI * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
+            };
+
+            // Frankel's (1995) finite-fault factor, as given by Graves & Pitarka (2010) eq. 12:
+            // it scales the subfault corner frequency towards the mainshock's while keeping the
+            // summed moment right.
+            //
+            // NOT a two-corner spectrum, despite the shape of the expression. Multiplied into
+            // `a1` the `(1 + (f/f_c)²)` cancels exactly, leaving a SINGLE-corner spectrum of
+            // moment `F·M₀` and corner `f_c/√F`:
+            //
+            //   a1 ∝ M₀f²/(1+x),  frank = F(1+x)/(1+Fx),  x = (f/f_c)²
+            //   a1·frank ∝ (F·M₀)·f² / (1 + (f/(f_c/√F))²)
+            //
+            // which is what G&P describe in words. Looking for a sag between two corners here --
+            // as in Boore, Di Alessandro & Abrahamson (2014) eq. 4 -- will not find one. The
+            // cancellation is exact in real arithmetic but is NOT performed, so simplifying it
+            // would move the last bits. See `PHYSICS.md` §2.
+            let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
+
+            *shape = a1 * a2a3 * frank as f64;
+        });
+
+        self.dt = dt;
+    }
+}
+
+/// One phase realisation against a prepared [`SpectrumShape`].
+/// (orig. `hb_high_ref.f:1670`)
+///
+/// Draws `np2` normal deviates, windows them with the envelope, transforms, normalises the
+/// realised power to unity and applies the amplitude — which is the half of Boore (1983) eq. 1
+/// that a seed changes. The deterministic half is [`SpectrumShape::refresh`], and the doc there
+/// says why the two are separate.
+///
+/// `spectrum` must be contiguous and `np2` long — the transform is in place. The caller owns it
+/// so the three components can be one `(3, np2)` block rather than three allocations per
+/// subfault per ray.
+///
+/// # `np2` IS THE DRAW COUNT
+///
+/// Exactly `np2` deviates, which is why [`SpectrumPlan::length_for`] is physics rather than a
+/// buffer size. See the note there.
 pub fn stochastic_spectrum(
     rng: &mut impl Draws,
     plan: &SpectrumPlan,
-    model: &SourceModel,
-    path: &RayPath,
+    shape: &mut SpectrumShape,
     mut spectrum: ArrayViewMut1<Complex32>,
 ) {
-    // Destructured so that the arithmetic below reads as arithmetic, under the names the
-    // derivation uses.
-    let &SourceModel {
-        dt,
-        window_eps,
-        window_eta,
-        subevent_moment,
-        kappa_s,
-        moment_scale,
-    } = model;
-    let &RayPath {
-        distance_km,
-        window_s,
-        shear_velocity_km_s,
-        density_g_cm3,
-        corner_frequency_hz,
-        fmax_hz,
-        qbar,
-    } = path;
-    let SpectrumPlan {
-        np2,
-        fold_count,
-        frequency_hz,
-        path_exponent,
-        envelope_power,
-        ..
-    } = plan;
-    let (np2, fold_count) = (*np2, *fold_count);
-
-    let fc2 = corner_frequency_hz * corner_frequency_hz;
-    let distance_cm = distance_km * CM_PER_KM;
-
-    // The Saragoni & Hart (1974) shaping window, `w(t) = a·t^b·e^(−ct)·H(t)`, in the
-    // parameterisation of Boore (1983) eq. 7–11. `b` and `c` are eq. 8 and 9; they place the
-    // envelope peak at a fraction `ε` of the duration and bring it down to a fraction `η` of
-    // the peak by the end.
-    let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
-    let c = b / window_eps / window_s;
-    // Boore (1983) eq. 11, `a = [(2c)^(2b+1) / Γ(2b+1)]^(1/2)`, which normalises the envelope
-    // to unit squared area. The mixed precision is deliberate: `2b+1` is formed in `f32`, the
-    // division and sqrt happen in `f64`, and the result narrows back.
-    let gsa = (2.0 * b + 1.0) as f64;
-    let gm = libm::tgamma(gsa);
-    let aa = (((2.0 * c).powf(2.0 * b + 1.0) as f64) / gm).sqrt() as f32;
-
-    // Evaluate the envelope on the sample grid `t = i·dt`.
-    //
-    // `exp(-c·t)` on an evenly spaced grid is a geometric sequence with ratio `exp(-c·dt)`, so
-    // it advances by one multiply per sample instead of one `expf` per sample -- `np2`
-    // transcendentals removed per call, three calls per subfault. THE RATIO IS ACCUMULATED IN
-    // `f64` DELIBERATELY: relative error grows like `n·eps`, which over 16384 samples is ~1e-3
-    // in `f32` (visible) against ~2e-12 in `f64`. Underflow is harmless and matches the direct
-    // form -- once the product reaches zero it stays there, as `expf` of a large negative
-    // argument would.
-    //
-    // `t^b` has no such recurrence for real `b` and does not need one: it is a per-segment
-    // constant and arrives precomputed in `envelope_power`.
-    //
-    // `scan` rather than a loop because that is the shape of the computation: `aa * power` is
-    // per-element, `decay` is carried. Building by scan also avoids zero-filling `np2` floats
-    // and immediately overwriting them.
-    let decay_per_sample = (-(c as f64) * dt as f64).exp();
-    let w: Vec<f32> = envelope_power
-        .iter()
-        .scan(1.0f64, |decay, &power| {
-            let envelope = aa * power * *decay as f32;
-            *decay *= decay_per_sample; // exp(0) at the first sample, so this advances after
-            Some(envelope)
-        })
-        .collect();
-
-    // Boore (1983) eq. 2's `C`, in CGS.
-    let beta = shear_velocity_km_s * CM_PER_KM;
-    let cc = AVERAGE_RADIATION_PATTERN * FREE_SURFACE_AMPLIFICATION * HORIZONTAL_PARTITION
-        / (4.0 * PI * density_g_cm3 * (beta * beta * beta));
-    let omgc = TAU * corner_frequency_hz;
-    let omgm = TAU * fmax_hz;
-
-    // The spectral shape, bin by bin. DC stays zero; bins `1..fold_count` get the shape.
-    //
-    // SIZED AT `np2`, NOT `fold_count`, ON PURPOSE, even though the top half is never read.
-    // Shrinking it MEASURED SLOWER: at np2 = 16384 the `f64` buffer is exactly 128 KB, glibc's
-    // mmap threshold, so `alloc_zeroed` hands back fresh already-zero pages for free. At
-    // `fold_count` it is 64 KB, comes off the heap, and must be memset for real -- +5.4M
-    // instructions per run in exchange for using less memory. It stays a `Vec` rather than an
-    // `Array1` for the same reason: `vec![0.0f64; n]` is what reaches `alloc_zeroed`.
-    //
-    // `azip!` asserts the three lengths agree, where a nested `zip` would silently stop at the
-    // shortest -- a real check, since `frequency_hz` and `path_exponent` are caller-supplied.
-    let mut as_ = vec![0.0f64; np2];
-    azip!((
-        shape in ArrayViewMut1::from(&mut as_[1..fold_count]),
-        &fr in frequency_hz.slice(s![1..fold_count]),
-        &path_fr in path_exponent.slice(s![1..fold_count]),
-    ) {
-        let fr2 = fr * fr;
-
-        // Boore (1983) eq. 3, the ω-squared source spectrum, "following Aki (1967) and Brune
-        // (1970)": `S(ω,ω_c) = ω²/(1 + (ω/ω_c)²)`. Rises as f² below the corner, flat above.
-        let omg = TAU * fr;
-        let a1 = (cc * subevent_moment * (omg * omg / (1.0 + (omg / omgc) * (omg / omgc)))) as f64;
-
-        // Near-surface and whole-path attenuation, plus 1/R geometric spreading.
-        //
-        // `κ > 0` -- the production branch -- is Anderson & Hough (1984), `exp(−πκf)`, and
-        // Graves & Pitarka (2010) eq. 16. It is combined with the path term in a single
-        // `exp`, which is an arithmetic identity rather than an approximation:
-        //
-        //   path Q      exp(−ωR/2Qβ)  with  Q(f) = Q₀f^x  and  q̄ = R/(Q₀β)
-        //             = exp(−π·q̄·f^(1−x))              G&P eq. 14
-        //   combined    exp(−πfκ)·exp(−π·q̄·f^(1−x))
-        //             = exp(−π(fκ + q̄·f^(1−x)))       one `expf` instead of two
-        //
-        // `κ ≤ 0` IS A DIFFERENT FILTER, and not Boore's. Boore (1983) eq. 4 is an eight-pole
-        // form `[1+(ω/ω_m)^8]^(−1/2)`; this is a single pole, `1/(1 + ω/ω_m)`. Production
-        // always has `κ = 0.045`, so only the tier-4 golden's negative-κ case reaches it.
-        //
-        // Unlike the envelope recurrence above, nothing here assumes the frequency axis is
-        // evenly spaced -- `frequency_hz` is caller-supplied data.
-        let path_attenuation = qbar * path_fr;
-        let a2a3 = if kappa_s <= 0.0 {
-            let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
-            let a3 = ((-PI * path_attenuation).exp() / distance_cm) as f64;
-            a2 * a3
-        } else {
-            ((-PI * (fr * kappa_s + path_attenuation)).exp() / distance_cm) as f64
-        };
-
-        // Frankel's (1995) finite-fault factor, as given by Graves & Pitarka (2010) eq. 12:
-        // it scales the subfault corner frequency towards the mainshock's while keeping the
-        // summed moment right.
-        //
-        // NOT a two-corner spectrum, despite the shape of the expression. Multiplied into
-        // `a1` the `(1 + (f/f_c)²)` cancels exactly, leaving a SINGLE-corner spectrum of
-        // moment `F·M₀` and corner `f_c/√F`:
-        //
-        //   a1 ∝ M₀f²/(1+x),  frank = F(1+x)/(1+Fx),  x = (f/f_c)²
-        //   a1·frank ∝ (F·M₀)·f² / (1 + (f/(f_c/√F))²)
-        //
-        // which is what G&P describe in words. Looking for a sag between two corners here --
-        // as in Boore, Di Alessandro & Abrahamson (2014) eq. 4 -- will not find one. The
-        // cancellation is exact in real arithmetic but is NOT performed, so simplifying it
-        // would move the last bits. See `PHYSICS.md` §2.
-        let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
-
-        *shape = a1 * a2a3 * frank as f64;
-    });
+    let (np2, fold_count) = (plan.np2, plan.fold_count);
+    let dt = shape.dt;
 
     // The random phase spectrum. `remove_quadratic_trend` removes the quadratic acceleration
     // trend so that final velocity and displacement come out at zero.
-    let mut a = vec![0.0f32; np2];
-    rng.fill_normal(&mut a);
-    remove_quadratic_trend(dt, &mut a);
+    let deviates = &mut shape.deviates[..np2];
+    rng.fill_normal(deviates);
+    remove_quadratic_trend(dt, deviates);
 
     // Windowed noise: the envelope times the deviates, as the real part of the signal,
     // written straight into the caller's storage.
     azip!((
         bin in &mut spectrum,
-        &deviate in ArrayView1::from(&a[..]),
-        &envelope in ArrayView1::from(&w[..]),
+        &deviate in ArrayView1::from(&deviates[..]),
+        &envelope in ArrayView1::from(&shape.envelope[..np2]),
     ) {
         *bin = Complex32::new(deviate * envelope, 0.0);
     });
@@ -496,9 +566,9 @@ pub fn stochastic_spectrum(
     // note above. Bin 0 comes out zero because `as_[0]` is never written.
     azip!((
         bin in spectrum.slice_mut(s![..fold_count]),
-        &shape in ArrayView1::from(&as_[..fold_count]),
+        &amplitude in ArrayView1::from(&shape.amplitude[..fold_count]),
     ) {
-        let d = Complex64::new(bin.re as f64, bin.im as f64) * shape * amp as f64;
+        let d = Complex64::new(bin.re as f64, bin.im as f64) * amplitude * amp as f64;
         *bin = Complex32::new(d.re as f32, d.im as f32);
     });
 

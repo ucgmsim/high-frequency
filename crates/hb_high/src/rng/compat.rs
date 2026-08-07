@@ -79,6 +79,11 @@ impl LegacyPcg {
 }
 
 impl Draws for LegacyPcg {
+    /// Narrowed to `i32` because that is the width this generator's seeding was defined at.
+    fn respawn(&self, seed: u64) -> Self {
+        Self::seed(seed as i32)
+    }
+
     /// Equivalent of `next_f32(0)`. Returns `f32` in `[0, 1 - 2^-24]`.
     #[inline]
     fn uniform(&mut self) -> f32 {

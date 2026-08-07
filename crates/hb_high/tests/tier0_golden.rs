@@ -36,8 +36,8 @@ use hb_high::fft::{Complex32, Complex64};
 use hb_high::geom::{GeoPoint, distance_azimuth};
 use hb_high::radiation::{RadiationAngles, radiation_pattern};
 use hb_high::ray::vertical_slowness;
-use hb_high::site::apply_site_amplification;
-use ndarray::ArrayView1;
+use hb_high::site::{apply_site_amplification, site_gain_curve};
+use ndarray::{ArrayView1, ArrayViewMut1};
 
 mod common;
 use common::*;
@@ -313,12 +313,17 @@ fn siteamp_matches_fortran() {
         // `SpectrumPlan`. `ln` is deterministic, so hoisting it out of the inner loop is
         // bit-exact and this golden still holds.
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
-        apply_site_amplification(
-            cw.as_mut_slice(),
+        // The interpolation is `site_gain_curve` since Stage 6 §6.3 and the multiply is what
+        // is left of `apply_site_amplification`. Splitting them is bit-exact -- the same
+        // interpolation in the same order -- so this golden still holds against the pair.
+        let mut gain = vec![0.0f32; np + 1];
+        site_gain_curve(
             ArrayView1::from(log_dfr.as_slice()),
             ArrayView1::from(&fn_[..nn]),
             ArrayView1::from(&an[..nn]),
+            ArrayViewMut1::from(gain.as_mut_slice()),
         );
+        apply_site_amplification(cw.as_mut_slice(), ArrayView1::from(gain.as_slice()));
 
         // §2.6 defect 2: the Fortran scales the DC bin (1) and the Nyquist bin
         // (np2/2 + 1) by the raw factor while exponentiating every bin between, two

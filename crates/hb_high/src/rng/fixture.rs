@@ -62,6 +62,13 @@ impl FixtureDraws {
 }
 
 impl Draws for FixtureDraws {
+    /// Narrowed to `i32` because that is what [`FixtureDraws::seed`] takes, and truncating is
+    /// right here rather than merely tolerable: this source exists so the snapshot's draws are
+    /// frozen, and its seeds only ever have to be *distinct*, not well spread.
+    fn respawn(&self, seed: u64) -> Self {
+        Self::seed(seed as i32)
+    }
+
     /// The frozen `[0, 1)` sequence.
     ///
     /// Bits 40..64 of the output word over `2^24`, which is what the module's shared
