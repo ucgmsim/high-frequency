@@ -1020,32 +1020,29 @@ fn trace_ray(
     ray_type: RayType,
     ctx: &RunContext<'_>,
 ) -> TracedRay {
-    // The tracing runs even for a straight ray, which then discards the result — ray type 0
-    // borrows type 1's tracing. It draws nothing, so what that costs is time rather than a
-    // position in a stream.
-    let green = green_function(
-        state,
-        ctx.vmod,
-        source.geometry.depth_km,
-        source.geometry.horiz_km,
-        ray_type.trace_type(),
-        WaveMode::Sh,
-    );
-
-    // Incidence angle from the ray parameter: `sin(i)/β = p`.
-    let sine = source.shear_velocity_km_s * green.rp0;
-    let incidence = if sine > 1.0 { 0.5 * PI } else { sine.asin() };
-
     let kind = ray_type.kind();
-    let (path_length_km, qbar, window_start_s) = if kind == RayKind::StraightRay {
+    let (incidence, path_length_km, qbar, window_start_s) = if kind == RayKind::StraightRay {
         let path_length_km = source.geometry.slant_km;
         (
+            source.geometry.takeoff_rad,
             path_length_km,
             path_length_km / (source.shear_velocity_km_s * STRAIGHT_RAY_Q),
             STRAIGHT_RAY_WINDOW_START_FRACTION * path_length_km / STRAIGHT_RAY_VELOCITY_KM_S,
         )
     } else {
+        let green = green_function(
+            state,
+            ctx.vmod,
+            source.geometry.depth_km,
+            source.geometry.horiz_km,
+            ray_type.trace_type(),
+            WaveMode::Sh,
+        );
+        // Incidence angle from the ray parameter: `sin(i)/β = p`.
+        let sine = source.shear_velocity_km_s * green.rp0;
+        let incidence = if sine > 1.0 { 0.5 * PI } else { sine.asin() };
         (
+            incidence,
             green.rpath,
             green.qbar,
             green.stime - ctx.run.window_peak_fraction * source.window_s,
@@ -1057,11 +1054,8 @@ fn trace_ray(
         qbar,
         window_start_s,
         takeoff_rad: match kind {
-            // The approximation ignores the traced ray parameter and takes the geometric
-            // take-off angle, for the same reason it ignores the traced path length.
-            RayKind::StraightRay => source.geometry.takeoff_rad,
             RayKind::Upgoing => PI - incidence,
-            RayKind::Downgoing => incidence,
+            _ => incidence,
         },
     }
 }
