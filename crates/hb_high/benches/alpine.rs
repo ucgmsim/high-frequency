@@ -156,6 +156,106 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
     }
 }
 
+/// How runtime scales with the two things a campaign can choose: how much fault to rupture and
+/// how many stations to record it at. Emits CSV on stdout.
+///
+/// # The two sweeps measure different things and neither substitutes for the other
+///
+/// **Fault size** is swept by taking the first `k` segments — a shorter rupture on the same
+/// fault system, which is what a smaller event actually looks like — against a fixed station
+/// set. It is the sweep with something to discover: runtime is not linear in subfault count,
+/// because a longer rupture also puts subfaults further from the station and lengthens their
+/// windows.
+///
+/// **Station count** is swept against a fixed fault, over a nested prefix of one shuffled
+/// sample so each larger set contains the smaller. It should be linear by construction —
+/// `Simulator::run` takes `&self` and shares nothing between stations — so what it is really
+/// testing is that claim, and the per-station scatter it reports is the honest measure of how
+/// badly a single station predicts a campaign.
+fn scaling(
+    slip: &StochModel,
+    vmod: &VelocityModelInput,
+    config: &HfConfig,
+    stations: &[(String, f32, f32)],
+) {
+    println!(
+        "sweep,segments,subfaults,stations,wall_s,wall_s_per_station,pairs,samples,useful_pct"
+    );
+
+    let run = |sweep: &str, segments: usize, count: usize| {
+        let subset = StochModel::new(slip.segments[..segments].to_vec());
+        let subfaults: usize = subset.segments.iter().map(Segment::subfault_total).sum();
+        let simulator = hb_high::sim::Simulator::new(config, &subset, vmod)
+            .expect("a subset of a stoch file is diced the same way as the whole");
+
+        let start = Instant::now();
+        let (mut pairs, mut computed, mut landed) = (0usize, 0usize, 0usize);
+        for (index, (name, latitude, longitude)) in stations.iter().take(count).enumerate() {
+            let station = Station {
+                name: name.clone(),
+                latitude: *latitude,
+                longitude: *longitude,
+            };
+            let census = simulator
+                .run(station, HF_SEED.wrapping_add(index as u64))
+                .census;
+            pairs += census.pairs_attempted;
+            computed += census.samples_computed;
+            landed += census.samples_accumulated;
+        }
+        let wall = start.elapsed().as_secs_f64();
+        let useful = if computed == 0 {
+            0.0
+        } else {
+            100.0 * landed as f64 / computed as f64
+        };
+        println!(
+            "{sweep},{segments},{subfaults},{count},{wall:.3},{:.3},{pairs},{computed},{useful:.2}",
+            wall / count as f64
+        );
+    };
+
+    // Roughly halving the fault each step, down to a single segment.
+    let total = slip.segments.len();
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut size = total;
+    while size >= 1 {
+        sizes.push(size);
+        size /= 2;
+    }
+    sizes.reverse();
+    for &segments in &sizes {
+        run("fault", segments, 4.min(stations.len()));
+    }
+
+    // A fault big enough to be representative and small enough that 31 station-runs is
+    // minutes rather than an hour.
+    let mid = (total / 4).max(1);
+    let mut count = 1;
+    while count <= stations.len() {
+        run("stations", mid, count);
+        count *= 2;
+    }
+}
+
+/// Read `name lat lon` per line. Used by the scaling sweep, which needs more stations than the
+/// five named ones and needs them nested.
+fn stations_from_file(path: &Path) -> Vec<(String, f32, f32)> {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut field = line.split_ascii_whitespace();
+            let mut next = || field.next().expect("each line is `name lat lon`");
+            let name = next().to_owned();
+            let latitude: f32 = next().parse().expect("latitude");
+            let longitude: f32 = next().parse().expect("longitude");
+            (name, latitude, longitude)
+        })
+        .collect()
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -307,6 +407,13 @@ fn main() {
         simulator.ndata()
     );
     println!();
+
+    // Scaling sweeps, which need their own station set -- more than five, and nested.
+    if let Ok(list) = std::env::var("HB_STATION_LIST") {
+        let stations = stations_from_file(Path::new(&list));
+        scaling(&slip, &vmod, &config, &stations);
+        return;
+    }
 
     // A change that alters which deviates a subfault receives moves every waveform without
     // being wrong. `ENGINEERING_RULES` §4 wants an argument for why the new numbers are right,

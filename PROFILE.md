@@ -62,6 +62,65 @@ only pairs that survive the placement check from §6.1 onward, where the baselin
 attempted pair. The baseline's 49.0% at FJDS and §6.1's 56.7% are the same program measured
 two ways. `outside`, `pairs` and the instruction counts are comparable throughout.
 
+### Where the time goes after Stage 6
+
+`perf record --call-graph=dwarf`, TPPS (the far station, 25.6 s), full deck. Self time,
+release build with `codegen-units = 1`.
+
+| | self |
+| --- | ---: |
+| `sim::Simulator::run` — the pass, with the spectrum loops inlined into it | 22.8% |
+| **`rand::RngExt::sample` — the ziggurat normals** | **20.8%** |
+| `rustfft`, all AVX kernels summed | ~21.5% |
+| `stoc::radiate_and_invert` | 4.7% |
+| `ndarray::Zip::inner` | 4.5% |
+| `site::site_gain_curve` + `site::apply_site_amplification` | 4.5% |
+| `stoc::SpectrumShape::refresh` | 2.6% |
+| libc (memcpy/memset) | 2.5% |
+
+**The shape has changed since Stage 4.** Three things now cost about the same: drawing the
+normal deviates, transforming them, and everything else the pass does elementwise. There is no
+longer a single dominant term to attack.
+
+The one that stands out as *addressable* is the draw. `stochastic_spectrum` draws `np2`
+normals per component per pair — 1.6 billion deviates at the far station — and every one is
+consumed by a windowed multiply. Nothing here has tried to reduce that count; §6.5 reduced
+`np2` and the draw fell with it, which is why the ziggurat's share is roughly unchanged while
+its absolute cost halved.
+
+### Scaling, and a warning this file used to carry that is now wrong
+
+`harness/alpine_scaling.csv` and `harness/scaling.png`, from `benches/alpine.rs` under
+`HB_STATION_LIST`. Fault size is swept by taking the first `k` segments — a shorter rupture on
+the same fault system — against a fixed four-station sample; station count is swept over a
+nested prefix of sixteen stations drawn at random from south of Taupo.
+
+| segments | subfaults | s/station | useful |
+| ---: | ---: | ---: | ---: |
+| 1 | 11 | 0.045 | 67.6% |
+| 11 | 249 | 0.961 | 65.7% |
+| 47 | 1,679 | 6.797 | 60.2% |
+| 94 | 4,740 | 18.346 | 63.5% |
+| 189 | 7,865 | 25.483 | 61.3% |
+
+**Runtime is now linear in subfault count.** Log-log slope **0.986** over 715× in size,
+slightly sub-linear at the top. The section below this one says the opposite — "subfault count
+alone does not predict runtime", with a linear extrapolation missing by 3.7× — and **it is
+kept because it was true, not because it still is.** The non-linearity it describes came from
+distant subfaults getting longer windows and therefore longer transforms; §6.5 capped the
+transform at what lands in the record, which severs exactly that coupling. A pre-Stage-6 build
+would still reproduce it.
+
+The mechanism is visible in the census: transform samples grew 690× against 715× more
+subfaults, and runtime grew 566×. **Time tracks samples computed**, and samples now track
+subfaults. `Census::samples_computed` is therefore a usable cost predictor, and a better one
+than a subfault count, because it stays right when the geometry changes.
+
+Station count is linear, as it must be — `Simulator::run` takes `&self` and the batch loop is
+serial by design. What that sweep really measures is the **per-station spread: 18.7%** across
+sixteen randomly drawn stations, 6.68 to 7.93 s. That is the honest error bar on predicting a
+campaign from one station, and it is geometry, not noise.
+
 **Three things this changes about where to spend effort.**
 
 **Culling arrivals that land past the record is worth 3–10%, not a step change.** The
@@ -95,10 +154,16 @@ warning; superseded by the production baseline above for anything absolute.
 | mini | 4 | **3.44 ms** |
 | medium | 112 | **176.4 ms** |
 
-## Realistic scale, measured
+## Realistic scale, measured — SUPERSEDED, and worth reading anyway
+
+**The conclusion below no longer holds.** Stage 6 §6.5 made runtime linear in subfault count;
+see the scaling section above for the measurement. This is kept because the *mechanism* it
+identifies is correct and is exactly what §6.5 removed — and because a pre-Stage-6 build will
+still behave this way.
 
 Extrapolating the table above linearly to a 4,070-subfault rupture gives ~7 s per station.
-**Measured, it is 26 s** — 3.7× worse — because runtime is not linear in subfault count alone.
+**Measured, it was 26 s** — 3.7× worse — because runtime was not linear in subfault count
+alone.
 
 | | subfaults | duration | 1 station | 4 stations |
 | --- | ---: | ---: | ---: | ---: |
@@ -109,8 +174,12 @@ Extrapolating the table above linearly to a 4,070-subfault rupture gives ~7 s pe
 Two effects compound. A longer record raises `np2`, so every subfault's FFT costs more; and a
 shallow-dipping deep-topped geometry lengthens ray paths, which adds time windows per
 subfault. The same 112 subfaults cost **8.6×** more at 60 s with a subduction-like geometry
-than at 40 s with a crustal one. **Subfault count alone does not predict runtime** — anyone
-sizing a campaign needs to time their own geometry.
+than at 40 s with a crustal one. Subfault count alone did not predict runtime.
+
+The second of those two effects is the one §6.5 addressed: a transform can no longer be sized
+beyond what lands in the record, so a distant subfault no longer costs more than a near one
+without limit. The first — a longer *record* raising `np2` — still bites, because `ndata` is
+the cap and a longer record raises it.
 
 For a 1,000-station run that is ~7.2 CPU-hours, so about an hour on this 8-core box or a few
 minutes on a large node. A 100-realisation campaign is ~720 CPU-hours, which is genuinely
