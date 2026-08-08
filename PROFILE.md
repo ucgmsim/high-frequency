@@ -303,7 +303,9 @@ proof of one.
 Box-Muller's two transcendentals against a shift and a multiply. That ratio is why §3.3's
 hoists paid: the expensive per-sample work in this program is transcendental, not arithmetic.
 
-## The LTO experiment was two experiments
+## The LTO experiment was two experiments — SUPERSEDED at Stage 6
+
+**The numbers below no longer reproduce.** Kept because the *method* lesson it carries is the durable part, and because it is the second of three different answers this knob has given. See the Stage 6 re-run above for the current one.
 
 Stage 2 tested `lto = "fat"` and `codegen-units = 1` as a single change, found it 1.2%
 slower, and rejected both. **They do not behave the same way**, and bundling them threw out
@@ -337,14 +339,81 @@ a quiet machine and were **not** re-measured at §5.7.
 `codegen-units = 1` was always worth 7%. That needs a build of the pre-Stage-5 tree, which
 has not been done. Do not assume either way.
 
+## The LTO experiment, re-run a third time at Stage 6 — and now it says nothing
+
+`lto` has been tested three times and given three different answers. This is the current one.
+
+Four interleaved rounds per variant, two stations (FJDS and TPPS) on the full Alpine deck,
+three prebuilt binaries run against each other rather than rebuilt between rounds.
+
+| | instructions | cycles | wall | IPC |
+| --- | ---: | ---: | ---: | ---: |
+| **`codegen-units = 1`, no LTO** | 712,321,577,545 | 192,382,986,547 | 46.28 s | 3.703 |
+| `+ lto = "thin"` | 712,160,838,444 (−0.023%) | 193,212,995,458 (+0.43%) | 46.25 s | 3.686 |
+| `+ lto = "fat"` | 713,684,739,782 (**+0.19%**) | 192,616,180,007 (+0.12%) | 46.09 s | 3.705 |
+
+Instructions reproduce to **0.0000%** within a variant — twelve significant figures identical
+across four rounds — so those deltas are real. Cycles vary 0.1–1.1% within a variant and wall
+about 1.6%, so every cycle and wall difference above is inside the noise.
+
+**§5.7's finding does not reproduce, and neither does its explanation.** That section recorded
+fat LTO removing the most instructions of any option (−1.63% against `codegen-units = 1`) while
+handing the win back through IPC falling from 2.18 to 2.04, attributed to cross-crate inlining
+disturbing rustfft's hand-tuned AVX register allocation. Fat LTO now *adds* 0.19% instructions,
+and IPC is 3.705 against 3.703 — identical. The mechanism was either wrong or has stopped
+applying.
+
+**The likely reason there is nothing left for LTO to do**, stated as a hypothesis because it
+has not been isolated: `codegen-units = 1` already gives whole-crate optimisation across
+`hb_high`, which is the majority of the work, and the two external crates in the hot path are
+reached through boundaries LTO cannot improve. `stochastic_spectrum` is generic over
+`impl Draws`, so it monomorphises *into* `hb_high` and the ziggurat inlines there without LTO;
+rustfft's kernels are `#[inline]` AVX intrinsics that were already being inlined. The
+cross-crate boundary LTO exists to erase is a small share of this workload and was mostly
+erased already.
+
+**So LTO stays off, for a different reason than before.** Not "it hurts IPC" — that is no
+longer true — but "it changes nothing measurable and costs 30–40 s per release rebuild."
+
+**A caveat on the IPC numbers.** This is a hybrid CPU and `perf` reports `cpu_atom/cycles` and
+`cpu_core/cycles` as the same value, which is suspect. Instructions are trustworthy; treat the
+absolute IPC figures as indicative and compare them only within this table.
+
+## Dependency features, checked at Stage 6
+
+Checked for anything speed-relevant that is off by default. **There is nothing to turn on.**
+
+| crate | speed-relevant features | why not |
+| --- | --- | --- |
+| `rustfft` 6.4.1 | `avx`, `sse`, `neon` | All three are in `default`, and the profile shows `rustfft::avx::*` executing. Already on. |
+| `ndarray` 0.17.2 | `blas`, `matrixmultiply-threading`, `rayon` | The first two accelerate matrix multiplication, which this crate never does. `rayon` adds an internal thread pool, which is deliberately absent so a dask pool owns the parallelism. |
+| `rand` 0.10.2 | `simd_support` | Nightly, and SIMD *uniforms* only — no distribution support. |
+| `rand_distr` 0.6.0 | `std_math` | Routes `num-traits` float ops through `std`. It cannot matter: the ziggurat evaluates a transcendental **only on tail rejection**, which is 1–2% of draws; the other 98% are a table lookup and a comparison. Not enabled. |
+| `geographiclib-rs` 0.2.7 | `default = ["accurate"]` | Could be turned off for speed. It is an accuracy feature, so that is a physics regression rather than an optimisation. |
+
+Two profile knobs were considered and not tested, both for reasons rather than effort:
+
+* **`panic = "abort"`** normally buys a few percent by removing landing pads. It is not
+  available here: `src-rust` is a PyO3 extension and pyo3 catches unwinds to turn a Rust panic
+  into a `PyErr`. Under `abort` a panic kills the host Python process instead of raising,
+  trading a recoverable error for a dead worker mid-campaign.
+* **`target-cpu=native`** has real headroom — the elementwise loops would get AVX2 and FMA —
+  and is the one knob left with a plausible win. It is a **reproducibility hazard**, not just a
+  performance choice: different nodes would produce different waveforms from the same source
+  and seed, against `ENGINEERING_RULES` §5's "one seed, one build, one answer". If it is ever
+  taken it should be a pinned feature set (`+avx2,+fma`) in `.cargo/config.toml`, so the
+  binary is reproducible and the pin is reviewable — never `native`.
+
 ## Measured and rejected
 
 Do not retry these without re-measuring. Each was tried, measured, and found to make things
 worse or to be wrong:
 
-- `lto = "fat"` — **rejected again at §5.7, but for a sharper reason.** See "The LTO
-  experiment was two experiments" below; the short version is that it removes the most
-  instructions of any option here and is still the wrong choice.
+- `lto = "fat"` and `lto = "thin"` — **rejected a third time at Stage 6, and the reason has
+  changed.** §5.7's version (removes the most instructions, hands the win back through IPC) no
+  longer reproduces at all: fat now *adds* 0.19% instructions and IPC is unchanged to three
+  decimals. It is rejected now because it does nothing and costs 30–40 s per rebuild. See "The
+  LTO experiment, re-run a third time at Stage 6".
 - `overflow-checks = false` — **1.87% more** instructions retired. Genuinely
   counterintuitive; removing the checks perturbs codegen elsewhere by more than it saves.
 - `sin` from `sqrt(1 - cos²)` — saved 2.46% and was **wrong in `f32` by 2.4e-4**.
