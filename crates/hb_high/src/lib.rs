@@ -7,11 +7,10 @@
 //! # Start here
 //!
 //! **`PHYSICS.md`** explains what is computed and why, for a reader with a general geophysics
-//! background and no familiarity with this code. It has a symbol glossary, because the
-//! identifiers are inherited six-character names and the literature uses Greek.
+//! background and no familiarity with this code. It has a symbol glossary mapping the
+//! identifiers to the literature's notation.
 //!
-//! **`papers/README.md`** records which paper substantiates which equation, and how far each
-//! claim has been checked. Two papers carry almost all of it:
+//! Two papers carry almost all of the method:
 //!
 //! * **Boore (1983)**, *BSSA* 73(6A), 1865–1894 — the point-source stochastic method,
 //!   equations 1–11. That is [`stoc`].

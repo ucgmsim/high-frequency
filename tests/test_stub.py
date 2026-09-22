@@ -5,9 +5,8 @@ fields across the four Rust parameter classes. That coupling is invisible at bot
 a field to the dataclass and nothing consumes it, or rename a Rust argument and nothing
 complains until a caller wants it.
 
-These tests make the coupling explicit, which is what let ``pyo3-stub-gen`` be declined. A
-generated stub would type the surface; this pins it, in three places at once, and needs no
-dependency.
+These tests make the coupling explicit, pinning the surface in all three places at once
+without a stub-generation dependency.
 """
 
 import ast

@@ -1,13 +1,10 @@
 """Stochastic high-frequency seismogram generation.
 
-A Rust port of EMOD3D's ``hb_high_v6.0.3`` (``BINMOD``/``VERSION1``), certified
-scientifically equivalent to the production Fortran at ±2% on intensity-measure means.
+A Rust port of EMOD3D's ``hb_high_v6.0.3`` (``BINMOD``/``VERSION1``), statistically
+equivalent to the production Fortran at ±2% on intensity-measure means.
 
-The interface is batched by design. The Fortran ran one process per station, assembled a
-22-line text deck per call, and reported the epicentral distance by printing it to stderr;
-per-station seeds had to be forged as ``int32(root) ^ hash(name)`` because the deck could
-only carry one ``i32``. Here a station's seed is a ``uint64`` argument, so stations are
-genuinely independent and a batch can be reordered, sliced or resumed without changing any
+The interface is batched. Each station carries its own ``uint64`` seed, so stations are
+independent and a batch can be reordered, sliced or resumed without changing any
 waveform.
 
 Examples
@@ -115,8 +112,7 @@ class Ray(enum.IntEnum):
 class PathDurationModel(enum.IntEnum):
     """How record duration grows with distance.
 
-    The wire values are non-contiguous because every other integer left the duration table
-    uninitialised in the original.
+    The integer values are non-contiguous; only these codes name a duration model.
     """
 
     GRAVES_PITARKA_2010 = 0
@@ -131,8 +127,8 @@ class PathDurationModel(enum.IntEnum):
     """Boore and Thompson (2015), stable continental regions."""
 
 
-# Component order of the returned array's first axis. This is the order the Fortran wrote
-# to disk and the order `hf_sim.py` labels its xarray dimension with.
+# Component order of the returned array's first axis. It matches the production Fortran's
+# output files and the order `hf_sim.py` labels its xarray dimension with.
 COMPONENTS = ("090", "000", "ver")
 
 # Bytes of BLAKE2b digest used for a station-name hash. Eight gives a 64-bit value with no
@@ -231,7 +227,7 @@ class RuptureVelocity:
     """Multiplier at the shallow end of the taper.
 
     **Not the published value.** Graves and Pitarka (2010) give 70% for the shallow weak
-    zone; 0.6 is the locally calibrated value this pipeline has always run.
+    zone; 0.6 is the locally calibrated value used in production.
     """
     deep: float = 0.6
     """Multiplier at the deep end of the taper.
@@ -256,8 +252,8 @@ class SourceParameters:
     corner_frequency_constant: float = 2.0
     """The c0 coefficient of Graves and Pitarka (2010) eq. 13 / (2015) eq. 1.
 
-    **2.0 is the 2015 value; the 2010 paper used 2.1.** This is a version marker: the code
-    tracks the later parameterisation. See ``papers/README.md`` finding 5.
+    2.0 is the 2015 value; the 2010 paper used 2.1. The code follows the 2015
+    parameterisation throughout.
     """
     corner_frequency_alpha: float = 0.1
     """The c_alpha coefficient of the dip-and-rake corner-frequency adjustment."""

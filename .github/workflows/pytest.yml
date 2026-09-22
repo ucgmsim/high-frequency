@@ -13,10 +13,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
 
-      # Explicit, where site_calculation relies on the runner's preinstalled toolchain.
-      # Every test here builds the pyo3 extension first, so a runner image that dropped Rust
-      # would fail with a confusing setuptools-rust error rather than a missing-toolchain
-      # one.
+      # Every test builds the pyo3 extension first; installing Rust explicitly avoids
+      # depending on the runner image's preinstalled toolchain.
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 

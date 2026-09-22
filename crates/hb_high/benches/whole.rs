@@ -1,20 +1,10 @@
-//! End-to-end benchmarks: one station, whole pipeline, per fault size.
+//! End-to-end benchmarks: the whole simulation in-process, per fault size.
 //!
-//! # What changed in §4.3, and why it is an improvement
+//! These time the simulation only, with no process startup, input parsing or output, so
+//! they are not comparable with `harness/bench_baseline.csv`, which timed a whole
+//! executable run.
 //!
-//! These used to drive the built binary through `std::process::Command`, feeding it a deck on
-//! stdin — because `run()` in `main.rs` read stdin and wrote files, so there was nothing else
-//! to call. The note here used to say that benching in-process "would require restructuring
-//! it, which is Phase 3 work".
-//!
-//! That restructuring is done: `main.rs` and the deck reader are gone and `simulate` takes
-//! typed values. So these now call the library directly, which removes process startup, deck
-//! generation via `python3 harness/mkdeck.py`, text parsing and a file write from the
-//! measurement. What is left is the simulation, which is the thing worth timing — so these
-//! numbers are NOT comparable with `harness/bench_baseline.csv`, which timed all of it.
-//!
-//! The faults are built in code rather than read from fixtures, for the same reason the
-//! snapshot test builds its own: a benchmark wants *fixed* inputs of a known size, and
+//! The faults are built in code: a benchmark wants fixed inputs of a known size, and
 //! `subfault_count` is what runtime scales with.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -154,15 +144,13 @@ const BATCH_STATIONS: usize = 16;
 
 /// What `Simulator` was built for: setup once, N stations against it.
 ///
-/// `bench_whole` above cannot show this. It simulates ONE station per iteration, so
-/// `Simulator::new` is inside every sample and the construct-once saving is invisible —
-/// which is exactly the shape the old per-station free function had.
+/// `bench_whole` simulates one station per iteration, so `Simulator::new` is inside every
+/// sample and the construct-once saving is invisible.
 ///
-/// The two arms here are the same work in the two orders. `shared` builds one simulator and
-/// runs the batch against it; `per_station` rebuilds it for every station, which is what the
-/// caller did before. The gap between them is the setup — the air layer, the slip-model
-/// normalisation over every subfault three times, the moment scaling and the per-segment
-/// angles — divided across the batch instead of paid for each time.
+/// The two arms are the same work in two orders. `shared` builds one simulator and runs the
+/// batch against it; `per_station` rebuilds it for every station. The gap between them is
+/// the setup -- the air layer, the slip-model normalisation, the moment scaling and the
+/// per-segment angles -- divided across the batch instead of paid each time.
 ///
 /// It should widen with subfault count, because the normalisation is the part that scales
 /// with it and the per-station work is dominated by the geometry.

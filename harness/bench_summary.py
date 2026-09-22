@@ -16,8 +16,7 @@ instead of overwriting it. Criterion's own --baseline mechanism does this too,
 but only inside target/, so it does not survive a clean build or a checkout on
 another machine.
 
-No third-party dependencies: numpy is present in this environment but scipy is
-not, and a summariser has no business needing either.
+No third-party dependencies.
 """
 
 import argparse

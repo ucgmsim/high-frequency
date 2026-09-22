@@ -1,38 +1,26 @@
-//! End-to-end snapshot of the array path, against values checked into the repo.
+//! End-to-end snapshot of the whole pipeline, against summary statistics recorded in
+//! `harness/golden/snapshot.txt`.
 //!
-//! # What this is for
-//!
-//! `run_cheap.sh`'s replay-parity leg compares the working tree against a binary built from
-//! an earlier commit. That is a good gate and it needs three things this repo is about to
-//! stop having: a `main.rs` to build, a deck to drive it with, and a git worktree per run.
-//! §4.3 deletes the first two.
-//!
-//! This is the replacement, and it is cheaper: fixed inputs, a frozen draw source, and
-//! summary statistics recorded in `harness/golden/snapshot.txt`. It runs in milliseconds
-//! with no subprocess.
+//! Inputs are fixed and built in code, and draws come from the frozen fixture generator, so
+//! the result is reproducible. It runs in milliseconds with no subprocess.
 //!
 //! # Why summary statistics rather than the samples
 //!
-//! A 16,384-sample record per component per fixture is a megabyte of golden data that no
-//! reviewer can read. Seven numbers per component fit on a line, and a diff says *how* the
-//! waveform moved rather than merely that byte 41,220 changed.
+//! A full record per component per fixture is a megabyte of golden data no reviewer can
+//! read. Seven numbers per component fit on a line, and a diff says *how* the waveform
+//! moved.
 //!
-//! The sample positions are anchored to the PEAK, not to fixed fractions of the record, and
-//! that was a correction. Fixed fractions put two of every four pins in silence — at 0.25 of
-//! a 40 s record the S wave has not arrived, and at 0.95 the signal has died — and a pin
-//! recording `0.000000e0` compares equal to a zero forever. Anchoring to `argmax` guarantees
-//! every sampled position is inside the signal.
-//!
-//! `argmax` itself is the most sensitive field here: any change to timing, ray topology or
-//! window placement moves it, while peak and RMS are both invariant under a permutation of
-//! the record.
+//! The sampled positions are offsets from the peak, so every one lands inside the signal:
+//! a pin in the silence before the S arrival or after the coda would record zero and never
+//! fail. `argmax` is the most sensitive field -- any change to timing, ray topology or
+//! window placement moves it -- while peak and RMS are invariant under a permutation of the
+//! record.
 //!
 //! # This goes red by design
 //!
-//! Any commit that changes the draw structure — count, order, or generator — moves these
-//! numbers, exactly as replay-parity did. That is the gate saying "this one needs the long
-//! tier", which for those commits is the right answer. Re-record with `UPDATE_SNAPSHOT=1`
-//! once the science has been adjudicated, and put the adjudication in the commit message.
+//! Any change to the draw structure (count, order, or generator) moves these numbers.
+//! Re-record with `UPDATE_SNAPSHOT=1` once the change has been validated, and say why in
+//! the commit message.
 
 use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
@@ -64,8 +52,7 @@ fn summarise(acc: &Array2<f32>, ndata: usize) -> String {
                         (at, best)
                     }
                 });
-        // f64 accumulation: these are measuring instruments, not part of the port, and
-        // there is no reason for the yardstick to carry f32 rounding.
+        // f64 accumulation, so the statistics do not add f32 rounding of their own.
         let energy = samples.iter().map(|v| *v as f64 * *v as f64).sum::<f64>();
         let mean = samples.iter().map(|v| *v as f64).sum::<f64>() / ndata as f64;
 
@@ -171,9 +158,7 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
     // SAFETY: set before any simulation runs, and this test is the only reader.
     unsafe { std::env::set_var("HB_FIXTURE_RNG", "1") };
 
-    // Built in code, not read from a fixture. §4.3 deleted the readers, and a snapshot
-    // needs FIXED inputs rather than realistic ones -- these are chosen to be reproducible
-    // and to span two grid shapes, not to resemble any particular earthquake.
+    // Fixed inputs spanning two grid shapes, not a realistic earthquake.
     let vmod = crustal_model(20);
 
     let mut lines = Vec::new();
@@ -191,8 +176,7 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
                 .expect("the fixture slip model is consistent")
                 .run(station, seed);
 
-            // Silence compares equal to silence, so a snapshot of an all-zero record is a
-            // gate that cannot fail. This has caught a too-short record twice already.
+            // A snapshot of an all-zero record is a gate that cannot fail.
             let peak = sim.acc.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(
                 peak > 0.0,
@@ -226,7 +210,7 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
         panic!(
             "the pipeline no longer reproduces harness/golden/snapshot.txt.\n\
              If this commit deliberately changed the draw structure -- count, order, or \
-             generator -- that is expected: let the long tier adjudicate, then re-record \
+             generator -- that is expected: check the output is still correct, then re-record \
              with UPDATE_SNAPSHOT=1 and say so in the commit message."
         );
     }

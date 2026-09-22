@@ -1,24 +1,18 @@
-//! The production-scale baseline: one real Alpine Fault deck, five stations, and the
-//! counters every optimisation stage is judged against.
+//! Production-scale benchmark: one real Alpine Fault slip model at five stations.
 //!
 //! # Why this is not in `whole.rs`
 //!
-//! `whole.rs` builds its faults in code, because a benchmark wants fixed inputs of a known
-//! size. That reasoning holds for the three grid shapes there and breaks here: the thing
-//! being measured is a *real* rupture's structure — 189 segments whose rupture times run to
-//! 383 s, diced 1.6 km, recorded for 470 s — and no constructor in a source file is going to
-//! reproduce that honestly. So the slip model is read, and the two inputs that can be pinned
-//! are pinned: the velocity model is the crate's own committed fixture, and the configuration
-//! is written out below rather than parsed.
+//! `whole.rs` builds uniform faults in code. What is measured here is a *real* rupture's
+//! structure -- 189 segments whose rupture times run to 383 s, diced 1.6 km, recorded for
+//! 470 s -- so the slip model is read from a file. The velocity model is the committed
+//! fixture and the configuration is written out below.
 //!
 //! # What it prints, and which numbers matter
 //!
-//! Wall clock drifts 1–3% on a loaded box, which is the same size as several of the effects
-//! this is meant to adjudicate — `PROFILE.md` says so and it is why nothing marginal in this
-//! repo is settled on a clock. So the load-bearing output is the **census**: pairs attempted,
-//! pairs whose window fell entirely outside the record, and transform samples computed
-//! against samples that reached it. Those are integers, they are deterministic, and they are
-//! immune to whatever else the machine is doing.
+//! Wall clock drifts 1-3% on a loaded machine, as large as many effects worth measuring, so
+//! the load-bearing output is the **census**: pairs attempted, pairs whose window fell
+//! entirely outside the record, and transform samples computed against samples that reached
+//! it. Those are deterministic integers.
 //!
 //! # Running it
 //!
@@ -45,9 +39,7 @@ use hb_high::state::{InputLayer, VelocityModelInput};
 /// The `hf` block of `Rupture 71072`, the realisation this baseline is taken from, and the
 /// `domain.duration` and `dt` its production run used.
 ///
-/// Written out rather than parsed because a benchmark's inputs should be readable in the
-/// benchmark. Two of these are not the file's literal values and both are the deck reader's
-/// job on the production path:
+/// Two of these are not the file's literal values:
 ///
 /// * `calpha` is `-99.0` in the file, which is the "use the default" sentinel, so 0.1 stands
 ///   here. Getting this wrong makes every non-strike-slip corner frequency negative.
@@ -88,11 +80,10 @@ fn config() -> HfConfig {
 
 /// Five stations spanning the geometry, nearest grid point to each named place.
 ///
-/// A random sample would be the wrong instrument. `PROFILE.md` records the same 112 subfaults
-/// costing 8.6x more under one geometry than another, so runtime is a function of where the
-/// station is, and a mean over a sample hides exactly the effect every stage here targets.
-/// These bracket it: on the fault, near it, and 250, 500 and 800 km out. Taupo is the
-/// northern limit worth simulating for this rupture.
+/// Chosen rather than sampled because runtime depends strongly on where the station is (the
+/// same subfaults have been measured costing 8.6x more at one station than another). These
+/// bracket it: on the fault, near it, and 250, 500 and 800 km out. Taupo is the northern
+/// limit worth simulating for this rupture.
 const STATIONS: &[(&str, f32, f32)] = &[
     ("FJDS", -43.389137, 170.184_23),    // Franz Josef, on the fault
     ("HMCS", -42.716922, 170.963_96),    // Hokitika
@@ -110,10 +101,8 @@ const HF_SEED: u64 = 362_950_150;
 /// Record RMS at one station over `count` seeds, with the scatter that makes the mean
 /// interpretable.
 ///
-/// **The scatter is the point, not decoration.** A single seed's record energy can move 20%
-/// between two correct realisations, so a before-and-after pair at one seed says nothing. What
-/// can be compared is the mean against the standard error on the difference, which is what
-/// this prints.
+/// A single seed's record energy can move 20% between two correct realisations, so compare
+/// means against the standard error, not single seeds.
 fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, count: u64) {
     println!(
         "{:<10} {:>6}  {:>12} {:>12} {:>9}",
@@ -136,8 +125,7 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
                     longitude,
                 };
                 let acc = simulator.run(station, root.wrapping_add(k)).acc;
-                // Over all three components together: one number per record, which is what
-                // "record RMS" means and what the earlier adjudication compared.
+                // Over all three components together: one number per record.
                 let sum: f64 = acc.iter().map(|&x| x as f64 * x as f64).sum();
                 (sum / acc.len() as f64).sqrt()
             })
@@ -159,19 +147,14 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
 /// How runtime scales with the two things a campaign can choose: how much fault to rupture and
 /// how many stations to record it at. Emits CSV on stdout.
 ///
-/// # The two sweeps measure different things and neither substitutes for the other
-///
-/// **Fault size** is swept by taking the first `k` segments — a shorter rupture on the same
-/// fault system, which is what a smaller event actually looks like — against a fixed station
-/// set. It is the sweep with something to discover: runtime is not linear in subfault count,
+/// **Fault size** is swept by taking the first `k` segments -- a shorter rupture on the same
+/// fault system -- against a fixed station set. Runtime need not be linear in subfault count,
 /// because a longer rupture also puts subfaults further from the station and lengthens their
 /// windows.
 ///
-/// **Station count** is swept against a fixed fault, over a nested prefix of one shuffled
-/// sample so each larger set contains the smaller. It should be linear by construction —
-/// `Simulator::run` takes `&self` and shares nothing between stations — so what it is really
-/// testing is that claim, and the per-station scatter it reports is the honest measure of how
-/// badly a single station predicts a campaign.
+/// **Station count** is swept against a fixed fault, over nested prefixes of the station
+/// list. It should be linear, since `Simulator::run` shares nothing between stations; the
+/// per-station scatter shows how well a single station predicts a larger run.
 fn scaling(
     slip: &StochModel,
     vmod: &VelocityModelInput,
@@ -263,9 +246,8 @@ fn repository_root() -> PathBuf {
 /// Read the crate's committed velocity-model fixture: a layer count, then one
 /// `thickness vp vs rho qp qs` row each.
 ///
-/// This fixture is bit-identical to `Rupture 71072`'s own `hf_velocity_model_1d`, checked
-/// field by field over all 34 layers, which is why the baseline needs only the slip model
-/// from outside the repository.
+/// This fixture is identical to `Rupture 71072`'s own `hf_velocity_model_1d`, so only the
+/// slip model comes from outside the repository.
 fn velocity_model() -> VelocityModelInput {
     let path = repository_root().join("harness/fixtures/velocity_model");
     let text = std::fs::read_to_string(&path)
@@ -416,9 +398,8 @@ fn main() {
     }
 
     // A change that alters which deviates a subfault receives moves every waveform without
-    // being wrong. `ENGINEERING_RULES` §4 wants an argument for why the new numbers are right,
-    // and the argument this mode supplies is the one `PROFILE.md` used when the transform
-    // length changed: the *level* is a statistic over seeds, and it should not move.
+    // being wrong. What should not move is the level, a statistic over seeds; this mode
+    // measures it.
     if let Ok(seeds) = std::env::var("HB_SEEDS") {
         let count: u64 = seeds.parse().expect("HB_SEEDS is a seed count");
         seed_scan(&simulator, &wanted, count);

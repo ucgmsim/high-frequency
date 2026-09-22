@@ -6,27 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 description = "Rust port of EMOD3D hb_high_v6.0.3 (BINMOD/VERSION1) stochastic high-frequency seismogram generator"
 
-# Runtime dependencies were forbidden while bit-identity was the goal: any crate is
-# free to implement a transcendental differently from gfortran, and nothing would
-# produce a compile error when it did -- just a few wrong bits. That constraint
-# expired with Stage 2 (see REFACTOR.md), and this is the first dependency admitted
-# under the new rule: a library implementation is preferred wherever the numerical
-# difference is understood and gated by tiers B and C.
-#
-# libm is chosen over statrs and puruspe because it is pure Rust with no dependencies
-# of its own, so it adds one crate rather than a subtree. It supplies tgamma, which
-# replaced the transcribed DGAMM in special.rs.
 [dependencies]
 geographiclib-rs = "0.2.7"
-# §3.1: the PRNG itself, so the seeding can come from `rand`'s SplitMix64 expansion
-# rather than the Fortran's fold. Pinned to what is in the offline registry.
+# The PRNG; seeding uses `rand`'s SplitMix64 expansion.
 rand_core = "0.10"
 rand_pcg = "0.10"
 # `RngExt::sample`, which is how a distribution is drawn from an engine.
 rand = "0.10.2"
-# The ziggurat normals. `rng::Pcg` documents why they replaced Box-Muller; the short
-# version is that a normal costs about one uniform instead of two uniforms, a `ln`, a
-# `sqrt` and a `cos`, and the draw loop was 31% of a production run.
+# Ziggurat normal sampling (see `rng::Pcg`).
 rand_distr = "0.6.0"
 libm = "0.2"
 rustfft = "6.4.1"
@@ -34,16 +21,10 @@ bon = "3.9.3"
 thiserror = "2.0.19"
 ndarray = "0.17.2"
 
-# dev-dependencies do not enter the dependency graph of anything that links this
-# crate, so criterion and proptest cannot affect the numerics.
-
 [dev-dependencies]
-# Pinned to versions already in ~/.cargo/registry -- the network is blocked, so
-# resolution must succeed offline.
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11"
-# The gamma properties test `libm::tgamma` directly: `stoc.rs` no longer wraps it, and a
-# wrapper existing only to give a test something to name is not a reason to keep one.
+# The gamma property tests call `libm::tgamma` directly.
 libm = "0.2"
 
 [lib]

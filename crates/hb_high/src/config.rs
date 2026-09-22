@@ -42,8 +42,8 @@ impl RayType {
         }
     }
 
-    /// The `itype` to trace with. A straight ray is still traced, as type 1, because the tracer
-    /// runs unconditionally and the straight-line results overwrite its output afterwards.
+    /// The ray type to pass to the tracer. A straight ray is not traced by the simulation; it
+    /// maps to type 1 so the result is always a valid traced type.
     pub fn trace_type(self) -> i32 {
         match self.kind() {
             RayKind::StraightRay => 1,
@@ -56,7 +56,7 @@ impl RayType {
 ///
 /// This is the `c₁·R` term of Graves & Pitarka (2010) eq. 17, `T_di = f_ci⁻¹ + c₁R_i`,
 /// generalised to a piecewise-linear table so that the Boore & Thompson models can be selected
-/// instead. See `PHYSICS.md` §7 and `papers/README.md` for what has been checked against what.
+/// instead. See `PHYSICS.md` §7.
 ///
 /// # Sources
 ///
@@ -70,8 +70,8 @@ impl RayType {
 ///   doi:10.1785/0120140281 — Table 3, "The Path Duration Model for Stable Continental
 ///   Regions".
 ///
-/// The wire encoding is a non-contiguous integer set (`0`/`1`/`2`/`11`/`12`) where every other
-/// value left the table uninitialised in the original. An enum makes that unrepresentable.
+/// The wire encoding is the non-contiguous integer set `0`/`1`/`2`/`11`/`12`; any other value
+/// is rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathDurationModel {
     /// `<= 0` — Graves & Pitarka (2010) eq. 17, single segment, slope `c₁ = 0.063` s/km.
@@ -80,9 +80,8 @@ pub enum PathDurationModel {
     Gp2010,
     /// `1` — western US, slope 0.070 s/km.
     ///
-    /// **No published source.** The deck documents models 1 and 2 as "WUS/ENA modification
-    /// trial/error": they are the Graves & Pitarka slope adjusted by hand, not a model from
-    /// the literature, and nothing here should imply otherwise.
+    /// No published source: models 1 and 2 are the Graves & Pitarka slope adjusted by hand
+    /// ("WUS/ENA modification trial/error"), not a model from the literature.
     Wus,
     /// `2` — eastern North America, slope 0.100 s/km. Hand-adjusted like [`Self::Wus`], with
     /// no published source.
@@ -90,26 +89,24 @@ pub enum PathDurationModel {
     /// `11` — Boore & Thompson (2014) Table 1, active crustal regions.
     ///
     /// Breakpoints at 0, 7, 45, 125, 175 and 270 km, with durations 0, 2.4, 8.4, 10.9, 17.4
-    /// and 34.2 s, linearly interpolated between — **verified against Table 1**, which
-    /// specifies exactly that interpolation.
+    /// and 34.2 s, linearly interpolated between, as Table 1 specifies.
     ///
-    /// **The extrapolation beyond 270 km does not match the paper**, which gives a tail slope
-    /// of 0.156 s/km against the 0.177 the table builder repeats — about 13% steeper.
+    /// The extrapolation beyond 270 km does not match the paper, which gives a tail slope of
+    /// 0.156 s/km against the 0.177 the table builder repeats (the final segment's slope).
+    /// Production behaves the same way, so this is kept to match the archived catalogue. It
+    /// lengthens path durations past 270 km (about +6.9 s at 600 km) and lowers peak
+    /// amplitudes by a few percent at stations where most subfaults are that far away.
     ///
-    /// This is the model production runs, and 270 km is well inside its working range: an
-    /// Alpine Fault rupture recorded in the lower North Island has *every* subfault past that
-    /// distance. See finding 7 in `papers/README.md` for the measured effect per station.
+    /// This is the model production runs.
     Bt2014Wus,
     /// `12` — Boore & Thompson (2015) Table 3, stable continental regions.
     ///
     /// Breakpoints at 0, 15, 35, 50, 125, 200, 392 and 600 km, with durations 0, 2.6, 17.5,
-    /// 25.1, 25.1, 28.5, 46.0 and 69.1 s — **verified against Table 3**, including its
-    /// "linear interpolation … not logarithms" and its `D_P(R) = D_P(R_last) + 0.111(R −
-    /// R_last)` tail.
+    /// 25.1, 25.1, 28.5, 46.0 and 69.1 s, linearly interpolated, with the `D_P(R) =
+    /// D_P(R_last) + 0.111(R − R_last)` tail of Table 3.
     ///
-    /// Unlike model 11 the tail is right, and by luck rather than design: the paper's 0.111
-    /// s/km happens to equal the final tabulated segment's slope, which is what the table
-    /// builder repeats.
+    /// Unlike model 11 the tail matches the paper, because its 0.111 s/km equals the final
+    /// tabulated segment's slope, which is what the table builder repeats.
     Bt2015Ena,
 }
 
@@ -149,9 +146,8 @@ pub struct RuptureVelocity {
     pub shallow: f32,
     /// Multiplier at the deep end of the taper.
     pub deep: f32,
-    /// Rupture-velocity randomisation sigma, log-normal. **0.1 in production**, so unlike the
-    /// two multipliers above this path is live: it perturbs the factor per subfault, capped by
-    /// [`RUPTURE_VELOCITY_FRACTION_MAX`].
+    /// Rupture-velocity randomisation sigma, log-normal (0.1 in production). Perturbs the
+    /// factor per subfault, capped by [`RUPTURE_VELOCITY_FRACTION_MAX`].
     pub rv_sig1: f32,
 }
 
@@ -216,9 +212,8 @@ impl RuptureVelocityTaper {
     /// The rupture-velocity factor at a given depth.
     ///
     /// Ramps up through the shallow band, sits at `frac` in between, and ramps down through the
-    /// deep band. **The deep taper OVERWRITES the shallow one where the bands overlap** — it is
-    /// not a blend of the two, and the `if`/`else if` structure below is what makes that
-    /// explicit. Overlap is possible because the deep band tracks the hypocentre.
+    /// deep band. Where the bands overlap the deep taper overrides the shallow one rather than
+    /// blending with it. Overlap is possible because the deep band tracks the hypocentre.
     pub fn factor(&self, depth_km: f32) -> f32 {
         let Self {
             frac,
@@ -239,8 +234,7 @@ impl RuptureVelocityTaper {
             frac * shallow_factor
         };
 
-        // The deep band OVERRIDES the shallow result rather than blending with it, which is
-        // what the two-stage structure says: outside the deep band the shallow value stands.
+        // The deep band overrides the shallow result; outside it the shallow value stands.
         if depth_km >= deep_base_km {
             frac * deep_factor
         } else if depth_km >= deep_top_km {
@@ -281,9 +275,8 @@ pub struct PathParameters {
 
 /// The near-surface: what happens in the last few hundred metres.
 ///
-/// Quarter-wavelength site amplification ([`crate::site`]) is **not** a field here. It used
-/// to be a `bool`, and there is no run for which it should be off, so it is applied
-/// unconditionally rather than offered as a choice that only has one right answer.
+/// Quarter-wavelength site amplification ([`crate::site`]) is always applied, so it has no
+/// field here.
 #[derive(Clone, Debug)]
 pub struct SiteParameters {
     /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
@@ -326,7 +319,7 @@ mod tests {
         assert_eq!(RayType(3).kind(), RayKind::Upgoing);
         assert_eq!(RayType(2).kind(), RayKind::Downgoing);
         assert_eq!(RayType(4).kind(), RayKind::Downgoing);
-        // A straight ray is still traced, as type 1.
+        // A straight ray maps to type 1.
         assert_eq!(RayType(0).trace_type(), 1);
         assert_eq!(RayType(3).trace_type(), 3);
     }
@@ -345,7 +338,7 @@ mod tests {
             PathDurationModel::from_deck(11),
             Some(PathDurationModel::Bt2014Wus)
         );
-        // The gaps are the point: these values left the duration table uninitialised.
+        // Values outside the documented set are rejected.
         for bad in [3, 5, 10, 13, 99] {
             assert_eq!(
                 PathDurationModel::from_deck(bad),
@@ -355,8 +348,8 @@ mod tests {
         }
     }
 
-    /// The taper values here are the production ones; they are declared in Python now, so this
-    /// test states them explicitly rather than reaching for a constant.
+    /// The production taper values. Defaults are declared in Python, so the test states them
+    /// explicitly.
     fn production_rupture_velocity() -> RuptureVelocity {
         RuptureVelocity {
             frac: 0.8,

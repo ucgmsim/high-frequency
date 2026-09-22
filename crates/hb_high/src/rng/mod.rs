@@ -3,29 +3,24 @@
 //! Every stochastic quantity the program produces — the windowed noise each subfault's
 //! spectrum is built from, the conical averaging of the radiation pattern, the
 //! rupture-velocity perturbation — is drawn from one generator per station. The physics
-//! does not care *which* generator, but it cares enormously that the answer is
-//! reproducible from a seed. So the draw source is a trait with three implementations,
-//! and the choice is a deployment decision rather than a property of the model:
+//! does not care which generator, but the answer must be reproducible from a seed. So the
+//! draw source is a trait with three implementations:
 //!
 //! * [`Pcg`] is what production uses: PCG32 for the uniforms and the ziggurat algorithm
 //!   for the normals.
 //!
-//! * [`LegacyPcg`] reproduces the Fortran exactly — the hand-rolled PCG32, with normals
-//!   formed by Box-Muller and the whole block rescaled to unit mean square. It exists to
-//!   drive the tier-0 and tier-4 goldens, which compare against binaries dumped by
-//!   `hb_high_v6.0.3`, and to regenerate historical results. It is slower and it is not
-//!   meant to be otherwise.
+//! * [`LegacyPcg`] reproduces the original Fortran generator exactly — a hand-rolled PCG32,
+//!   with normals formed by Box-Muller and the whole block rescaled to unit mean square. It
+//!   drives the tier-0 and tier-4 goldens, which compare against binaries dumped by
+//!   `hb_high_v6.0.3`.
 //!
-//! * [`FixtureDraws`] is the cheap gate's source: frozen uniforms, production normals.
-//!   See its own docs for why it is frozen and what that does and does not buy.
+//! * [`FixtureDraws`] is the snapshot test's source: frozen uniforms, production normals.
 //!
-//! # The implementations are not interchangeable mid-run, and that is the point
+//! # The implementations are not interchangeable mid-run
 //!
-//! Swapping the source changes every waveform, because every consumer shares one stream.
-//! It also changes the *number of draws* a normal costs — two uniforms plus three
-//! transcendentals for Box-Muller against a ziggurat sample that usually costs one
-//! uniform and no transcendental at all — so it is not merely a different sequence, it is
-//! a different consumption pattern. Choose one per run and record which.
+//! Swapping the source changes every waveform. It also changes the number of uniforms a
+//! normal costs — two for Box-Muller, usually one for the ziggurat — so it is a different
+//! consumption pattern, not merely a different sequence. Choose one per run.
 //!
 //! What must hold for all of them, and what the tests assert, is the contract on
 //! [`Draws`]: the same seed gives the same record, and different stations are independent.
@@ -45,43 +40,27 @@ pub use pcg::Pcg;
 /// nothing downstream is reproducible.
 ///
 /// Consumers are generic over this rather than taking an enum, so each is monomorphised
-/// and the production path keeps a direct call. The normal-draw loop is the largest single
-/// consumer of RNG traffic in the program; it should not pay a branch to be testable.
+/// and the normal-draw loop, the largest consumer of RNG traffic, keeps a direct call.
 pub trait Draws {
-    /// A fresh source **of the same kind**, started at `seed`.
+    /// A fresh source of the same kind, started at `seed`.
     ///
-    /// # Why sub-streams exist
-    ///
-    /// A station used to be one stream, and the position in it therefore depended on how many
-    /// subfaults had already drawn from it. That made the draw sequence a function of *which
-    /// subfaults ran*, so skipping one — because its contribution lands past the end of the
-    /// record and is discarded anyway — moved every waveform after it. Work that provably
-    /// changes nothing could not be removed without changing everything.
-    ///
-    /// Giving each `(subfault, ray)` its own stream cuts that dependency: a subfault's draws
-    /// are a function of its own identity and nothing else, so the ones that contribute
-    /// nothing can be dropped and the rest are bit-identical. See [`sim::substream_seed`] for
-    /// how the identity is formed.
+    /// Each `(subfault, ray)` gets its own sub-stream, so its draws are a function of its own
+    /// identity alone and a subfault that contributes nothing can be skipped without moving
+    /// the others. See [`sim::substream_seed`] for how the identity is formed.
     ///
     /// [`sim::substream_seed`]: crate::sim
     ///
-    /// # Why it takes `&self` rather than being an associated function
-    ///
-    /// [`DrawSource`] decides which implementation to use by reading the environment, and
-    /// that decision is made once per run. Rebuilding through the existing value carries the
-    /// decision with it — a sub-stream is always the same kind as its parent — where a bare
-    /// constructor would have to repeat the environment lookup once per subfault.
+    /// It takes `&self` so that [`DrawSource`]'s once-per-run environment choice carries into
+    /// every sub-stream without repeating the lookup.
     fn respawn(&self, seed: u64) -> Self
     where
         Self: Sized;
 
     /// A uniform deviate on `[0, 1)`, advancing the stream.
     ///
-    /// **The half-open range is a contract, not a convention.** Box-Muller rejects zeros
-    /// by re-drawing and would break on `-ln(x)` at the other end, so a source that could
-    /// return exactly `1.0` is not a valid implementation. Every implementation here takes
-    /// the top 24 bits of a word over `2^24`, which is exact; the obvious `u32 / 2^32` rounds
-    /// values near 1 *up* to exactly 1.0 and would break the contract.
+    /// The half-open range is a contract: Box-Muller rejects zeros by re-drawing and would
+    /// break on `-ln(x)` at the other end, so a source must never return exactly `1.0`. See
+    /// `unit_interval_from`.
     fn uniform(&mut self) -> f32;
 
     /// One standard normal deviate, advancing the stream.
@@ -89,7 +68,7 @@ pub trait Draws {
 
     /// Fill `out` with standard normal deviates.
     ///
-    /// Overridable because the *block* is the unit some sources normalise over — see
+    /// Overridable because the block is the unit some sources normalise over — see
     /// [`LegacyPcg::fill_normal`], which rescales to unit mean square and so cannot be
     /// expressed as a loop over [`Draws::normal`].
     fn fill_normal(&mut self, out: &mut [f32]) {
@@ -100,8 +79,7 @@ pub trait Draws {
 
     /// Fill `out` with uniform deviates.
     ///
-    /// Sequential by necessity — each slot takes the next draw, and the order *is* the
-    /// stream.
+    /// Sequential: each slot takes the next draw.
     fn fill_uniform(&mut self, out: &mut [f32]) {
         for slot in out.iter_mut() {
             *slot = self.uniform();
@@ -111,10 +89,9 @@ pub trait Draws {
 
 /// Which draw source a run uses.
 ///
-/// Chosen once per run from the environment, because the deck format is a downstream
-/// interface contract and cannot grow a field.
+/// Chosen once per run from the environment.
 pub enum DrawSource {
-    /// **The default.** See [`Pcg`].
+    /// The default. See [`Pcg`].
     Modern(Pcg),
     /// Validation only — see [`FixtureDraws`]. Opt-in via `HB_FIXTURE_RNG`.
     Fixture(FixtureDraws),
@@ -123,33 +100,10 @@ pub enum DrawSource {
 impl DrawSource {
     /// Build the run's draw source.
     ///
-    /// # What was wrong with the old seeding
+    /// `HB_FIXTURE_RNG` set selects [`FixtureDraws`]; otherwise [`Pcg`].
     ///
-    /// `init_random_seed` folded `irand, irand+1, ..., irand+7` into the state — eight
-    /// nearly-identical values — and left `inc` at its default for every run. That
-    /// reduces exactly to
-    ///
-    /// ```text
-    /// state = C * seed + D        (mod 2^64), C and D fixed
-    /// ```
-    ///
-    /// so it is an **affine map, not entropy mixing**, and every seed lands on the *same*
-    /// LCG orbit at a different offset. PCG's stream parameter — the thing that exists to
-    /// give genuinely independent sequences — was never used.
-    ///
-    /// Measured honestly: this does **not** show up as correlation between the draw
-    /// streams of nearby seeds (max |r| 0.081 against a 0.067 noise floor over 60 seeds
-    /// x 2000 draws, indistinguishable from properly-seeded). `C` is large enough that
-    /// adjacent seeds land far apart on the orbit. It is replaced because it is
-    /// indefensible on its own terms, not because a specific defect was traced to it.
-    ///
-    /// # Why the seed is a `u64`
-    ///
-    /// A station's seed is its identity, and identities should not be a scarce resource.
-    /// The deck could only express `i32`, which is what forced `hf_sim.py` to derive station
-    /// seeds as `int32(root) ^ stable_hash(name)`, landing about half of them negative.
-    /// What the wider type buys is the other 2⁶⁴ − 2³² seeds, which is the space
-    /// `numpy.random.SeedSequence` draws station seeds from on the Python side.
+    /// The seed is a `u64` because that is the space `numpy.random.SeedSequence` draws
+    /// station seeds from on the Python side.
     pub fn for_station(seed: u64) -> Self {
         if std::env::var_os("HB_FIXTURE_RNG").is_some() {
             Self::Fixture(FixtureDraws::seed(seed as i32))
@@ -206,7 +160,7 @@ impl Draws for DrawSource {
 ///
 /// Takes the top 24 bits and divides by `2^24`: the integer-to-`f32` conversion is
 /// lossless and the divisor is a power of two, so the result carries no rounding.
-/// Dividing a full 32-bit value by `2^32` would round, and values near 1 would round *up*
+/// Dividing a full 32-bit value by `2^32` would round, and values near 1 would round up
 /// to exactly 1.0, breaking the `[0, 1)` contract that Box-Muller's zero-rejection loops
 /// assume.
 #[inline]
@@ -275,7 +229,7 @@ mod tests {
         standard(FixtureDraws::seed(11), "FixtureDraws");
     }
 
-    /// The tails are the part Box-Muller's replacement had to get right.
+    /// The production normals reach into the tails.
     ///
     /// A ziggurat sample is an exact normal, so beyond 4 sigma it must produce roughly the
     /// 6.3 in 100,000 the distribution calls for rather than nothing at all. This is the

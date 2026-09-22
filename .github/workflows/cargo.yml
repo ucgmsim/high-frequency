@@ -1,9 +1,5 @@
 name: Cargo
 
-# The addition to site_calculation's set, because unlike site_calculation this repo is
-# mostly Rust. Clippy has been a gate by convention since §2.8 -- `[workspace.lints]` exists
-# specifically to keep it at zero -- and until now nothing enforced it outside a developer's
-# own terminal.
 on: [pull_request]
 
 jobs:
@@ -15,28 +11,19 @@ jobs:
         with:
           components: clippy
 
-      # Debug and release must agree with EACH OTHER. Neither is bit-identical to the
-      # Fortran any more, but a disagreement between the two profiles means the port depends
-      # on optimisation-level float behaviour, which has already caught one real bug
-      # (PORTING_RULES.md §4b). Both profiles, therefore, not just one.
+      # Both profiles: a disagreement between debug and release means the code depends on
+      # optimisation-level float behaviour (e.g. LLVM folds `powf(x, 0.5)` into `sqrt(x)`
+      # at -O2 but not at -O0).
       - name: Test (debug)
         run: cargo test --workspace --locked
 
       - name: Test (release)
         run: cargo test --workspace --locked --release
 
-      # `-D warnings` here and `warn` in [workspace.lints] is deliberate, not inconsistent.
-      # Locally a lint must not block a numerics experiment mid-flight; on a pull request it
-      # must. A crate-root `#![allow]` is how 28 warnings once accumulated invisibly.
-      #
-      # `--workspace` since §4.3: the 7 warnings that forced a scoped gate lived in `im` and
-      # `validate`, and both are deleted.
+      # `-D warnings` here, `warn` in [workspace.lints]: a lint should not block local
+      # work, but must block a pull request.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # Turned on deliberately, in its own commit, once the reason not to had expired. The
-      # crate's formatting was hand-set and in places aligned so that a transliterated
-      # expression read like the Fortran it came from; there are no Fortran transliterations
-      # left to read alongside. `rustfmt.toml` is stock, so there is no local dialect.
       - name: Format
         run: cargo fmt --all --check

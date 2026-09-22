@@ -1,9 +1,6 @@
-//! Source-receiver geometry. Tier 0 holds `DELAZ5`; `subfault_geometry` lands here in
-//! tier 1.
+//! Source-receiver geometry: geodesic distance and azimuth, and per-subfault rays.
 
 /// A point on the ellipsoid.
-///
-/// Named fields make the order unstatable rather than merely documented.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeoPoint {
     pub lat_deg: f32,
@@ -65,25 +62,22 @@ pub fn distance_azimuth(event: GeoPoint, station: GeoPoint) -> DistanceAzimuth {
 /// One subfault's source-to-station geometry.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SubfaultRay {
-    /// `rlsu` — slant distance from subfault to station, km. Includes depth, so
-    /// this is what the path-duration table and `d10` are computed from.
+    /// Slant distance from subfault to station, km. Includes depth, so
+    /// this is what the path-duration table is computed from.
     pub slant_km: f32,
-    /// `phsu` — station azimuth seen from the subfault, radians.
+    /// Station azimuth seen from the subfault, radians.
     pub azimuth_rad: f32,
-    /// `thsu` — geometric take-off angle, radians. Used in place of the traced ray
+    /// Geometric take-off angle, radians. Used in place of the traced ray
     /// parameter under the straight-ray approximation.
     pub takeoff_rad: f32,
-    /// `dst` — horizontal distance from subfault to station, km.
+    /// Horizontal distance from subfault to station, km.
     pub horiz_km: f32,
-    /// `zet` — subfault depth below the surface, km.
+    /// Subfault depth below the surface, km.
     pub depth_km: f32,
 }
 
-/// Every subfault of one segment, as seen from one station.
-///
-/// So the 1-based-ness stays, but it now lives in exactly one place — [`Self::at`] —
-/// instead of being spread across five bounds-checked `Index` impls. That is the part
-/// that was worth changing.
+/// Every subfault of one segment, as seen from one station, indexed 1-based through
+/// [`Self::at`].
 pub struct SubfaultGeometry {
     along_strike_count: usize,
     down_dip_count: usize,
@@ -95,16 +89,12 @@ impl SubfaultGeometry {
     /// Subfault `along_strike` (`1..=along_strike_count`) at depth row `down_dip`
     /// (`1..=down_dip_count`).
     ///
-    /// # The bounds check is not redundant with the slice's
+    /// # Panics
     ///
-    /// It looks like one — the indexing below is checked, so why assert first? Because the
-    /// two indices are folded into one offset, and an out-of-range `along_strike` **lands
-    /// inside the buffer** on the wrong row rather than off the end of it. On a 4×3 grid,
-    /// `at(5, 1)` computes offset 4, which is a perfectly valid index and returns subfault
-    /// `(1, 2)`. The slice check cannot see the mistake; it sees a number in range.
-    ///
-    /// So this converts a silently wrong subfault into a panic that names the grid. See
-    /// `geometry_rejects_an_index_that_would_land_on_the_wrong_row`, which is the case.
+    /// If either index is outside the grid. This is not redundant with the slice's bounds
+    /// check: the two indices fold into one offset, so an out-of-range `along_strike` lands
+    /// on the wrong row inside the buffer (on a 4×3 grid, `at(5, 1)` returns subfault
+    /// `(1, 2)`).
     #[inline]
     pub fn at(&self, along_strike: usize, down_dip: usize) -> SubfaultRay {
         assert!(
@@ -119,10 +109,6 @@ impl SubfaultGeometry {
 }
 
 /// One segment's fault plane: where it is, how it is oriented, and how it is diced.
-///
-/// These nine travelled as nine positional arguments next to a tenth, `station`, that is
-/// also a [`GeoPoint`] — so the two geographic points were adjacent and interchangeable
-/// without a compile error. They are all fields of the caller's `Segment`.
 #[derive(Clone, Copy)]
 pub struct FaultPlane {
     /// The segment's own origin, **not** the station.
@@ -138,12 +124,10 @@ pub struct FaultPlane {
 }
 
 /// Per-subfault source-to-receiver geometry for a single planar fault segment.
-/// Fills five `(nq, np)` arrays, indexed `(i, j)` for along-strike and down-dip:
 ///
 /// `along_strike_offset_km` is half the fault length along strike, so
 /// `(i-0.5)*subfault_length_km - along_strike_offset_km` centres the along-strike
 /// coordinate on the reference point.
-///
 pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeometry {
     let &FaultPlane {
         origin: fault,
@@ -190,15 +174,12 @@ pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeome
     let ylat = fault.lat_deg;
     let xlon = fault.lon_deg;
 
-    // The Fortran runs `i` outer / `j` inner while the storage is strike-fastest, so its
-    // writes are strided. Unlike the subfault pass in `sim`, the order here is FREE:
-    // every entry is a pure function of `(i, j)` with no accumulation and no RNG draw, so
-    // nothing downstream can observe which order they were computed in. Walking depth
-    // rows writes sequentially and computes no index at all.
+    // Unlike the subfault pass in `sim`, the iteration order here is free: every entry is a
+    // pure function of `(i, j)` with no accumulation and no RNG draw. Walking depth rows
+    // writes the strike-fastest storage sequentially.
     //
-    // The 1-based subfault numbers survive as `+ 1` on the enumerations, because they are
-    // physics -- the along-strike coordinate of subfault `i` is `(i - 0.5) * length`, so
-    // the first subfault sits half a cell from the edge. See the note on `SubfaultRay`.
+    // The 1-based subfault numbers are the `+ 1` on the enumerations: the along-strike
+    // coordinate of subfault `i` is `(i - 0.5) * length`, half a cell from the edge.
     for (row, down_dip_row) in rays.chunks_mut(along_strike_count).enumerate() {
         let j = row + 1;
         let down_dip = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
@@ -268,11 +249,8 @@ mod tests {
         )
     }
 
-    /// The case that makes [`SubfaultGeometry::at`]'s assert load-bearing rather than
-    /// redundant with the slice bounds check.
-    ///
-    /// On a 4x3 grid, `at(5, 1)` folds to flat offset 4 — in bounds, and the ray for subfault
-    /// (1, 2). Without the assert this returns the wrong subfault and nothing notices.
+    /// On a 4x3 grid, `at(5, 1)` folds to flat offset 4, which is in bounds and is the ray
+    /// for subfault (1, 2), so only [`SubfaultGeometry::at`]'s assert catches it.
     #[test]
     #[should_panic(expected = "outside the 4x3 grid")]
     fn geometry_rejects_an_index_that_would_land_on_the_wrong_row() {

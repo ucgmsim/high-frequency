@@ -4,9 +4,8 @@ This document exists so that someone with a general geophysics background — at
 response, a bit of source theory — can read this codebase without having written it. It assumes
 undergraduate mathematics and no familiarity with the original Fortran.
 
-Every equation below has been checked against the paper it is attributed to. `papers/README.md`
-records the verification, paper by paper, including the two places where the code departs from
-the published method.
+Every equation below has been checked against the paper it is attributed to. The places where
+the code departs from the published method are listed in §9.
 
 ---
 
@@ -113,10 +112,9 @@ frequency `f_ci/√S`. The code applies it as two factors, but the model is one 
 went looking for a genuine *two-corner* spectrum — one with a sag between `f_a` and `f_b`, as in
 Boore, Di Alessandro & Abrahamson (2014) eq. 4 — you would not find one here.
 
-**One departure from the published method.** G&P define `F` with `N`, linear in subfault count.
-`sim.rs` uses `√N`. Two other variants (`N` and a 2/3 power) survive as dead code beside it.
-G&P (2015) does not revise `F`, so this is a local choice rather than something the literature
-licenses — flagged rather than quietly normalised.
+**A departure from the published method.** G&P define `F` with `N`, linear in subfault count.
+`sim.rs` uses `√N`, matching the production Fortran. G&P (2015) does not revise `F`, so this
+is a local choice rather than something the literature licenses.
 
 ---
 
@@ -156,8 +154,8 @@ approximation.
 
 **The `κ ≤ 0` branch is a different filter.** When κ is non-positive the code instead applies
 `1/(1 + f/f_max)`, a single-pole high-cut. That is *not* Boore (1983) eq. 4, which is an
-eight-pole form `[1 + (f/f_max)⁸]^(−1/2)`. Production never takes this branch; only the tier-4
-golden's negative-κ case exercises it.
+eight-pole form `[1 + (f/f_max)⁸]^(−1/2)`. Production never takes this branch; only a
+negative-κ case in the kernel golden tests exercises it.
 
 A note on `f_max` itself: it is the frequency above which acceleration spectra fall off faster
 than attenuation alone explains. Whether it is a *source* property (Papageorgiou & Aki 1983) or
@@ -307,8 +305,7 @@ Contributions can start before the record begins or after it ends; both are clip
 
 ## 8. Symbol glossary
 
-Code name to symbol. The identifiers were inherited from Fortran, where six characters was
-the limit; they are not any more, so this table maps what is in the code today.
+Code identifier to symbol.
 
 ### Source
 
@@ -371,10 +368,23 @@ Things a reader might mistake for bugs.
   transfer to other statistics.
 - **Component order is fixed**: 090, 000, vertical. Downstream code consumes it positionally,
   and the two horizontals draw from the shared random stream while the vertical does not.
-- **`nsum` is frozen at 1.** A sub-event loop was fixed to one iteration in 2004. The arithmetic
-  is gone; the random draw it consumed is not (see above).
-- **The `√N` in `moment_scale` departs from Graves & Pitarka**, who use `N`. Recorded in
-  `papers/README.md` finding 4, awaiting a domain judgement.
+- **`nsum` is frozen at 1.** The original's sub-event loop runs exactly once, so its arithmetic
+  is omitted; the random draw it consumed is kept (see above).
+
+Three places where the code departs from the published method. All three match the production
+Fortran, so changing any of them would move the output away from the archived catalogue and
+needs a domain judgement, not a tidy-up.
+
+- **The `√N` in `moment_scale`.** Graves & Pitarka (2010) eq. 12 define `F` with `N`, linear in
+  subfault count (§2).
+- **Path-duration model 11 extrapolates on the wrong slope.** Boore & Thompson (2014) Table 1
+  gives a slope of 0.156 s/km beyond the last breakpoint (270 km); the code repeats the final
+  tabulated segment's 0.177 s/km. Durations past 270 km run long — about 8% at 600 km — which
+  lengthens the shaping window and, by estimate, lowers peak amplitudes by a few percent. The
+  six breakpoints and the interpolation between them are exact. Model 12's tail is correct, because there the
+  paper's tail slope and the last segment's slope coincide.
+- **The `κ ≤ 0` high-cut is single-pole**, not Boore's eight-pole filter (§3). Production never
+  takes this branch.
 
 ---
 
@@ -386,9 +396,9 @@ If you are new to this and want the shortest path to understanding:
    of `stoc.rs`.
 2. **Graves & Pitarka (2010)** §"High-Frequency Simulation", p. 2100 — eq. 10–17, two columns,
    and it is the whole of `sim.rs`.
-3. `PHYSICS.md` §2 and §5 of this document, for the two things the code does that the papers do
-   not make obvious: the corner-frequency collapse, and the cancelling radiation constants.
-4. `papers/README.md` for what has and has not been verified.
+3. §2 and §5 of this document, for the two things the code does that the papers do not make
+   obvious: the corner-frequency collapse, and the cancelling radiation constants.
+4. §9, for where the code departs from the papers.
 
 Boore (2003) is a good modern review of the same material if you want more context than
 Boore (1983) gives; it is not the source of any particular line of this code.
