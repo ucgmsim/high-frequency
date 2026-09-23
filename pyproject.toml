@@ -20,7 +20,7 @@ xarray = ["xarray>=2024.1"]
 types = []
 
 [dependency-groups]
-dev = ["deptry", "ruff", "ty", "numpydoc"]
+dev = ["deptry", "npdlint", "ruff", "ty"]
 
 [tool.deptry]
 pep621_dev_dependency_groups = ["test", "types"]
@@ -88,8 +88,15 @@ known-first-party = [
 "__init__.py" = ["D104"]
 "tests/**.py" = ["D"]
 
-[tool.numpydoc_validation]
-checks = [
+[tool.pytest.ini_options]
+testpaths = ["tests", "hf_simulation"]
+addopts = "--doctest-modules"
+
+[tool.npdlint]
+include = ["hf_simulation"]
+extend-exclude = ["__init__.py"]
+numpydoc-compat = false
+select = [
   "GL05",
   "GL08",
   "GL10",

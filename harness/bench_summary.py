@@ -128,8 +128,17 @@ def collect(root: Path) -> list[dict[str, str]]:
 
 
 FIELDS = [
-    "group", "benchmark", "parameter", "median_ns", "median_human", "mean_ns",
-    "mad_ns", "std_dev_ns", "rel_mad", "throughput_unit", "throughput_per_sec",
+    "group",
+    "benchmark",
+    "parameter",
+    "median_ns",
+    "median_human",
+    "mean_ns",
+    "mad_ns",
+    "std_dev_ns",
+    "rel_mad",
+    "throughput_unit",
+    "throughput_per_sec",
 ]
 
 
@@ -189,8 +198,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--criterion-dir", type=Path, default=Path("target/criterion"))
     ap.add_argument("--out", type=Path, default=Path("harness/bench_baseline.csv"))
-    ap.add_argument("--compare", type=Path, default=None,
-                    help="diff against a committed CSV instead of writing one")
+    ap.add_argument(
+        "--compare",
+        type=Path,
+        default=None,
+        help="diff against a committed CSV instead of writing one",
+    )
     a = ap.parse_args()
 
     if not a.criterion_dir.exists():

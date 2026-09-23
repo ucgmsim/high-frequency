@@ -1,0 +1,26 @@
+name: CI
+
+on: [pull_request]
+
+jobs:
+  ci:
+    # @main rather than @v1: the v1 tag predates the Cargo.toml-gated Rust jobs.
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@main
+    with:
+      # Docstring scope and exclusions come from [tool.npdlint] in pyproject.toml.
+      exclude-init: false
+      # Test paths and --doctest-modules come from [tool.pytest.ini_options].
+      pytest-paths: ""
+      enable-coverage: true
+      cov-package: hf_simulation
+      cov-fail-under: 95
+
+  # The shared workflow tests the debug profile only. Debug and release must agree,
+  # because LLVM folds `powf(x, 0.5)` into `sqrt(x)` at -O2 but not at -O0.
+  rust-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked --release
