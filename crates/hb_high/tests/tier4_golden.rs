@@ -3,15 +3,16 @@
 //! `gf_amp_tt.bin`).
 
 use hb_high::fft::Complex32;
-use hb_high::ray::green_function;
+use hb_high::ray::{RayShape, RayState, WaveMode, green_function};
 use hb_high::rng::{Draws, LegacyPcg};
-use hb_high::state::{RayState, VelocityModel};
-use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, SpectrumShape, stochastic_spectrum};
+use hb_high::spectrum::{
+    SourceModel, SpectrumInputs, SpectrumPlan, SpectrumShape, WindowShape, stochastic_spectrum,
+};
+use hb_high::velocity::VelocityModel;
 use ndarray::Array1;
 
 mod common;
 use common::*;
-use hb_high::state::WaveMode;
 
 #[test]
 fn stoc_f_matches_fortran() {
@@ -39,7 +40,11 @@ fn stoc_f_matches_fortran() {
         // Built by struct literal rather than `SpectrumPlan::new`: the golden records `np2`
         // directly where `new` derives it from a window length, and this keeps the test
         // about the arithmetic rather than the caching.
-        let b = -eps * eta.ln() / (1.0 + eps * (eps.ln() - 1.0));
+        let window = WindowShape {
+            peak_fraction: eps,
+            end_fraction: eta,
+        };
+        let b = window.exponent();
         let plan = SpectrumPlan {
             np2,
             fold_count: nf,
@@ -47,6 +52,8 @@ fn stoc_f_matches_fortran() {
             path_exponent: dfr.iter().map(|f| f.powf(1.0 - qfe)).collect(),
             envelope_power: (0..np2).map(|i| (i as f32 * dt).powf(b)).collect(),
             frequency_hz: dfr.clone().into(),
+            // Only `radiate_and_invert` reads it, and this test stops before that.
+            taper: Array1::zeros(0),
         };
         // Recorded in the golden but unused by the computation.
         let _ = dlm;
@@ -58,13 +65,12 @@ fn stoc_f_matches_fortran() {
             &plan,
             &SourceModel {
                 dt,
-                window_eps: eps,
-                window_eta: eta,
+                window,
                 subevent_moment: smt,
                 kappa_s: akapp,
                 moment_scale: bigc,
             },
-            &RayPath {
+            &SpectrumInputs {
                 distance_km: rr,
                 window_s: tw,
                 shear_velocity_km_s: betvs,
@@ -123,7 +129,7 @@ fn gf_amp_tt_matches_fortran() {
         let src_depth = r.f32();
         let range = r.f32();
 
-        let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); j0];
+        let mut vmod: VelocityModel = vec![hb_high::velocity::Layer::default(); j0];
         for layer in vmod.iter_mut() {
             layer.thickness_km = r.f64();
         }
@@ -150,8 +156,8 @@ fn gf_amp_tt_matches_fortran() {
             &vmod,
             src_depth,
             range,
-            itype,
-            WaveMode::from_fortran(md),
+            RayShape::from_code(itype).expect("the corpus holds only traced ray types"),
+            wave_mode_from_code(md),
         );
 
         let tag = format!(
@@ -169,7 +175,7 @@ fn gf_amp_tt_matches_fortran() {
                 "{tag} nh[{k}]"
             );
             assert_eq!(
-                st.rays.wave_modes[k].as_fortran(),
+                wave_mode_code(st.rays.wave_modes[k]),
                 want_nm[k],
                 "{tag} nm[{k}]"
             );
@@ -179,11 +185,17 @@ fn gf_amp_tt_matches_fortran() {
             want_ndeep,
             "{tag} ndeep"
         );
-        assert_eq!(st.love, want_love, "{tag} love");
+        // The Fortran's `love`: 2 when the ray starts as SH, 1 for P-SV.
+        let love = if st.rays.wave_modes[0] == WaveMode::Sh {
+            2
+        } else {
+            1
+        };
+        assert_eq!(love, want_love, "{tag} love");
 
-        eq32(&format!("{tag} rp0"), g.rp0, w_rp0);
-        eq32(&format!("{tag} stime"), g.stime, w_stime);
-        eq32(&format!("{tag} rpath"), g.rpath, w_rpath);
+        eq32(&format!("{tag} rp0"), g.ray_parameter_s_per_km, w_rp0);
+        eq32(&format!("{tag} stime"), g.travel_time_s, w_stime);
+        eq32(&format!("{tag} rpath"), g.path_length_km, w_rpath);
         eq32(&format!("{tag} qbar"), g.qbar, w_qbar);
         cases += 1;
     }

@@ -30,18 +30,20 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
-    SiteParameters, SourceParameters,
+    HfConfig, PathParameters, RecordParameters, RuptureVelocity, SiteParameters, SourceParameters,
 };
-use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
-use hb_high::state::{InputLayer, VelocityModelInput};
+use hb_high::geom::GeoPoint;
+use hb_high::path_duration::PathDurationModel;
+use hb_high::ray::RayType;
+use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
+use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 
 /// The `hf` block of `Rupture 71072`, the realisation this baseline is taken from, and the
 /// `domain.duration` and `dt` its production run used.
 ///
 /// Two of these are not the file's literal values:
 ///
-/// * `calpha` is `-99.0` in the file, which is the "use the default" sentinel, so 0.1 stands
+/// * `corner_frequency_alpha` (`calpha`) is `-99.0` in the file, which is the "use the default" sentinel, so 0.1 stands
 ///   here. Getting this wrong makes every non-strike-slip corner frequency negative.
 /// * `vs_moho` is `999.9`, i.e. above every layer, so the model is not truncated.
 const DURATION_S: f32 = 470.0;
@@ -52,24 +54,24 @@ fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
             stress_drop_bars: 50.0,
-            czero: 2.1,
-            calpha: 0.1,
+            corner_frequency_constant: 2.1,
+            corner_frequency_alpha: 0.1,
             rupture_velocity: RuptureVelocity {
-                frac: 0.8,
-                shallow: 0.6,
-                deep: 0.6,
-                rv_sig1: 0.1,
+                fraction: 0.8,
+                shallow_factor: 0.6,
+                deep_factor: 0.6,
+                sigma: 0.1,
             },
         },
         path: PathParameters {
-            rayset: vec![RayType(1)],
-            q_exponent: 0.6,
-            path_duration: PathDurationModel::from_deck(11)
+            rayset: vec![RayType::from_code(1).expect("1 is the direct upgoing ray")],
+            q_frequency_exponent: 0.6,
+            path_duration: PathDurationModel::from_code(11)
                 .expect("11 is Boore & Thompson (2014) WUS"),
         },
         site: SiteParameters {
             kappa_s: 0.045,
-            f_max_hz: 10.0,
+            fmax_hz: 10.0,
         },
         record: RecordParameters {
             duration_s: DURATION_S,
@@ -119,10 +121,9 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
         let root = HF_SEED.wrapping_add((index as u64) << 32);
         let values: Vec<f64> = (0..count)
             .map(|k| {
-                let station = Station {
-                    name: name.to_owned(),
-                    latitude,
-                    longitude,
+                let station = GeoPoint {
+                    lat_deg: latitude,
+                    lon_deg: longitude,
                 };
                 let acc = simulator.run(station, root.wrapping_add(k)).acc;
                 // Over all three components together: one number per record.
@@ -156,7 +157,7 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
 /// list. It should be linear, since `Simulator::run` shares nothing between stations; the
 /// per-station scatter shows how well a single station predicts a larger run.
 fn scaling(
-    slip: &StochModel,
+    slip: &SlipModel,
     vmod: &VelocityModelInput,
     config: &HfConfig,
     stations: &[(String, f32, f32)],
@@ -166,18 +167,17 @@ fn scaling(
     );
 
     let run = |sweep: &str, segments: usize, count: usize| {
-        let subset = StochModel::new(slip.segments[..segments].to_vec());
+        let subset = SlipModel::new(slip.segments[..segments].to_vec());
         let subfaults: usize = subset.segments.iter().map(Segment::subfault_total).sum();
         let simulator = hb_high::sim::Simulator::new(config, &subset, vmod)
             .expect("a subset of a stoch file is diced the same way as the whole");
 
         let start = Instant::now();
         let (mut pairs, mut computed, mut landed) = (0usize, 0usize, 0usize);
-        for (index, (name, latitude, longitude)) in stations.iter().take(count).enumerate() {
-            let station = Station {
-                name: name.clone(),
-                latitude: *latitude,
-                longitude: *longitude,
+        for (index, (_name, latitude, longitude)) in stations.iter().take(count).enumerate() {
+            let station = GeoPoint {
+                lat_deg: *latitude,
+                lon_deg: *longitude,
             };
             let census = simulator
                 .run(station, HF_SEED.wrapping_add(index as u64))
@@ -296,7 +296,7 @@ fn velocity_model() -> VelocityModelInput {
 ///
 /// Each block runs down-dip rows outermost with the along-strike index fastest, which is the
 /// order [`Segment::new`] wants its grid in — so the values go straight in with no transpose.
-fn slip_model(path: &Path) -> StochModel {
+fn slip_model(path: &Path) -> SlipModel {
     let text =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let mut tokens = text.split_ascii_whitespace();
@@ -355,7 +355,7 @@ fn slip_model(path: &Path) -> StochModel {
         })
         .collect();
 
-    StochModel::new(segments)
+    SlipModel::new(segments)
 }
 
 fn main() {
@@ -417,10 +417,9 @@ fn main() {
         {
             continue;
         }
-        let station = Station {
-            name: name.to_owned(),
-            latitude,
-            longitude,
+        let station = GeoPoint {
+            lat_deg: latitude,
+            lon_deg: longitude,
         };
 
         let start = Instant::now();

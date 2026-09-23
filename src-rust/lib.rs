@@ -1,19 +1,18 @@
 //! Python bindings for the `hb_high` stochastic high-frequency generator.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
-    SiteParameters, SourceParameters,
+    HfConfig, PathParameters, RecordParameters, RuptureVelocity, SiteParameters, SourceParameters,
 };
-use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
-use hb_high::sim::Simulator;
-use hb_high::state::{InputLayer, VelocityModelInput};
+use hb_high::geom::GeoPoint;
+use hb_high::path_duration::PathDurationModel;
+use hb_high::ray::RayType;
+use hb_high::sim::{COMPONENT_COUNT, Simulator};
+use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
+use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 use numpy::ndarray::{Array3, s};
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-
-/// Components per station: 090, 000, vertical.
-const COMPONENT_COUNT: usize = 3;
 
 /// One fault segment: geometry plus the three subfault grids.
 ///
@@ -105,7 +104,7 @@ impl PyFaultSegment {
 /// A whole slip model: one or more [`PyFaultSegment`].
 #[pyclass(frozen, name = "SlipModel")]
 pub struct PySlipModel {
-    inner: StochModel,
+    inner: SlipModel,
 }
 
 #[pymethods]
@@ -119,7 +118,7 @@ impl PySlipModel {
         }
         let segments = segments.iter().map(|s| s.inner.clone()).collect();
         Ok(Self {
-            inner: StochModel::new(segments),
+            inner: SlipModel::new(segments),
         })
     }
 
@@ -227,13 +226,13 @@ impl PySourceParameters {
         Self {
             inner: SourceParameters {
                 stress_drop_bars,
-                czero: corner_frequency_constant,
-                calpha: corner_frequency_alpha,
+                corner_frequency_constant,
+                corner_frequency_alpha,
                 rupture_velocity: RuptureVelocity {
-                    frac: rupture_velocity_fraction,
-                    shallow: rupture_velocity_shallow,
-                    deep: rupture_velocity_deep,
-                    rv_sig1: rupture_velocity_sigma,
+                    fraction: rupture_velocity_fraction,
+                    shallow_factor: rupture_velocity_shallow,
+                    deep_factor: rupture_velocity_deep,
+                    sigma: rupture_velocity_sigma,
                 },
             },
         }
@@ -255,17 +254,28 @@ impl PyPathParameters {
         q_frequency_exponent: f32,
         path_duration_model: i32,
     ) -> PyResult<Self> {
-        // Only the checks Python cannot make for itself: this one decodes a non-contiguous
-        // integer set that the Rust enum owns.
-        let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
+        // Only the checks Python cannot make for itself: these decode integer codes whose
+        // meaning the Rust enums own.
+        let path_duration = PathDurationModel::from_code(path_duration_model).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "path_duration_model {path_duration_model} is not one of 0, 1, 2, 11, 12"
             ))
         })?;
+        let rayset = rayset
+            .into_iter()
+            .map(|code| {
+                RayType::from_code(code).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "ray type {code} is negative; 0 is the straight line and a positive \
+                         code a traced ray"
+                    ))
+                })
+            })
+            .collect::<PyResult<_>>()?;
         Ok(Self {
             inner: PathParameters {
-                rayset: rayset.into_iter().map(RayType).collect(),
-                q_exponent: q_frequency_exponent,
+                rayset,
+                q_frequency_exponent,
                 path_duration,
             },
         })
@@ -286,10 +296,7 @@ impl PySiteParameters {
     #[pyo3(signature = (*, kappa_s, fmax_hz))]
     fn new(kappa_s: f32, fmax_hz: f32) -> Self {
         Self {
-            inner: SiteParameters {
-                kappa_s,
-                f_max_hz: fmax_hz,
-            },
+            inner: SiteParameters { kappa_s, fmax_hz },
         }
     }
 }
@@ -396,17 +403,10 @@ impl PySimulator {
             let ndata = self.inner.ndata();
             let mut waveform = Array3::zeros((COMPONENT_COUNT, station_count, ndata));
 
-            for (index, ((&stlat, &stlon), &seed)) in
+            for (index, ((&lat_deg, &lon_deg), &seed)) in
                 latitude.iter().zip(longitude).zip(seeds).enumerate()
             {
-                let sim = self.inner.run(
-                    Station {
-                        latitude: stlat,
-                        longitude: stlon,
-                        name: format!("station-{index}"),
-                    },
-                    seed,
-                );
+                let sim = self.inner.run(GeoPoint { lat_deg, lon_deg }, seed);
                 // `sim.acc` is already (n_components, n_time), so this is a row copy per
                 // component into the batch's station slot.
                 for (component, trace) in sim.acc.rows().into_iter().enumerate() {
