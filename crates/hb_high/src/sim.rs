@@ -10,22 +10,12 @@
 //! ```
 //!
 //! The loops here are that sum: over subfaults `i`, over ray paths `j`, and over the three
-//! output components. See `PHYSICS.md` §7 for the assembly, and `papers/README.md` for the
-//! equation-by-equation verification.
+//! output components. See `PHYSICS.md` §7 for the assembly.
 //!
 //! # One station per call
 //!
-//! **A multi-station run is not a concatenation of single-station runs**, at least not in the
-//! original: it shared one generator across its station loop, so each station's draws continued
-//! from wherever the previous one stopped. Here each station gets an independent stream seeded
-//! from its own seed, which makes a batch safe to reorder, subset or resume.
-//!
-//! # Cost note
-//!
-//! Each call re-does the slip-model normalisation and the air-layer insertion, both of which are
-//! station-independent. Deliberate for now — it keeps the signature honest about what it needs.
-//! A `Simulator` type holding the prepared model and the reusable buffers is the obvious next
-//! step once a caller starts looping over many stations.
+//! Each station gets an independent stream seeded from its own seed, which makes a batch safe
+//! to reorder, subset or resume.
 
 use crate::config::{
     HfConfig, PathDurationModel, RUPTURE_VELOCITY_FRACTION_MAX, RayKind, RayType,
@@ -52,15 +42,10 @@ use crate::stoc::{
 /// The three output components, in the order they are computed — which is also the order a
 /// caller receives them in.
 ///
-/// **The order is load-bearing, and this enum does not make it safe to change.** The two
-/// horizontals each draw 5,000 deviates from the shared stream inside
-/// [`crate::radiation::horizontal_radiation_spectrum`]; the vertical draws none, reading a
-/// pre-filled table instead. So the three are *not* interchangeable positions in a loop:
-/// reordering them, or iterating them in anything that does not preserve declaration order,
-/// moves every waveform. See `PHYSICS.md` §9.
-///
-/// An enum rather than a trait deliberately — a trait would have to smuggle the
-/// horizontal/vertical difference through an associated type and would read worse. Match on it.
+/// The order is load-bearing. The two horizontals each draw 5,000 deviates from the shared
+/// stream inside [`crate::radiation::horizontal_radiation_spectrum`]; the vertical draws none,
+/// reading a pre-filled table instead. Reordering them, or iterating them in anything that
+/// does not preserve declaration order, moves every waveform. See `PHYSICS.md` §9.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Component {
     /// `090` — east, and the first computed.
@@ -87,10 +72,6 @@ impl Component {
     }
 
     /// Which radiation routine this component uses, and the angle it needs.
-    ///
-    /// This was an `Option<f32>` whose `None` meant "vertical", so the doc comment had to
-    /// explain that the absence of an angle was really a routine selector. Two named variants
-    /// say it instead.
     #[inline]
     fn radiation_mode(self) -> RadiationMode {
         match self {
@@ -122,7 +103,7 @@ impl Component {
 ///
 /// The two arms differ in more than an angle: the horizontal one draws 5,000 deviates from the
 /// live stream, and the vertical one draws none, reading the pre-filled uniform tables instead.
-/// That asymmetry is why [`Component::ALL`]'s order is load-bearing.
+/// That asymmetry is why [`Component::ALL`]'s order matters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RadiationMode {
     /// Project SH and SV onto a horizontal axis this far from the station azimuth.
@@ -180,9 +161,7 @@ pub struct Simulation {
 /// shaping window at long path distance is set by the path-duration model and has no upper
 /// cap, so it routinely runs longer than the record it is being placed into.
 ///
-/// The counters are `usize` adds against transforms of order 10⁵ samples, so they are free.
-///
-/// `samples_computed` and `samples_accumulated` are **per component** — all three share one
+/// `samples_computed` and `samples_accumulated` are per component — all three share one
 /// transform length and one placement, so the ratio between them is the same whether you count
 /// one component or all three.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -226,30 +205,29 @@ impl std::ops::AddAssign for Census {
 
 /// Arrivals the record was too short to hold.
 ///
-/// **Some clipping is normal and this does not report it.** Every subfault's envelope decays
+/// Some clipping is normal and this does not report it. Every subfault's envelope decays
 /// to a fraction of a percent of its peak well before the end of its own buffer, and that tail
 /// routinely falls past the end of the record; discarding it costs nothing.
 ///
-/// What this counts is the case that is not normal: a subfault whose envelope **peak** lands
+/// What this counts is the case that is not normal: a subfault whose envelope peak lands
 /// beyond the record, meaning the arrival itself was cut rather than its tail. The record
 /// then understates the shaking, and looks like a station that stopped shaking early rather
 /// than one whose record ran out.
 ///
 /// It is reported rather than refused because the right length is the caller's to choose, and
 /// a record deliberately cut short is a legitimate thing to ask for. The window has no upper
-/// cap, so at long path distances it can exceed the requested duration easily — see
-/// `papers/README.md` finding 7 for how far out that starts to bite.
+/// cap, so at long path distances (hundreds of km) it can easily exceed the requested
+/// duration.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clipping {
     /// Subfault-ray contributions whose envelope peak fell past the end of the record.
     pub peaks_lost: usize,
     /// How far past the end the latest of them fell, seconds. Zero when none were lost.
     ///
-    /// **A lower bound, not an exact figure.** A contribution ruled out before it is traced —
-    /// see [`SubfaultSource::earliest_start_sample`] — is reported against the earliest start
+    /// A lower bound, not an exact figure. A contribution ruled out before it is traced —
+    /// see `SubfaultSource::earliest_start_sample` — is reported against the earliest start
     /// it could have had, and its real start is at or after that. So the record is short by
-    /// *at least* this much, which is the direction a caller sizing a record needs it to err
-    /// in. The count above is exact either way.
+    /// at least this much. The count above is exact either way.
     pub worst_overrun_s: f32,
 }
 
@@ -307,18 +285,18 @@ pub enum SimError {
 /// the per-segment angles — is computed here. [`Simulator::run`] then does only the part that
 /// genuinely varies: the source-to-station geometry and the passes over it.
 ///
-/// # Stations are independent, and that is a contract
+/// # Stations are independent
 ///
 /// `run` takes `&self`, so a batch can be driven from several threads over one `Simulator`.
 /// Each call builds its own generator from its own seed and its own accumulator, so no state
 /// crosses between stations — which is what makes a batch safe to reorder, subset or resume.
 pub struct Simulator {
-    /// The slip model as given. **Not modified** — the derived moment weights live in
-    /// [`Simulator::weights`], which is the whole point of them being a separate type.
+    /// The slip model as given, unmodified; the derived moment weights live in
+    /// [`Simulator::weights`].
     slip: StochModel,
     /// One entry per segment, each indexed by [`Segment::grid_index`].
     weights: Vec<SegmentWeights>,
-    /// The working model, with the air layer inserted and the two `real*4` fields widened.
+    /// The working model, with the air layer inserted and the `f32` input fields widened.
     vmod: VelocityModel,
     rupture: RuptureVelocityTaper,
     path_duration: PathDuration,
@@ -366,15 +344,10 @@ impl Simulator {
         let slip_model = slip.clone();
         let vmod_in = vmod_in.clone();
 
-        // Every segment must agree with the FIRST on subfault size, so the first is the
-        // reference and the rest are the candidates -- `split_first` says that, where
-        // re-indexing `segments[0]` inside a loop over `segments` left it to the reader to
-        // notice the index was constant. The reported numbers stay 1-based, to match the input
-        // file's own numbering.
+        // Every segment must agree with the first on subfault size.
         if let Some((reference, rest)) = slip_model.segments.split_first() {
             for (index, segment) in rest.iter().enumerate() {
-                // 0-based, matching `segments`, where the original reported the deck's 1-based
-                // numbering.
+                // 0-based, matching `segments`.
                 let segment_index = index + 1;
                 for (dimension, found, expected) in [
                     (
@@ -436,36 +409,23 @@ impl Simulator {
         // right; `crate::stoc` is where it does its work, and the note on `frank` there shows the
         // algebra.
         //
-        // DEVIATION FROM THE PUBLISHED METHOD, AND IT IS A PHYSICS CHOICE. G&P define
-        // `F = M_o / (N * sigma_p * dl^3)` -- LINEAR in subfault count. This uses `sqrt(N)`.
-        // Graves & Pitarka (2015) does not revise `F`, so neither paper licenses the square root;
-        // it may come from the subfault-summation scheme instead. Three other candidate scalings
-        // were tried and abandoned upstream, which is some evidence this was tuned rather than
-        // derived:
+        // This deviates from the published method: G&P define `F = M_o / (N * sigma_p * dl^3)`,
+        // linear in subfault count, and this uses `sqrt(N)`. Neither G&P (2010) nor (2015)
+        // licenses the square root. It is kept because production uses it and changing it
+        // would move every waveform.
         //
-        //   M_o / (subevent_moment * subfault_count)          linear in N -- what G&P specify
-        //   M_o / (subevent_moment * sqrt(subfault_count))    THE LIVE ONE
-        //   (M_o / subevent_moment)^(2/3)
-        //   (fce_avg / fcmain)^2
-        //
-        // Flagged in `papers/README.md` finding 4 and left alone: changing it would move every
-        // waveform, and it wants a domain judgement rather than a tidy-up.
-        //
-        // The `1.0 *` forces the integer count through a real multiply before the sqrt, and is
-        // load-bearing for the exact result.
+        // The `1.0 *` forces the integer count through a real multiply before the sqrt.
         let moment_scale =
             total_moment_dyn_cm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
 
         // ------------------------------------------------------------ stations ---
-        // No ceiling on the record length: buffers are sized from the requested duration. The
-        // original clamped this to a compile-time maximum and SILENTLY TRUNCATED anything longer.
+        // No ceiling on the record length: buffers are sized from the requested duration.
         let ndata = (duration_s / dt).trunc() as usize;
 
-        // The working model widens the two `real*4` input fields to `real*8`.
+        // The working model widens the `f32` input fields to `f64`.
         let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();
 
-        // Everything the two passes need that is constant for the whole run, gathered once
-        // so the extracted functions take one reference instead of eighteen scalars.
+        // Everything the two passes need that is constant for the whole run.
         let run = RunScalars {
             dt,
             fmax_hz: f_max_hz,
@@ -572,11 +532,6 @@ impl Simulator {
                 angles,
                 &self.run,
             );
-            // The minimum over ALL segments. The original re-initialised this inside the segment
-            // loop, so on a multi-segment model the reported distance described only the last
-            // segment -- invisible while every fixture was single-segment. Now the minimum,
-            // which is what "closest subfault distance" means.
-
             let (segment_clipping, segment_census) = subfault_pass(
                 &rng,
                 &mut plans,
@@ -621,12 +576,8 @@ impl Simulator {
 // The pieces a run is made of
 // ---------------------------------------------------------------------------
 
-/// Everything derived from the deck and the slip model that is constant for the whole
-/// run.
-///
-/// This exists because the alternative is an eighteen-argument function. Grouping does
-/// not make the coupling smaller, but it does put every one of these under a name with a
-/// unit, in one place, instead of spread across a 500-line body.
+/// Everything derived from the configuration and the slip model that is constant for the
+/// whole run.
 struct RunScalars {
     dt: f32,
     fmax_hz: f32,
@@ -646,14 +597,14 @@ struct RunScalars {
     avg_subfault_km: f32,
     subevent_moment: f32,
     moment_scale: f32,
-    /// Sample count for the conical radiation average, and a DRAW COUNT.
+    /// Sample count for the conical radiation average, and therefore a draw count.
     conical_sample_count: usize,
     /// Length of the site-amplification frequency table.
     site_table_len: usize,
     ndata: usize,
     /// The fastest shear-wave velocity in the model, km/s.
     ///
-    /// Not physics — a **bound**. No traced ray can travel faster than the quickest medium it
+    /// Not physics but a bound: no traced ray can travel faster than the quickest medium it
     /// could possibly cross, so straight-line distance over this is a lower bound on any
     /// subfault's travel time, and that is what lets an arrival be ruled out before it is
     /// traced. See [`SubfaultSource::earliest_start_sample`].
@@ -669,9 +620,8 @@ struct SegmentAngles {
     /// `c₀(1 + fcfac) / α_τ` — everything in Graves & Pitarka (2010) eq. 13's corner frequency
     /// that does not vary within a segment.
     ///
-    /// **Hoisted**, and bit-identically so: `α_τ` is a pure function of three per-segment
-    /// constants, so evaluating it once per segment rather than once per subfault per loop gives
-    /// the identical `f32`.
+    /// `α_τ` is a pure function of per-segment constants, so evaluating it once per segment
+    /// gives the same `f32` as evaluating it per subfault.
     corner_coeff: f32,
 }
 
@@ -686,20 +636,19 @@ impl SegmentAngles {
     }
 }
 
-/// The generator and the pre-drawn blocks. **The fill order is the draw order**, and the draw
-/// order is part of the answer.
+/// The pre-drawn blocks. The fill order is the draw order, and the draw order is part of the
+/// answer.
 struct Deviates {
-    /// `rna` / `rnb` — the vertical component's uniforms.
+    /// The vertical component's uniforms.
     radv_uniform_a: Vec<f32>,
     radv_uniform_b: Vec<f32>,
 }
 
 /// Seed, then make the two pre-draws.
 ///
-/// **The order and the counts are the contract, not an implementation detail.** Seed,
-/// then `nr` uniforms into `a`, then `nr` uniforms into `b`. Changing either moves every
-/// sample downstream, which is why this is one function rather than two calls spread
-/// through the setup.
+/// The order and the counts are part of the output: seed, then `radv_sample_count` uniforms
+/// into `a`, then `radv_sample_count` uniforms into `b`. Changing either moves every sample
+/// downstream.
 ///
 /// The two uniform blocks must stay two sequential fills. Interleaving them into one pass
 /// would put different deviates in different slots and change every vertical component.
@@ -707,8 +656,6 @@ fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviate
     let mut rng = DrawSource::for_station(seed);
 
     // Exactly `radv_sample_count` values, which is what `vertical_radiation_spectrum` reads.
-    // Filled by two SEPARATE sequential passes -- see the note there on why they must not be
-    // interleaved.
     let mut radv_uniform_a = vec![0.0f32; radv_sample_count];
     let mut radv_uniform_b = vec![0.0f32; radv_sample_count];
     rng.fill_uniform(&mut radv_uniform_a);
@@ -725,27 +672,9 @@ fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviate
 
 /// The velocity-model layer a source at `depth_km` sits in.
 ///
-/// # The defect this replaces
-///
-/// The two subfault passes disagreed about what to do when a source is deeper than the
-/// whole model, and **both answers were wrong**:
-///
-/// * the window pass had no fallback at all, so it silently reused the *previous
-///   subfault's* velocity — and on the very first subfault of the first station the
-///   original read uninitialised memory. Pinning that to 0.0 would be a choice rather than
-///   a behaviour, and no more defensible.
-/// * the subfault pass fell back to layer 0 for the velocity — which after
-///   `insert_air_layer` is the **air layer**, `vsh = 0.0005 km/s` — and set `ksrc` to
-///   `layer_count`, one PAST the model. That index then reached
-///   `site_amplification_factors`, which read a zeroed `Layer`, computed
-///   `ln(0 / (bz*pz)) = -inf`, and exponentiated it back to a gain of **zero**. A
-///   subfault below the model contributed nothing at all.
-///
-/// Both now take the deepest real layer, which is the only physically sensible reading:
-/// a source below the model is in the half-space, and the half-space is the bottom layer.
-///
-/// This is reachable — the `vs_moho=4.2` deck truncates the model at the Moho and lands
-/// subfaults beneath it, and it is the one deck of 22 whose output moves.
+/// A source deeper than the whole model takes the deepest layer: it is in the half-space,
+/// and the half-space is the bottom layer. Both subfault passes use this, so they agree.
+/// Reachable when a model is truncated above the fault's base (e.g. at the Moho).
 fn source_layer_for(vmod: &VelocityModel, depth_km: f32) -> usize {
     vmod.iter()
         .position(|layer| layer.depth_km >= depth_km as f64)
@@ -760,13 +689,10 @@ struct WindowPass {
     tmax: f32,
 }
 
-/// Time-window pass — `hb_high_ref.f`'s first subfault loop.
+/// Time-window pass: the shaping-window length of every subfault in a segment.
 ///
-/// **Depth-major: `j` outer, `i` inner.** That is the OPPOSITE order to
-/// [`subfault_pass`], and the difference is load-bearing there, not here: this pass draws
-/// nothing from the generator, so its order affects only the `tmax` max-reduction and the
-/// `d10` min-reduction, both of which are order-independent in exact arithmetic and
-/// preserved here anyway.
+/// Depth-major (`j` outer, `i` inner). The order does not matter: this pass draws nothing
+/// from the generator and its only reduction is the `tmax` maximum.
 fn time_window_pass(
     seg: &Segment,
     geom: &SubfaultGeometry,
@@ -781,18 +707,15 @@ fn time_window_pass(
 
     for (i, j) in seg.depth_major() {
         let ray = geom.at(i, j);
-        // A subfault below the whole model takes the DEEPEST layer -- see
-        // [`source_layer_for`] for why neither of the original fallbacks was defensible.
+        // A subfault below the whole model takes the deepest layer; see [`source_layer_for`].
         let shear_velocity_km_s = vmod[source_layer_for(vmod, ray.depth_km)].vsh_km_s as f32;
 
         let rupture_fraction = rupture.factor(ray.depth_km);
 
-        // The last table segment this distance is past. `.last()`, NOT `.find()` -- the table
-        // ascends, so the first match is the wrong end.
+        // The last table segment this distance is past (`.last()`: the table ascends).
         //
-        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches NOTHING and
-        // the duration terms stay zero. That zero is a deliberate choice for an undefined
-        // case, and `unwrap_or` is where it lives.
+        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches nothing and
+        // the duration terms stay zero via `unwrap_or`.
         let bin = path_duration
             .iter()
             .take_while(|s| ray.slant_km > s.start_km)
@@ -812,7 +735,7 @@ fn time_window_pass(
         // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
         // term. Two details worth stating:
         //
-        //   * the source term uses `sqrt(F)/f_ci`, which is `1/f_c_effective` for the RESCALED
+        //   * the source term uses `sqrt(F)/f_ci`, which is `1/f_c_effective` for the rescaled
         //     corner of eq. 12 -- see the `frank` note in `crate::stoc`. So the duration
         //     follows the mainshock-scaled corner, not the raw subfault corner.
         //   * the factor of 2.12 is Boore's -- see WINDOW_DURATION_FACTOR.
@@ -833,9 +756,7 @@ fn time_window_pass(
 
 /// The per-segment things the subfault pass reads.
 ///
-/// Bundled with [`RunContext`] to get `subfault_pass` from thirteen positional arguments
-/// to four. The two bundles are the natural cut: this one changes once per segment, that
-/// one once per station.
+/// This changes once per segment; [`RunContext`] once per station.
 #[derive(Clone, Copy)]
 struct SegmentPass<'a> {
     /// Position in `slip.segments`. Part of a subfault's identity, and so part of its
@@ -865,7 +786,7 @@ struct RunContext<'a> {
 
 /// SplitMix64's finalising mix (Steele et al. 2014).
 ///
-/// A **bijection** on `u64`, which is the property the seeding below needs: distinct inputs
+/// A bijection on `u64`, which is the property the seeding below needs: distinct inputs
 /// stay distinct, so two subfaults cannot be handed the same stream by an unlucky collision.
 #[inline]
 fn mix64(mut z: u64) -> u64 {
@@ -881,7 +802,7 @@ const SEED_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 /// The seed for one subfault's own stream.
 ///
 /// A subfault's identity is `(station, segment, grid position)` and nothing about the *order*
-/// it was walked in, which is the whole point: see [`Draws::respawn`] for what that decouples.
+/// it was walked in; see [`Draws::respawn`] for what that decouples.
 fn substream_seed(station_seed: u64, segment: usize, subfault: usize) -> u64 {
     mix64(mix64(station_seed ^ (segment as u64).wrapping_mul(SEED_GAMMA)) ^ subfault as u64)
 }
@@ -897,10 +818,8 @@ fn ray_stream_seed(subfault_seed: u64, ray: usize) -> u64 {
 
 /// One subfault as a source: where it is, how strong it is, and the medium it sits in.
 ///
-/// Everything here is fixed before a ray path is chosen. That is the cut that lets the ray
-/// loop read as a pipeline — trace, place, synthesise, accumulate — rather than as one block
-/// in which the geometry, the medium and the spectrum are computed in whatever order the
-/// original happened to need them.
+/// Everything here is fixed before a ray path is chosen, so the ray loop reads as a pipeline:
+/// trace, place, synthesise, accumulate.
 struct SubfaultSource {
     /// Source-to-station geometry.
     geometry: SubfaultRay,
@@ -923,7 +842,7 @@ struct SubfaultSource {
 impl SubfaultSource {
     /// Gather one subfault, or `None` when its moment is too small to radiate.
     ///
-    /// **Draws exactly one normal deviate**, and only when the rupture-velocity sigma is
+    /// Draws exactly one normal deviate, and only when the rupture-velocity sigma is
     /// non-zero — the perturbation and its draw are the same switch. It comes from the
     /// subfault's own stream, so it is a function of which subfault this is rather than of how
     /// many ran before it.
@@ -972,7 +891,7 @@ impl SubfaultSource {
     ///
     /// # Why this is exact rather than heuristic
     ///
-    /// [`arrival_time_and_angles`] forms the real start from the **traced** travel time. No
+    /// [`arrival_time_and_angles`] forms the real start from the traced travel time. No
     /// traced path is shorter than the straight line between its endpoints, and no medium on
     /// it is faster than the fastest layer in the model, so `slant_km / max_shear_velocity`
     /// is a lower bound on that travel time. Truncation toward zero is monotonic, so the
@@ -982,7 +901,7 @@ impl SubfaultSource {
     ///
     /// # What it saves
     ///
-    /// It gates the **ray tracing**, not just the synthesis. `trace_ray` runs an iterative
+    /// It gates the ray tracing, not just the synthesis. `trace_ray` runs an iterative
     /// root-find for the stationary ray parameter and a per-layer spreading integral, and a
     /// contribution that cannot reach the record needs neither. Two divisions decide it.
     fn earliest_start_sample(&self, run: &RunScalars) -> i32 {
@@ -994,15 +913,10 @@ impl SubfaultSource {
 
 /// One ray path from a subfault to the station, after tracing.
 ///
-/// # The straight ray is an alternative, not a patch
-///
-/// Three of these four fields are computed differently under the straight-ray approximation,
-/// and the fourth — the take-off angle — is too. Those two decisions used to sit sixty lines
-/// apart with the spectrum synthesis between them, which made it easy to read the second as a
-/// correction to the first. Producing the whole struct in one place is what says they are one
-/// choice.
+/// All four fields are computed differently under the straight-ray approximation, so
+/// [`trace_ray`] produces the whole struct in one place for either kind.
 struct TracedRay {
-    /// Path length along the ray, km. **Not** epicentral distance.
+    /// Path length along the ray, km. Not epicentral distance.
     path_length_km: f32,
     /// `q̄`, the travel-time weighted `Σ t/q` along the path (Ou & Herrmann 1990).
     qbar: f32,
@@ -1062,7 +976,7 @@ fn trace_ray(
 
 /// When one subfault's contribution reaches the record, and through what geometry.
 struct Arrival {
-    /// 1-based sample the contribution's first sample lands on. **Can be negative**: both
+    /// 1-based sample the contribution's first sample lands on. Can be negative: both
     /// terms below truncate toward zero, so a window starting before the origin time gives a
     /// negative start. [`Arrival::placement`] is what handles that, and relies on it.
     start_sample: i32,
@@ -1072,9 +986,8 @@ struct Arrival {
 
 /// Place a traced ray in time, and orient it.
 ///
-/// **This is the function the whole pass is arranged around.** It is cheap — two divisions
-/// and a struct — and it decides whether the expensive work that follows can reach the record
-/// at all. Everything downstream of it costs a transform per component.
+/// Cheap (two divisions and a struct), and it decides whether the expensive work that
+/// follows, a transform per component, can reach the record at all.
 fn arrival_time_and_angles(
     ray: &TracedRay,
     source: &SubfaultSource,
@@ -1103,16 +1016,11 @@ impl Arrival {
 
 /// Sum every subfault of one segment into the station's accumulator.
 ///
-/// # The walk order is no longer a contract, and that is deliberate
+/// # The walk order is free
 ///
-/// It used to be. Every subfault drew from one shared per-station stream, so the deviates a
-/// subfault received depended on how many had drawn before it, and walking the grid the other
-/// way moved every waveform. Each `(subfault, ray)` now draws from a stream seeded by its own
-/// identity — see [`substream_seed`] — so the order is free, and what that buys is the
-/// `continue` below: a contribution that cannot reach the record can be skipped, and the ones
-/// that can are bit-identical.
-///
-/// Strike-major is kept because it is the order the grid is laid out in.
+/// Each `(subfault, ray)` draws from a stream seeded by its own identity (see
+/// [`substream_seed`]), so a contribution that cannot reach the record can be skipped without
+/// changing the ones that can. Strike-major is used because it is the grid's layout order.
 fn subfault_pass(
     rng: &impl Draws,
     plans: &mut PlanCache,
@@ -1136,9 +1044,7 @@ fn subfault_pass(
         ..
     } = ctx;
 
-    // Fixed for the whole run, so it is built once here rather than per call. Six of
-    // `stochastic_spectrum`'s nineteen former arguments were these, re-passed on every one
-    // of the hundreds of thousands of calls in a run.
+    // Fixed for the whole run, so it is built once here rather than per call.
     let model = SourceModel {
         dt: run.dt,
         window_eps: run.window_peak_fraction,
@@ -1147,15 +1053,12 @@ fn subfault_pass(
         kappa_s: run.kappa_s,
         moment_scale: run.moment_scale,
     };
-    // Sized for the LONGEST window in the segment, then used a prefix at a time -- each
-    // subfault works in `spectrum[.., ..np2]` for its own `np2`. One allocation per segment
-    // rather than one per subfault, which is what it always was; what has changed is that
-    // the length in use now varies within the pass.
+    // Sized for the longest window in the segment, then used a prefix at a time: each
+    // subfault works in `spectrum[.., ..np2]` for its own `np2`, so there is one allocation
+    // per segment.
     //
-    // The tail beyond a subfault's own prefix holds the PREVIOUS subfault's numbers, so these
-    // are only scratch within a prefix. Every read below goes through a view sliced to the
-    // current `np2`, and that is what makes the stale tail unreachable rather than merely
-    // unread.
+    // The tail beyond a subfault's own prefix holds an earlier subfault's numbers. Every read
+    // below goes through a view sliced to the current `np2`, so the stale tail is unreachable.
     let longest = plans.for_length(SpectrumPlan::length_for(windows.tmax, run.dt));
     let (np2_max, fold_max) = (longest.np2, longest.fold_count);
     let components = Component::ALL.len();
@@ -1180,8 +1083,7 @@ fn subfault_pass(
             continue;
         };
 
-        // Ruled out before a single ray is traced, and the bound is exact rather than a
-        // heuristic — see `SubfaultSource::earliest_start_sample`. Every ray of this subfault
+        // Ruled out before a single ray is traced; the bound is exact, see `SubfaultSource::earliest_start_sample`. Every ray of this subfault
         // shares the bound, because it is built from the straight-line distance rather than
         // from any particular path.
         let earliest = source.earliest_start_sample(run);
@@ -1207,14 +1109,13 @@ fn subfault_pass(
             census.pairs_attempted += 1;
 
             // Decided before a transform length is chosen, because no length makes a
-            // contribution that begins past the end of the record reach it. This is the gate
-            // in front of three transforms and three blocks of `np2` normal deviates.
+            // contribution that begins past the end of the record reach it.
             if arrival.start_sample > run.ndata as i32 {
                 census.pairs_outside_record += 1;
                 continue;
             }
 
-            // THIS SUBFAULT'S OWN transform length, clipped to what can land. See
+            // This subfault's own transform length, clipped to what can land. See
             // `SpectrumPlan::length_for_arrival` for why that is Boore's factor of two rather
             // than a truncation of it. Built at most once per distinct length per station.
             let plan = plans.for_length(SpectrumPlan::length_for_arrival(
@@ -1236,7 +1137,7 @@ fn subfault_pass(
             // Three phase realisations in component order: each draws `np2` normal deviates,
             // and each writes a full row, so there is nothing to reset between rays.
             //
-            // The SHAPE behind them is rebuilt only when `f_max` changes it, which means twice
+            // The shape behind them is rebuilt only when `f_max` changes it, which means twice
             // at most and — whenever `f_max` is already at or below the vertical's ceiling —
             // once. `capped_fmax` is the only per-component input to it.
             let mut built_for = f32::NAN;
@@ -1267,13 +1168,9 @@ fn subfault_pass(
                 );
             }
 
-            // Unconditional. There is no run for which the quarter-wavelength site
-            // amplification should be off, so it is not a choice a caller gets to make.
-            //
-            // Built ONCE for the three components. The curve depends on the source layer and
-            // the transform length; the component it multiplies is not one of its inputs, so
-            // computing it inside the per-component loop was `fold_count` exponentials done
-            // three times over.
+            // Quarter-wavelength site amplification is always applied. The curve depends only
+            // on the source layer and the transform length, so it is built once for the three
+            // components.
             site_amplification_factors(
                 vmod,
                 source.layer,
@@ -1295,7 +1192,7 @@ fn subfault_pass(
                 );
             }
 
-            // The ONLY difference between the three components is which radiation routine
+            // The only difference between the three components is which radiation routine
             // runs: a horizontal draws 5,000 deviates, the vertical draws none and reads the
             // pre-filled tables instead.
             for component in Component::ALL {
@@ -1320,8 +1217,7 @@ fn subfault_pass(
                     ),
                 };
                 // In place on both rows: the inverse transform overwrites the spectrum,
-                // and the real samples land straight in the accumulator's row. No
-                // allocation and no copy anywhere on this path.
+                // and the real samples land straight in the accumulator's row.
                 radiate_and_invert(
                     spectrum.row_mut(component.index()).slice_mut(s![..np2]),
                     radiation.slice(s![..fold_count]),
@@ -1343,12 +1239,8 @@ fn subfault_pass(
 
 /// Where a subfault's `np2`-sample window lands in the record, after clipping to it.
 ///
-/// # A fixed off-by-one
-///
-/// Sample 1 of the subfault's trace lands on `start_sample`, not on `start_sample + 1`. The
-/// original indexed one element before the column — which nothing wrote, and which aliasing
-/// made read as zero rather than crash — so every subfault's contribution arrived one sample
-/// late. Corrected here.
+/// Sample 1 of the subfault's trace lands on `start_sample`. Production placed every
+/// contribution one sample later (`start_sample + 1`); this does not reproduce that.
 struct Placement {
     /// How many of the subfault's own samples fall before the record starts.
     skip: usize,
@@ -1361,15 +1253,14 @@ struct Placement {
 impl Placement {
     /// Clip a subfault's window to the record, or `None` if none of it lands.
     ///
-    /// `start_sample` is a 1-based sample number and **can be negative**: truncation is toward
+    /// `start_sample` is a 1-based sample number and can be negative: truncation is toward
     /// zero and the window start can precede the origin time.
     ///
     /// # Both ends can miss, and they are different cases
     ///
     /// One contribution ends before the record begins (a large negative start); another begins
-    /// after it ends (a long-path ray at a far station). AS AN EXPLICIT RANGE THE SECOND CASE
-    /// COMPUTES A NEGATIVE LENGTH, which must be rejected before it is cast to `usize` or it
-    /// wraps to something enormous. A gate caught exactly that once.
+    /// after it ends (a long-path ray at a far station). The second case computes a negative
+    /// length, which must be rejected before it is cast to `usize` or it wraps.
     fn clip(start_sample: i32, np2: usize, ndata: usize) -> Option<Self> {
         let last_sample = (start_sample + np2 as i32 - 1).min(ndata as i32);
         let first_sample = start_sample.max(1);
@@ -1389,8 +1280,8 @@ impl Clipping {
     ///
     /// The Saragoni–Hart envelope peaks at `window_peak_fraction` of the window after the
     /// trace starts, so the peak sample is `start_sample + ε·window/dt`. Everything past
-    /// `ndata` is discarded by [`Placement::clip`], silently and correctly — this is the one
-    /// part of that discard worth telling the caller about.
+    /// `ndata` is discarded by [`Placement::clip`]; this is the part of that discard worth
+    /// telling the caller about.
     fn for_arrival(start_sample: i32, window_s: f32, run: &RunScalars) -> Self {
         let peak_sample = start_sample as f32 + run.window_peak_fraction * window_s / run.dt;
         let overrun_samples = peak_sample - run.ndata as f32;
@@ -1420,23 +1311,19 @@ fn accumulate_subfault(
         offset,
         count,
     } = at;
-    // `scaled_add` IS this operation: `y += alpha * x`, the axpy every linear-algebra library
-    // names. One call per component, over the clipped window of each.
+    // `y += alpha * x` over the clipped window, all components at once.
     let mut destination = acc.slice_mut(s![.., offset..offset + count]);
     destination.scaled_add(weight.0, &subfault_acc.slice(s![.., skip..skip + count]));
 }
 
 /// One segment of the piecewise-linear duration-versus-distance table.
-///
-/// One value per segment rather than three parallel arrays: every read of one field is at the
-/// same index as the other two, so they belong together.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DurationSegment {
-    /// `rdur` — distance at which this segment starts, km.
+    /// Distance at which this segment starts, km.
     start_km: f32,
-    /// `dpth` — duration at that distance, s.
+    /// Duration at that distance, s.
     duration_s: f32,
-    /// `dpdr` — slope of this segment, s/km.
+    /// Slope of this segment, s/km.
     slope_s_per_km: f32,
 }
 
@@ -1491,27 +1378,21 @@ fn path_duration_table(model: PathDurationModel) -> PathDuration {
         PathDurationModel::Gp2010 => constant_slope(0.063),
         PathDurationModel::Wus => constant_slope(0.07),
         PathDurationModel::Ena => constant_slope(0.1),
-        // Boore & Thompson (2014) Table 1, "The New Path Duration Model", reproduced exactly:
-        // breakpoints at 0, 7, 45, 125, 175, 270 km with durations 0, 2.4, 8.4, 10.9, 17.4,
-        // 34.2 s. The paper specifies linear interpolation between them, which is what
-        // `from_breakpoints` does. Checked against the held PDF, p. 2546.
+        // Boore & Thompson (2014) Table 1, "The New Path Duration Model" (p. 2546): breakpoints
+        // at 0, 7, 45, 125, 175, 270 km with durations 0, 2.4, 8.4, 10.9, 17.4, 34.2 s,
+        // linearly interpolated.
         //
-        // KNOWN DEVIATION FROM THE PAPER, BEYOND 270 km. Table 1 gives "slope of last
-        // segment 0.156" s/km for `R` past the last breakpoint. `from_breakpoints` instead
-        // copies the slope of the final tabulated segment, `(34.2 - 17.4)/(270 - 175) = 0.177`
-        // -- about 13% steeper. This reproduces the original faithfully (it did
-        // `dpdr(ndur) = dpdr(ndur-1)`), so the deviation is in the model as implemented rather
-        // than in this port. IT IS NOT AN EDGE CASE: it bites past 270 km, and a 411 km Alpine
-        // Fault rupture recorded anywhere past Cook Strait has EVERY subfault beyond that --
-        // Palmerston North sits 465 to 875 km out, for a mean duration error of +8.3 s.
-        // Recorded with the numbers in `papers/README.md` finding 7; not changed here, because
-        // it would move every long-path waveform and wants a domain judgement.
+        // Deviates from the paper beyond 270 km. Table 1 gives "slope of last segment 0.156"
+        // s/km past the last breakpoint; `from_breakpoints` instead copies the final tabulated
+        // segment's slope, `(34.2 - 17.4)/(270 - 175) = 0.177`, about 13% steeper. Production
+        // does the same, so this is kept to match the archived catalogue. It is not an edge
+        // case: an Alpine Fault rupture recorded past Cook Strait has every subfault beyond
+        // 270 km.
         PathDurationModel::Bt2014Wus => from_breakpoints(
             [0.0, 7.0, 45.0, 125.0, 175.0, 270.0],
             [0.0, 2.4, 8.4, 10.9, 17.4, 34.2],
         ),
-        // Boore & Thompson (2015) Table 3, stable continental regions, checked against the
-        // held PDF p. 1034. The paper's tail is `D_P(R_last) + 0.111(R - R_last)`, and the
+        // Boore & Thompson (2015) Table 3 (p. 1034), stable continental regions. The paper's tail is `D_P(R_last) + 0.111(R - R_last)`, and the
         // final tabulated segment's slope is `(69.1 - 46.0)/(600 - 392) = 0.1111` -- so
         // repeating it is correct here, where for model 11 above it is not.
         PathDurationModel::Bt2015Ena => from_breakpoints(
@@ -1536,9 +1417,9 @@ struct SourceScale {
 /// subfaults is one.
 ///
 /// This is what a subfault's trace is weighted by when it is summed into the record. It is
-/// **derived from** [`crate::input::Slip`] and is not slip: the conversion multiplies by rigidity and area, then rescales the
-/// whole model. Keeping the two as distinct types is what stops a caller weighting by
-/// centimetres of slip, which is what a single reused `f32` field allowed.
+/// derived from [`crate::input::Slip`] but is not slip: the conversion multiplies by rigidity
+/// and area, then rescales the whole model. A distinct type stops a caller weighting by
+/// centimetres of slip.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct MomentWeight(pub f32);
 
@@ -1547,19 +1428,17 @@ type SegmentWeights = Vec<MomentWeight>;
 
 /// Convert slip to relative moment, then normalise to unit average weight.
 ///
-/// The slip model is **not modified**: the weights come back in their own storage, parallel to
+/// The slip model is not modified: the weights come back in their own storage, parallel to
 /// the subfault grid.
 ///
 /// Three passes over the subfault grid, in this order:
 ///
-/// 1. average subfault size, and the maximum absolute slip (computed and discarded)
-/// 2. slip → moment via the rigidity `xmu`, accumulating `xsum`, `fce_avg`,
-///    `trise_avg` and a count of *all* subfaults
-/// 3. re-count only the subfaults above 0.001 and rescale so their mean weight is 1
+/// 1. average subfault size
+/// 2. slip → moment via the rigidity, accumulating the moment sum
+/// 3. count the subfaults above [`SUBFAULT_WEIGHT_THRESHOLD`] and rescale so their mean
+///    weight is 1
 ///
-/// The two counts are different and both matter: pass 2's normalises the averages, pass 3's is
-/// the one that reaches `moment_scale` — the `N` of Graves & Pitarka (2010) eq. 12. Only the
-/// second is returned, because only it is read downstream.
+/// Pass 3's count is the `N` of Graves & Pitarka (2010) eq. 12 that reaches `moment_scale`.
 fn normalise_source(
     stoch: &StochModel,
     vmod_in: &VelocityModelInput,
@@ -1575,19 +1454,6 @@ fn normalise_source(
         / segment_count as f32;
 
     // --- pass 2: relative slip to relative moment -----------------------------
-    // An average corner frequency and rise time were also accumulated here, at the cost of a
-    // rupture-velocity taper, an `alpha_tau` evaluation and several more operations PER
-    // SUBFAULT. All of it fed a quantity nothing reads:
-    //
-    //   fce_avg, trise_avg -> fcmain -> bigC3  (hb_high_ref.f:805)
-    //
-    // and `bigC` is assigned five times at :807-811 with `bigC = bigC1b` last, so
-    // bigC3 never survives. Their only other consumers are the commented-out prints
-    // at :684-685 and :817. Dropping them also removes `xnorm`, this pass's own
-    // `subfault_count` count (which only normalised them), and `islip_weight_avg` -- a frozen
-    // switch whose two branches only ever weighted these dead quantities.
-    //
-    // What remains live: the in-place slip-to-moment conversion, and the moment sum.
     let mut relative_moment_sum = 0.0f32;
     let mut weights: Vec<SegmentWeights> = Vec::with_capacity(stoch.segments.len());
 
@@ -1595,9 +1461,8 @@ fn normalise_source(
         let mut segment_weights: SegmentWeights = Vec::with_capacity(segment.subfault_total());
         let row_depth_step_km = segment.subfault_width_km * segment.dip_deg.to_radians().sin();
         let top_depth_km = segment.top_depth_km;
-        // THE WHOLE PRODUCT BELOW IS COMPUTED IN f64 and narrows only on assignment to `xmu`.
-        // Narrowing earlier -- for instance by keeping the dimensions in `f32` -- shifts every
-        // subfault moment by an ulp or two.
+        // The whole rigidity-area product is computed in f64 and narrows only at the end.
+        // Narrowing earlier shifts every subfault moment by an ulp or two.
         let (length_km, width_km) = (
             segment.subfault_length_km as f64,
             segment.subfault_width_km as f64,
@@ -1632,8 +1497,8 @@ fn normalise_source(
     let total_moment_dyn_cm = RELATIVE_MOMENT_TO_DYN_CM * relative_moment_sum;
 
     // --- pass 3: normalise relative moments to average weight unity -----------
-    // Depth-major again -- and `weights` was filled depth-major, so a flat walk of it is the
-    // same order the original summed in.
+    // Depth-major again: `weights` was filled depth-major, so a flat walk of it keeps the
+    // summation order.
     let mut weight_sum = 0.0f32;
     let mut subfault_count = 0usize;
     for weight in weights.iter().flatten() {
@@ -1659,21 +1524,18 @@ fn normalise_source(
 
 /// `α_τ`, the dip-and-rake corner-frequency and rise-time adjustment.
 ///
-/// Graves & Pitarka (2015) eq. 3, `α_T = 1 + F_D·F_R·c_α`. **Returns the RECIPROCAL of that**,
+/// Graves & Pitarka (2015) eq. 3, `α_T = 1 + F_D·F_R·c_α`. Returns the reciprocal of that,
 /// because the caller divides `c₀` by it and eq. 13 has `α_τ` in the denominator — so the value
 /// returned here is `α_τ` itself, ≤ 1, and smaller for a shallow-dipping thrust. Physically that
 /// means such a fault gets a *higher* corner frequency and a shorter rise time, which is the
 /// observed trend (Graves & Pitarka 2010, p. 2099, citing Somerville 1998: shorter rise times for
 /// thrust events imply relatively high dynamic stress drops).
 ///
-/// Graves & Pitarka (2010) eq. 9 parameterised this on **dip alone**, piecewise — 1 above 60°,
-/// 0.82 below 45°. The continuous dip-and-rake form below is the 2015 revision, and is another
-/// marker that this code tracks the later method — as does the default `c₀` of 2.0 rather than
-/// the 2010 paper's 2.1. See `papers/README.md` finding 5.
+/// Graves & Pitarka (2010) eq. 9 parameterised this on dip alone, piecewise (1 above 60°,
+/// 0.82 below 45°). The continuous dip-and-rake form below is the 2015 revision.
 ///
 /// `fD` tapers with dip above 45 degrees; `fR` peaks at a rake of 90 degrees. The rake is first
-/// wrapped into
-/// `[-180, 180]` by repeated addition or subtraction of 360.
+/// wrapped into `[-180, 180]`.
 fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
     let dip_factor = if (45.0..=90.0).contains(&dip_deg) {
         1.0 - (dip_deg - 45.0) / 45.0
@@ -1683,8 +1545,7 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
         0.0
     };
 
-    // Wrapped into [-180, 180]. `rem_euclid` folds into [0, 360) in one step where the
-    // original stepped by 360 in a loop, and the shift back is the second line.
+    // Wrapped into [-180, 180]: `rem_euclid` folds into [0, 360), then the top half shifts down.
     let wrapped_rake_deg = {
         let folded = rake_deg.rem_euclid(360.0);
         if folded > 180.0 {
@@ -1707,14 +1568,11 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// `alpha_t` wraps the rake into `[-180, 180]`. That was a pair of `while` loops stepping
-    /// by 360 and is now `rem_euclid`, which is NOT the same function at the boundary:
-    /// `-180` wraps to `+180` here where the loop left it at `-180`.
+    /// `alpha_t`'s `rem_euclid` wrap agrees, to the bit, with stepping by 360 in a loop.
     ///
-    /// It does not matter, and this is why. The wrapped rake is only ever used as
-    /// `1 - |rake - 90|/90` inside `0..=180`, and the two boundary values agree there:
-    /// `-180` falls outside the range and contributes 0, while `+180` falls inside and
-    /// computes `1 - 1 = 0`. Both are exactly zero, so `alpha_t` is unchanged.
+    /// The two differ at the boundary (`-180` wraps to `+180`), but the wrapped rake is only
+    /// used as `1 - |rake - 90|/90` inside `0..=180`: `-180` falls outside and contributes 0,
+    /// and `+180` falls inside and computes `1 - 1 = 0`.
     #[test]
     fn rake_wrapping_agrees_with_the_stepping_loop_it_replaced() {
         fn stepped(mut rake_deg: f32) -> f32 {
@@ -1780,10 +1638,9 @@ mod tests {
     /// The slice form must agree with the loop form at every alignment, including the
     /// two that put the window entirely outside the record.
     ///
-    /// `start_sample > ndata` is the case that was once wrong: it computes a negative length,
-    /// and casting that to `usize` wraps. It is reachable -- a Moho multiple can make the path
-    /// long enough to start past the end of the record -- and this pins it directly rather
-    /// than relying on a deck that happens to trigger it.
+    /// `start_sample > ndata` computes a negative length, and casting that to `usize` wraps.
+    /// It is reachable: a Moho multiple can make the path long enough to start past the end
+    /// of the record.
     #[test]
     fn accumulate_matches_the_reference_loop_at_every_alignment() {
         let np2 = 8usize;

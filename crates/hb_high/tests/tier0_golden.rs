@@ -1,35 +1,12 @@
-//! Bit-identity gate for the tier-0 leaf kernels.
+//! Golden tests for the leaf kernels, against fixtures produced by the original Fortran.
 //!
-//! Goldens are produced by `harness/kernels/tier0_driver.f` linked against
-//! `reference/hb_high_subs.f`, so they come from the same Fortran the oracle
-//! binary runs. Each record holds the **inputs as well as the outputs**, and
-//! these tests read the inputs from the file rather than regenerating them — a
-//! kernel test must not be able to pass by comparing two different input sets.
+//! Each record holds the inputs as well as the outputs, and the tests read the inputs from
+//! the file, so a test cannot pass by comparing two different input sets. Comparisons are
+//! exact unless a test documents why its kernel deliberately differs.
 //!
-//! Regenerate with `harness/kernels/gen_tier0_golden.sh`.
-//!
-//!
-//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
-//! written by the Fortran driver, which dumps one file per subprogram it exercises,
-//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
-//! them would mean editing the drivers and regenerating every golden, and the names
-//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
-//!
-//! **`fast` no longer has a golden here either.** §2.1 replaced the radix-2 kernel
-//! with `rustfft`, and unlike `stoc_f` and `highcor_f` — where the transform is one
-//! step of five and the surrounding physics is still worth checking — this test's
-//! entire content was "does our FFT match the Fortran's FFT". That question is now
-//! answered by `tests/properties.rs`: round-trip proportionality, linearity, and a real
-//! DC bin for real input, all of which held across the swap unchanged.
-//!
-//! **`gamma` no longer has a golden here.** `REFACTOR.md` §2.2b replaced the
-//! transcribed `DGAMM` with `libm::tgamma`, so a bit-for-bit comparison against the
-//! old series is a comparison against code that no longer exists. Its contract is now
-//! carried by property tests in `tests/properties.rs` — the functional equation
-//! `Gamma(x+1) = x*Gamma(x)`, the factorials, and `Gamma(1/2) = sqrt(pi)` — which held
-//! across the swap without modification. `harness/golden/tier0/dgamm.bin` is left in
-//! place as a record of what the Fortran produced; nothing reads it.
-//! Every comparison is exact. See `PORTING_RULES.md` §10.
+//! Fixture filenames are the Fortran routine names, not this crate's: `cr.bin` holds the
+//! golden for `ray::vertical_slowness`, `delaz5.bin` for `geom::distance_azimuth`, and so
+//! on.
 
 use hb_high::fft::remove_quadratic_trend;
 use hb_high::fft::{Complex32, Complex64};
@@ -67,30 +44,18 @@ fn rdatn_matches_fortran() {
 
 #[test]
 fn distance_azimuth_stays_close_to_fortran() {
-    // §2.5 replaced DELAZ5 with a WGS84 geodesic, so this CANNOT be bit-exact any more.
-    // It is kept rather than deleted because the interesting question changed from "is it
-    // identical" to "is the deliberate change the size we said it was" -- and the same
-    // oracle data answers that. It would still catch a gross error: a degrees/radians
-    // mix-up, a transposed forward/back azimuth, or reading the wrong slot out of
-    // geographiclib's width-dependent return tuple.
+    // `distance_azimuth` uses a WGS84 geodesic where the Fortran used a spherical
+    // approximation, so this is a bounded comparison, not an exact one. It still catches
+    // gross errors: a degrees/radians mix-up, swapped forward/back azimuths, or the wrong
+    // slot of geographiclib's return tuple. Only distance and forward azimuth are compared.
     //
-    // Only the three live outputs are compared; §2.5 dropped `delt`, `deltdg`, `azse` and
-    // `azsedg`, which nothing outside this test read.
+    // The azimuth bound is stratified by separation:
     //
-    // THE BOUNDS ARE STRATIFIED BY SEPARATION, because the two formulations disagree by
-    // very different amounts at the two ends and only one end is the port's business:
-    //
-    //   * under 500 km -- every distance this program will ever see, source subfault to
-    //     station -- azimuth agrees to 0.045 degrees.
-    //   * near-antipodal (this fixture reaches 18,729 km, about 168 degrees of arc)
-    //     azimuth disagrees by up to 1.1 degrees, because the azimuth of a geodesic is
-    //     ill-conditioned there: the path direction becomes arbitrary as the endpoints
-    //     approach antipodes. Asserting a tight bound on that would be asserting
-    //     something about neither implementation's accuracy.
-    //
-    // So the production regime is bounded tightly and the global figure is printed, not
-    // asserted. Widening a single global tolerance until it passed would have hidden which
-    // of the two effects was which -- the §2.4c mistake, from the other direction.
+    //   * under 500 km -- every source-to-station distance the program sees -- azimuth
+    //     agrees to 0.045 degrees, and is asserted.
+    //   * near-antipodal (the fixture reaches 18,729 km) it disagrees by up to 1.1
+    //     degrees, because geodesic azimuth is ill-conditioned there. That figure is
+    //     printed, not asserted.
     let mut r = Golden::open("tier0", "delaz5.bin");
     let mut n = 0;
     let mut worst_km_rel = 0.0f64;
@@ -111,8 +76,7 @@ fn distance_azimuth_stays_close_to_fortran() {
             r.f32(),
             r.f32(),
         ];
-        // The geocentric-radians branch was dead and is gone; assert the oracle data never
-        // exercised it rather than trusting the old comment that said so.
+        // `distance_azimuth` has no geocentric-radians mode; the fixture must not use it.
         assert!(iflag <= 0, "case {n} used the dead coord_mode > 0 path");
 
         let g = distance_azimuth(
@@ -160,13 +124,12 @@ fn distance_azimuth_stays_close_to_fortran() {
         worst_km_rel * 100.0
     );
 
-    // DELAZ5 is systematically SHORT: a 6371.0 km mean-radius sphere plus a
-    // tangent-scaling stand-in for the ellipsoid, against a true geodesic. The largest
-    // relative distance error is at the SHORT end -- 0.32% at 1.04 km, i.e. 3 metres --
-    // where DELAZ5 switches to its near-coincident half-chord formulation.
+    // The Fortran's distances are systematically short (a 6371 km sphere with a tangent
+    // correction for the ellipsoid). The largest relative error is at the short end --
+    // 0.32% at 1.04 km, about 3 m -- where it switches to a half-chord formula.
     assert!(
         worst_km_rel < 0.005,
-        "distance moved by {:.4}% at {worst_km_at}, more than the 0.5% §2.5 allows for",
+        "distance moved by {:.4}% at {worst_km_at}, more than the 0.5% allowed",
         worst_km_rel * 100.0
     );
     assert!(
@@ -176,21 +139,15 @@ fn distance_azimuth_stays_close_to_fortran() {
     );
 }
 
-/// `vertical_slowness` no longer matches the Fortran bit for bit, and the reason is pi.
+/// `vertical_slowness` against the Fortran, exact except on the branch cut.
 ///
-/// On the branch cut — `|Im(p)| < 1e-8` with `a < 0` — the phase is forced to exactly
-/// pi rather than taken from `atan2`. The Fortran forced it to its own truncated
-/// `3.141592654d0`, which is 4.1e-10 short of pi, so the `cos(phi/2)` that should have
-/// been an exact zero came out at ~5.7e-11 instead. That error *was* the golden.
-///
-/// With `std::f64::consts::PI` the same cosine lands at -1.7e-17, six orders of
-/// magnitude closer to the true zero. So this test now measures how far the port has
-/// moved *away* from the oracle and asserts the move is confined to the component that
-/// should be zero, rather than pinning a value that is known to be wrong.
-///
-/// The imaginary part — which carries the whole magnitude of `eta` on this branch —
-/// is still compared exactly, and still passes on all 1500 cases. Off the branch cut
-/// nothing changed at all: `atan2` never sees the constant.
+/// On the branch cut (`|Im(p)| < 1e-8` with `a < 0`) the phase is forced to pi rather
+/// than taken from `atan2`. The Fortran used a truncated `3.141592654d0`, 4.1e-10 short
+/// of pi, so its `cos(phi/2)` -- which should be exactly zero -- came out at ~5.7e-11;
+/// with `std::f64::consts::PI` it is ~1e-17. The real part there is therefore only
+/// required to be closer to zero than the golden, within a bound derived from the
+/// Fortran's pi error. The imaginary part, which carries the magnitude of `eta` on this
+/// branch, is compared exactly on every case.
 #[test]
 fn cr_stays_close_to_fortran() {
     let mut r = Golden::open("tier0", "cr.bin");
@@ -220,9 +177,8 @@ fn cr_stays_close_to_fortran() {
                 worst_rel = rel;
                 worst_at = format!("p={p:?} v={v}");
             }
-            // Every divergent case must be one where the oracle's own value was
-            // numerical noise around zero, and ours is smaller noise. If the port ever
-            // moves a real quantity here, this is what catches it.
+            // Every divergent case must be one where the golden's value was numerical
+            // noise around zero and ours is smaller noise.
             assert!(
                 got.re.abs() < want.re.abs(),
                 "vertical_slowness({p:?},{v}) re: rust {got:?} is not closer to zero \
@@ -239,12 +195,9 @@ fn cr_stays_close_to_fortran() {
          worst real-part divergence {worst_rel:.3e} of |eta| at {worst_at}"
     );
 
-    // The Fortran's pi error is 4.1e-10 absolute and reaches `cos(phi/2)` halved, so the
-    // departure it induces is bounded by ~2.05e-10 of |eta|. Measured worst over the
-    // fixture: 2.051e-10, on 450 of the 1500 cases (the ones that land on the branch
-    // cut; the other 1050 are still bit-exact). Analysis and measurement agree to three
-    // digits, so this bound is 5x headroom over a well-understood number rather than a
-    // tolerance widened until the test passed.
+    // The Fortran's pi error (4.1e-10) reaches `cos(phi/2)` halved, bounding the
+    // departure at ~2.05e-10 of |eta|. Measured worst: 2.051e-10, on the 450 of 1500
+    // cases on the branch cut; the other 1050 are bit-exact. The bound is 5x headroom.
     assert!(
         worst_rel < 1.0e-9,
         "vertical_slowness moved by {worst_rel:.3e} of |eta| at {worst_at}, more than \
@@ -259,8 +212,7 @@ fn flzero_matches_fortran() {
     while !r.done() {
         let n = r.i32() as usize;
         let dt = r.f32();
-        // 0-based since §2.3. The labels still report the Fortran's 1-based sample
-        // number, so a failure can be looked up in the oracle's own dump.
+        // Labels report the Fortran's 1-based sample number, to match the fixture.
         let mut a = vec![0.0; n];
         for slot in a.iter_mut() {
             *slot = r.f32();
@@ -276,8 +228,8 @@ fn flzero_matches_fortran() {
                 want[i],
             );
         }
-        // The correction loop starts at Fortran I=3, so the first two samples must come
-        // back untouched. Pinned explicitly because it is easy to "fix".
+        // The correction starts at the third sample, so the first two must come back
+        // untouched. Pinned explicitly because it is easy to "fix".
         eq32(
             &format!("remove_quadratic_trend n={n} a[1] must be untouched"),
             a[0],
@@ -309,13 +261,10 @@ fn siteamp_matches_fortran() {
         let mut cw: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
         let want: Vec<Complex32> = (0..np2).map(|_| Complex32::new(r.f32(), r.f32())).collect();
 
-        // The routine now takes LOG frequencies, precomputed per segment by
-        // `SpectrumPlan`. `ln` is deterministic, so hoisting it out of the inner loop is
-        // bit-exact and this golden still holds.
+        // `site_gain_curve` takes log frequencies (precomputed per segment by
+        // `SpectrumPlan` in the program) and interpolates the gain;
+        // `apply_site_amplification` applies it.
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
-        // The interpolation is `site_gain_curve` since Stage 6 §6.3 and the multiply is what
-        // is left of `apply_site_amplification`. Splitting them is bit-exact -- the same
-        // interpolation in the same order -- so this golden still holds against the pair.
         let mut gain = vec![0.0f32; np + 1];
         site_gain_curve(
             ArrayView1::from(log_dfr.as_slice()),
@@ -325,17 +274,10 @@ fn siteamp_matches_fortran() {
         );
         apply_site_amplification(cw.as_mut_slice(), ArrayView1::from(gain.as_slice()));
 
-        // §2.6 defect 2: the Fortran scales the DC bin (1) and the Nyquist bin
-        // (np2/2 + 1) by the raw factor while exponentiating every bin between, two
-        // conventions in one routine. That is fixed, so those two bins DELIBERATELY no
-        // longer match the Fortran and are excluded here rather than the whole
-        // comparison being loosened -- the rest of this golden checks the
-        // log-frequency interpolation across the table, which is untouched and still
-        // worth an exact check.
-        //
-        // The Hermitian mirror means the negative-frequency partner of Nyquist is the
-        // same bin, so only these two indices move.
-        // 0-based: the Fortran's bin 1 is index 0 and its np2/2 + 1 is index np2/2.
+        // The Fortran scaled the DC and Nyquist bins by the raw table factor while
+        // exponentiating every other bin; this crate exponentiates all of them. Those two
+        // bins (indices 0 and np2/2; Nyquist is its own Hermitian partner) are checked
+        // separately below, and every other bin exactly.
         let nyquist = np2 / 2;
         for i in 0..np2 {
             if i == 0 || i == nyquist {
@@ -353,11 +295,8 @@ fn siteamp_matches_fortran() {
             );
         }
 
-        // And assert the two excluded bins differ in exactly the way intended: the
-        // fixed code applies exp(factor) where the Fortran applied factor. A silent
-        // agreement here would mean the fix did not take.
-        // DC takes the first table entry and Nyquist the clamped last one -- 0-based,
-        // `an[0]` and `an[nn - 1]`.
+        // The two excluded bins must differ from the golden by exactly exp(factor)/factor.
+        // DC takes the first table entry and Nyquist the clamped last one.
         for (i, factor) in [(0usize, an[0]), (nyquist, an[nn - 1])] {
             let fortran_gain = factor;
             let fixed_gain = factor.exp();

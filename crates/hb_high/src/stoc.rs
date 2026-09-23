@@ -1,6 +1,6 @@
 //! One subfault's stochastic spectrum, and its inverse transform to a time series.
 //!
-//! This module is **Boore (1983)**, "Stochastic simulation of high-frequency ground motions
+//! This module is Boore (1983), "Stochastic simulation of high-frequency ground motions
 //! based on seismological models of the radiated spectra", *BSSA* 73(6A), 1865–1894 — the
 //! point-source stochastic method, equations 1 through 11. [`crate::sim`] is the finite-fault
 //! layer around it, from Graves & Pitarka (2010).
@@ -8,7 +8,7 @@
 //! The idea, which explains the shape of everything here: high-frequency ground motion looks
 //! like filtered noise, so rather than solving a wave equation you specify the Fourier
 //! *amplitude* spectrum from seismology and pair it with a *random phase* spectrum. See
-//! `PHYSICS.md` §1 and §6; `papers/README.md` records the equation-by-equation verification.
+//! `PHYSICS.md` §1 and §6.
 
 use crate::fft::{Complex32, Complex64};
 use crate::fft::{forward, inverse, remove_quadratic_trend};
@@ -21,12 +21,11 @@ use std::f32::consts::{PI, TAU};
 /// The three factors of Boore (1983) eq. 2's constant
 /// `C = R_θφ · FS · PRTITN / (4πρβ³)`.
 ///
-/// **Two of them exist only to be cancelled.** [`stochastic_spectrum`] multiplies them in and
-/// [`radiate_and_invert`] divides them straight back out, which leaves the conically averaged
-/// pattern from [`crate::radiation`] standing where Boore's scalar average would have been —
-/// and that is `RP_ij` in Graves & Pitarka (2010) eq. 11. They are shared constants rather
-/// than four literals in two functions precisely so that "change one and you must change its
-/// partner" is not something a reader has to be told. See `PHYSICS.md` §5.
+/// Two of them exist only to be cancelled. [`SpectrumShape::refresh`] multiplies them in and
+/// [`radiate_and_invert`] divides them back out, which leaves the conically averaged pattern
+/// from [`crate::radiation`] where Boore's scalar average would have been — `RP_ij` in Graves &
+/// Pitarka (2010) eq. 11. They are shared constants so the two sites cannot drift apart. See
+/// `PHYSICS.md` §5.
 ///
 /// `R_θφ` — the shear-wave radiation pattern averaged over the focal sphere. Cancelled.
 pub const AVERAGE_RADIATION_PATTERN: f32 = 0.63;
@@ -44,12 +43,9 @@ const CM_PER_KM: f32 = 100_000.0;
 
 /// Transform length, frequency axis, and the transcendentals that depend only on them.
 ///
-/// One of these is built per **distinct transform length** and reused across every subfault,
-/// ray and component that needs that length — see [`PlanCache`]. The three precomputed tables
-/// were between them the largest single cost in the program — 5.5M `powf`, 2.75M `powf` and
-/// 2.75M `ln` per medium-fault run, each computing at most `np2` or `fold_count` *distinct*
-/// values. Hoisting them is exact: `powf` and `ln` are deterministic, so evaluating a pure
-/// function once and reusing it gives the identical `f32`.
+/// One of these is built per distinct transform length and reused across every subfault, ray
+/// and component that needs that length — see [`PlanCache`]. The tables hold the only
+/// transcendentals that depend on nothing but the length, so computing them once is exact.
 pub struct SpectrumPlan {
     pub np2: usize,
     /// Positive-frequency bin count, `np2/2 + 1`, and the length of every table below.
@@ -64,8 +60,7 @@ pub struct SpectrumPlan {
     pub path_exponent: Array1<f32>,
     /// `(i·dt)^b` — the power-law factor of the Saragoni–Hart envelope, Boore (1983) eq. 7.
     ///
-    /// `b` comes from the window shape, fixed for the whole run, so this is `np2` values that
-    /// were otherwise recomputed for every subfault, ray and component.
+    /// `b` comes from the window shape, which is fixed for the whole run.
     pub envelope_power: Array1<f32>,
 }
 
@@ -75,33 +70,17 @@ impl SpectrumPlan {
     /// The factor of two is Boore (1983, p. 1869): the record is made about twice the duration
     /// of strong shaking, so that the windowed transient fits inside it with room to decay.
     ///
-    /// # `np2` IS THE DRAW COUNT, so it is not a buffer size to tune casually
+    /// # `np2` is the draw count, not just a buffer size
     ///
     /// [`stochastic_spectrum`] draws exactly `np2` normal deviates per call, and `np2` also
-    /// sets `df = 1/(np2·dt)`, the frequency axis the spectral shape is evaluated on. So this
-    /// is physics wearing the costume of an allocation: changing it moves **every waveform
-    /// computed after it**, and `ENGINEERING_RULES` §4 requires the reasoning to be written
-    /// down rather than assumed.
+    /// sets `df = 1/(np2·dt)`, the frequency axis the spectral shape is evaluated on. Changing
+    /// it moves every waveform computed after it.
     ///
-    /// It has been changed twice, deliberately, and here is the reasoning.
-    ///
-    /// * **The length is now 7-smooth rather than a power of two** — see
-    ///   [`crate::fft::good_length`]. Nothing here ever needed a power of two; the Hermitian
-    ///   mirror needs `np2` even and `rustfft` plans any length.
-    ///
-    /// * **The window is the subfault's own, not the segment's longest.** This used to be
-    ///   called once per segment with the maximum over all its subfaults, so a subfault whose
-    ///   envelope had decayed to `η²` of its peak by sample 8,000 still drew 131,072 deviates
-    ///   and transformed all of them. Every subfault now gets the same *relative* headroom —
-    ///   twice its own window — that the longest one always had, which is what the factor of
-    ///   two means in the first place. The waste it removes is the difference between the two,
-    ///   and on an Alpine Fault deck recorded at 600 km that is most of the run.
-    ///
-    /// The consequence to be aware of is that `df` is now coarser for a short-window subfault
-    /// than it was. That is the intended reading of Boore's construction rather than a
-    /// degradation of it: the frequency resolution a transient needs is set by its own
-    /// duration, and resolving an 8,000-sample envelope on a 131,072-point grid buys nothing
-    /// the envelope contains.
+    /// The length is 7-smooth rather than a power of two (see [`crate::fft::good_length`]);
+    /// the Hermitian mirror only needs `np2` even. The window is the subfault's own, so every
+    /// subfault gets the same relative headroom of twice its window. A short-window subfault
+    /// therefore has a coarser `df`, which is intended: the frequency resolution a transient
+    /// needs is set by its own duration.
     #[must_use]
     pub fn length_for(window_s: f32, dt: f32) -> usize {
         crate::fft::good_length((2.0 * window_s / dt).trunc() as usize)
@@ -110,33 +89,14 @@ impl SpectrumPlan {
     /// The transform length for a contribution that starts at `start_sample` of an
     /// `ndata`-sample record.
     ///
-    /// # Boore's factor of two applies to the part that lands
+    /// The smaller of [`Self::length_for`] and twice the number of samples that can land in
+    /// the record. At long path distance twice the shaping window is far longer than the
+    /// record, and everything past the record end would be computed and discarded.
     ///
-    /// [`Self::length_for`] gives twice the shaping window, which at long path distance is
-    /// twice a path duration of 200 s or more — and that is then placed into a record it does
-    /// not fit in and clipped. On a 470 s Alpine Fault record the mean transform was 144,000
-    /// samples of which 22% reached the record at the far stations: most of every FFT, and
-    /// most of every block of normal deviates, was computed and discarded.
-    ///
-    /// This takes twice the duration that can **land** instead, when that is shorter. The
-    /// factor of two is unchanged and so is its purpose: Boore (1983, p. 1869) makes the
-    /// record about twice the duration of strong shaking so the windowed transient has room to
-    /// decay inside it and the shaping filter's response does not wrap around the period. Both
-    /// still hold, measured against the duration being synthesised rather than against a
-    /// window whose tail was never going to be kept.
-    ///
-    /// # This moves every waveform, and here is why the new numbers are right
-    ///
-    /// `np2` sets `df = 1/(np2·dt)`, so a shorter transform resolves the spectral shape on a
-    /// coarser grid — the retained samples change, not merely the discarded ones. That is the
-    /// same trade [`Self::length_for`]'s own note records for sizing per subfault rather than
-    /// per segment, one rung down the same ladder, and the argument is the one made there: the
-    /// frequency resolution a transient needs is set by the duration it actually occupies.
-    ///
-    /// **The guard is what makes it defensible rather than merely cheaper.** Cutting to the
-    /// landing duration alone would remove the headroom Boore's factor of two exists to
-    /// provide, and the shaping filter's tail would wrap. Keeping the factor is what stops
-    /// this being a truncation.
+    /// Boore's factor of two is kept on the landing duration, so the windowed transient still
+    /// has room to decay and the shaping filter's response does not wrap around the period.
+    /// As with [`Self::length_for`], a shorter transform gives a coarser `df`, so this changes
+    /// the retained samples too, not only the discarded ones.
     ///
     /// `start_sample` is 1-based and may be negative; a contribution starting before the
     /// origin still only has `ndata` samples of record to reach.
@@ -152,9 +112,8 @@ impl SpectrumPlan {
 
     /// Build the tables for a transform of `np2` points.
     ///
-    /// `np2` comes from [`Self::length_for`] on the production path. It is taken directly
-    /// rather than derived here so that the tier-4 golden — whose fixtures record `np2` as an
-    /// input — can build a plan for exactly the length the Fortran used.
+    /// `np2` comes from [`Self::length_for`] on the production path. It is taken directly so
+    /// that a test fixture recording `np2` as an input can build a plan of exactly that length.
     pub fn new(np2: usize, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
         assert!(
             np2 >= 2 && np2.is_multiple_of(2),
@@ -186,23 +145,16 @@ impl SpectrumPlan {
 
 /// The plans a station needs, built on demand and keyed by transform length.
 ///
-/// # Why a cache, and why it is per station rather than per run
+/// [`SpectrumPlan::length_for`] gives a different length for nearly every subfault, and a plan
+/// costs `np2` `powf` calls plus `fold_count` more `powf` and `ln`. The lengths repeat heavily,
+/// because [`crate::fft::good_length`] quantises them onto a ladder of four rungs per octave
+/// (an Alpine Fault station lands 1,854 subfaults on 23 lengths), so sharing by length keeps
+/// the tables off the hot path.
 ///
-/// [`SpectrumPlan::length_for`] gives a *different* length for nearly every subfault, and a
-/// plan costs `np2` `powf` calls plus `fold_count` more `powf` and `ln`. Rebuilding one per
-/// subfault would put those transcendentals straight back on the hot path — the exact cost
-/// the tables were hoisted out of it to avoid. Sharing by length recovers the hoist: the
-/// lengths repeat heavily, because [`crate::fft::good_length`] quantises them onto a ladder
-/// of four rungs per octave. An Alpine Fault station lands 1,854 subfaults on **23**
-/// distinct lengths, holding about 5.7 MB of tables — see that function for why the ladder
-/// is as coarse as it is, which is a decision this cache's memory footprint drove.
-///
-/// It is per station, and deliberately not on [`crate::sim::Simulator`], because a
-/// `Simulator` is shared across a dask thread pool behind `&self`. Caching there would need
-/// either a lock on the hottest path in the program or interior mutability that is not
-/// `Sync`, and the cost of not doing it is one plan build per distinct length per station —
-/// measured at under 2% of a station, against 1,854 subfaults' worth of tables it saves.
-/// `crate::fft`'s own plan cache is thread-local for the same reason.
+/// It is per station, not on [`crate::sim::Simulator`], because a `Simulator` is shared across
+/// threads behind `&self` and caching there would need a lock on the hot path. The cost is one
+/// plan build per distinct length per station. `crate::fft`'s plan cache is thread-local for
+/// the same reason.
 pub struct PlanCache {
     dt: f32,
     q_exponent: f32,
@@ -257,7 +209,7 @@ impl PlanCache {
     }
 }
 
-/// Spectral-model constants that are **fixed for the whole run**.
+/// Spectral-model constants that are fixed for the whole run.
 ///
 /// The cut between this and [`RayPath`] is the useful one: everything here is the same on every
 /// one of the hundreds of thousands of calls in a run, and everything there changes on each.
@@ -279,7 +231,7 @@ pub struct SourceModel {
 
 /// One `(subfault, ray, component)`'s own path, and the medium at its source.
 pub struct RayPath {
-    /// Ray path length, **not** epicentral distance.
+    /// Ray path length, not epicentral distance.
     pub distance_km: f32,
     /// Shaping-window length, Boore (1983) `T_w`.
     pub window_s: f32,
@@ -296,11 +248,10 @@ pub struct RayPath {
     pub qbar: f32,
 }
 
-/// The complex Fourier spectrum of one subfault's stochastic S-wave motion.
-/// (orig. `hb_high_ref.f:1670`)
+/// The deterministic half of one subfault's spectrum, plus the scratch its phase
+/// realisations are drawn into.
 ///
-/// Boore (1983) eq. 1 — a product of source, path and site terms, multiplied by the spectrum of
-/// windowed random noise and mirrored to Hermitian symmetry:
+/// The amplitude is Boore (1983) eq. 1 — a product of source, path and site terms:
 ///
 /// ```text
 /// A(ω) = C · M₀ · S(ω,ω_c) · P(ω,ω_m) · exp(−ωR/2Qβ) / R
@@ -308,67 +259,33 @@ pub struct RayPath {
 ///           source          high-cut    path Q        spreading
 /// ```
 ///
-/// with the finite-fault correction of Graves & Pitarka (2010) eq. 12 folded in.
+/// with the finite-fault correction of Graves & Pitarka (2010) eq. 12 folded in. See
+/// `PHYSICS.md` §2–§3 and §6.
 ///
-/// Writes `np2` bins into `spectrum`, which must be contiguous — the transform is in place.
-/// The caller owns the storage so that the three components can be one `(3, np2)` block
-/// rather than three separate allocations per subfault per ray.
+/// Neither the envelope nor the amplitude depends on the random phase, and for the two
+/// horizontals they are identical (only the vertical caps `f_max`), so they are built once and
+/// three phase realisations are drawn against them by [`stochastic_spectrum`].
 ///
-/// See `PHYSICS.md` §2–§3 and §6 for the physics, and `papers/README.md` for the verification.
+/// The buffers are sized once for the longest transform a segment will use and used a prefix
+/// at a time. The tail beyond the current prefix holds stale values; every read goes through a
+/// slice of the current length.
 ///
-/// # Precision layout is load-bearing
+/// # Precision layout
 ///
-/// The `as f64` casts below are not decoration. Each per-bin term is computed in `f32` and then
-/// widened; only the final product accumulates in `f64`. In particular the complex product goes
-/// through [`Complex64`] deliberately — doing it entirely in `f32` differs in the last bit.
+/// Each per-bin term is computed in `f32` and then widened; only the final product is `f64`.
 ///
-/// # No constant-exponent `powf`, ever
+/// # No constant-exponent `powf`
 ///
 /// LLVM folds `powf(x, 0.5)` into `sqrt(x)` at `-O2` but not at `-O0`, so a constant exponent
-/// would make this routine's output depend on the optimisation level. There is none here, and
-/// there must not be one added. `x^(-1)` is likewise written as an explicit division rather
-/// than `powf(x, -1.0)`, which is a libm call that disagrees with `1.0/x` about one time in
-/// 1,600.
-///
-/// # The power normalisation is self-referential, which makes it robust
-///
-/// `amp = 1/(dt·√(fsa/fold_count))` scales the random sequence so its average **power**
-/// spectrum is unity. Boore (1983, p. 1867) specifies unit average *amplitude*, achieved by
-/// choosing the noise variance; measuring the realised spectrum and correcting it is the same
-/// intent, implemented differently, and matches the RMS averaging of his Figure 1.
-///
-/// The useful consequence is that this routine is **indifferent to the deviate source's
-/// scale**: `fsa` is measured from the very sequence that produced `ac`, so a scale factor `s`
-/// in the generator gives `ac` a factor `s`, `fsa` a factor `s²`, and `amp` a factor `1/s`.
-/// The product is invariant. One less thing tying the result to a particular generator.
-/// The deterministic half of one subfault's spectrum, plus the scratch its phase
-/// realisations are drawn into.
-///
-/// # Why the shape is a value rather than a step
-///
-/// Nothing in the envelope or the amplitude depends on the random phase, and for the **two
-/// horizontals nothing in them differs at all**: `f_max` is the only per-component input to
-/// either, and only the vertical caps it. Both were nevertheless rebuilt for each of the three
-/// components of every subfault and every ray. Building them once and drawing three phase
-/// realisations against them is the same arithmetic in the same order.
-///
-/// # Why it owns its buffers
-///
-/// The three vectors were allocated and freed **per call**, so at a realistic `np2` of ~144,000
-/// a station churned tens of gigabytes through the allocator to hold numbers it overwrote
-/// immediately. They are sized once for the longest transform a segment will use and then used
-/// a prefix at a time, which is what every other buffer on this path already does.
-///
-/// The tail beyond the current prefix holds the previous subfault's numbers. Every read below
-/// goes through a slice of the current length, which is what makes the stale tail unreachable
-/// rather than merely unread.
+/// would make the output depend on the optimisation level. `x^(-1)` is likewise written as a
+/// division, since `powf(x, -1.0)` disagrees with `1.0/x` about one time in 1,600.
 pub struct SpectrumShape {
     /// The Saragoni–Hart envelope on the sample grid, `w(t) = a·t^b·e^(−ct)`.
     envelope: Vec<f32>,
     /// Boore (1983) eq. 1's amplitude spectrum.
     ///
-    /// **Bin 0 is never written and must stay zero.** It is zeroed at construction and the
-    /// fill below starts at 1, which is what leaves DC at zero in the finished spectrum.
+    /// Bin 0 is never written and must stay zero: it is zeroed at construction and the fill
+    /// starts at 1, which leaves DC at zero in the finished spectrum.
     amplitude: Vec<f64>,
     /// The normal deviates one realisation draws, held so the draw does not allocate.
     deviates: Vec<f32>,
@@ -391,7 +308,7 @@ impl SpectrumShape {
 
     /// Rebuild the envelope and the amplitude for one `(subfault, ray, f_max)`.
     ///
-    /// See [`stochastic_spectrum`] for the physics; everything here was its first half.
+    /// See [`SpectrumShape`] for the physics.
     pub fn refresh(&mut self, plan: &SpectrumPlan, model: &SourceModel, path: &RayPath) {
         // Destructured so that the arithmetic below reads as arithmetic, under the names the
         // derivation uses.
@@ -441,19 +358,12 @@ impl SpectrumShape {
         // Evaluate the envelope on the sample grid `t = i·dt`.
         //
         // `exp(-c·t)` on an evenly spaced grid is a geometric sequence with ratio `exp(-c·dt)`, so
-        // it advances by one multiply per sample instead of one `expf` per sample -- `np2`
-        // transcendentals removed per call, three calls per subfault. THE RATIO IS ACCUMULATED IN
-        // `f64` DELIBERATELY: relative error grows like `n·eps`, which over 16384 samples is ~1e-3
-        // in `f32` (visible) against ~2e-12 in `f64`. Underflow is harmless and matches the direct
-        // form -- once the product reaches zero it stays there, as `expf` of a large negative
-        // argument would.
+        // it advances by one multiply per sample instead of one `expf`. The ratio is accumulated
+        // in `f64`: relative error grows like `n·eps`, which over 16384 samples is ~1e-3 in `f32`
+        // against ~2e-12 in `f64`. Underflow is harmless -- once the product reaches zero it
+        // stays there, as `expf` of a large negative argument would.
         //
-        // `t^b` has no such recurrence for real `b` and does not need one: it is a per-segment
-        // constant and arrives precomputed in `envelope_power`.
-        //
-        // `scan` rather than a loop because that is the shape of the computation: `aa * power` is
-        // per-element, `decay` is carried. Building by scan also avoids zero-filling `np2` floats
-        // and immediately overwriting them.
+        // `t^b` has no such recurrence for real `b`; it arrives precomputed in `envelope_power`.
         let decay_per_sample = (-(c as f64) * dt as f64).exp();
         let mut decay = 1.0f64;
         for (slot, &power) in self.envelope[..np2].iter_mut().zip(envelope_power.iter()) {
@@ -470,15 +380,8 @@ impl SpectrumShape {
 
         // The spectral shape, bin by bin. DC stays zero; bins `1..fold_count` get the shape.
         //
-        // SIZED AT `np2`, NOT `fold_count`, ON PURPOSE, even though the top half is never read.
-        // Shrinking it MEASURED SLOWER: at np2 = 16384 the `f64` buffer is exactly 128 KB, glibc's
-        // mmap threshold, so `alloc_zeroed` hands back fresh already-zero pages for free. At
-        // `fold_count` it is 64 KB, comes off the heap, and must be memset for real -- +5.4M
-        // instructions per run in exchange for using less memory. It stays a `Vec` rather than an
-        // `Array1` for the same reason: `vec![0.0f64; n]` is what reaches `alloc_zeroed`.
-        //
         // `azip!` asserts the three lengths agree, where a nested `zip` would silently stop at the
-        // shortest -- a real check, since `frequency_hz` and `path_exponent` are caller-supplied.
+        // shortest.
         azip!((
             shape in ArrayViewMut1::from(&mut self.amplitude[1..fold_count]),
             &fr in frequency_hz.slice(s![1..fold_count]),
@@ -502,12 +405,9 @@ impl SpectrumShape {
             //   combined    exp(−πfκ)·exp(−π·q̄·f^(1−x))
             //             = exp(−π(fκ + q̄·f^(1−x)))       one `expf` instead of two
             //
-            // `κ ≤ 0` IS A DIFFERENT FILTER, and not Boore's. Boore (1983) eq. 4 is an eight-pole
+            // `κ ≤ 0` is a different filter, and not Boore's. Boore (1983) eq. 4 is an eight-pole
             // form `[1+(ω/ω_m)^8]^(−1/2)`; this is a single pole, `1/(1 + ω/ω_m)`. Production
-            // always has `κ = 0.045`, so only the tier-4 golden's negative-κ case reaches it.
-            //
-            // Unlike the envelope recurrence above, nothing here assumes the frequency axis is
-            // evenly spaced -- `frequency_hz` is caller-supplied data.
+            // always has `κ = 0.045`.
             let path_attenuation = qbar * path_fr;
             let a2a3 = if kappa_s <= 0.0 {
                 let a2 = (1.0 / (1.0 + (omg / omgm))) as f64;
@@ -521,17 +421,17 @@ impl SpectrumShape {
             // it scales the subfault corner frequency towards the mainshock's while keeping the
             // summed moment right.
             //
-            // NOT a two-corner spectrum, despite the shape of the expression. Multiplied into
-            // `a1` the `(1 + (f/f_c)²)` cancels exactly, leaving a SINGLE-corner spectrum of
+            // Not a two-corner spectrum, despite the shape of the expression. Multiplied into
+            // `a1` the `(1 + (f/f_c)²)` cancels exactly, leaving a single-corner spectrum of
             // moment `F·M₀` and corner `f_c/√F`:
             //
             //   a1 ∝ M₀f²/(1+x),  frank = F(1+x)/(1+Fx),  x = (f/f_c)²
             //   a1·frank ∝ (F·M₀)·f² / (1 + (f/(f_c/√F))²)
             //
-            // which is what G&P describe in words. Looking for a sag between two corners here --
-            // as in Boore, Di Alessandro & Abrahamson (2014) eq. 4 -- will not find one. The
-            // cancellation is exact in real arithmetic but is NOT performed, so simplifying it
-            // would move the last bits. See `PHYSICS.md` §2.
+            // which is what G&P describe in words; there is no sag between two corners as in
+            // Boore, Di Alessandro & Abrahamson (2014) eq. 4. The cancellation is exact in real
+            // arithmetic but is not performed, so simplifying it would move the last bits. See
+            // `PHYSICS.md` §2.
             let frank = moment_scale * (fc2 + fr2) / (fc2 + moment_scale * fr2);
 
             *shape = a1 * a2a3 * frank as f64;
@@ -542,21 +442,24 @@ impl SpectrumShape {
 }
 
 /// One phase realisation against a prepared [`SpectrumShape`].
-/// (orig. `hb_high_ref.f:1670`)
 ///
 /// Draws `np2` normal deviates, windows them with the envelope, transforms, normalises the
-/// realised power to unity and applies the amplitude — which is the half of Boore (1983) eq. 1
-/// that a seed changes. The deterministic half is [`SpectrumShape::refresh`], and the doc there
-/// says why the two are separate.
+/// realised power to unity, applies the amplitude and mirrors to Hermitian symmetry — the half
+/// of Boore (1983) eq. 1 that a seed changes. The deterministic half is
+/// [`SpectrumShape::refresh`].
 ///
 /// `spectrum` must be contiguous and `np2` long — the transform is in place. The caller owns it
-/// so the three components can be one `(3, np2)` block rather than three allocations per
-/// subfault per ray.
+/// so the three components can be one `(3, np2)` block.
 ///
-/// # `np2` IS THE DRAW COUNT
+/// Exactly `np2` deviates are drawn; see [`SpectrumPlan::length_for`].
 ///
-/// Exactly `np2` deviates, which is why [`SpectrumPlan::length_for`] is physics rather than a
-/// buffer size. See the note there.
+/// # Power normalisation
+///
+/// `amp = 1/(dt·√(fsa/fold_count))` scales the random sequence so its average power spectrum is
+/// unity. Boore (1983, p. 1867) specifies unit average amplitude by choosing the noise variance;
+/// measuring the realised spectrum and correcting it is the same intent, and matches the RMS
+/// averaging of his Figure 1. Because `fsa` is measured from the same sequence, the result is
+/// invariant to the deviate source's scale.
 pub fn stochastic_spectrum(
     rng: &mut impl Draws,
     plan: &SpectrumPlan,
@@ -589,8 +492,7 @@ pub fn stochastic_spectrum(
     );
 
     // Measure the realised average power of the noise spectrum, so it can be normalised out.
-    // `norm_sqr()` is `re² + im²` -- the same quantity as `|z|²` without the `hypot` and the
-    // squaring that undoes it, which was 4.5% of total runtime.
+    // `norm_sqr()` is `re² + im²`, avoiding a `hypot` followed by squaring.
     let fsa: f32 = spectrum
         .slice(s![..fold_count])
         .iter()
@@ -602,11 +504,10 @@ pub fn stochastic_spectrum(
     // computation -- it is the symmetry of the first, and `as_` and `amp` being real is what
     // lets the two separate: conjugation commutes with real scaling, and negating an imaginary
     // part is exact, so conjugating before or after narrowing gives the same bits.
-    //
     let np = np2 / 2;
 
-    // Positive frequencies, Nyquist included. The `Complex64` intermediate is the precision
-    // note above. Bin 0 comes out zero because `as_[0]` is never written.
+    // Positive frequencies, Nyquist included. The product goes through `Complex64`; doing it in
+    // `f32` differs in the last bit. Bin 0 comes out zero because `amplitude[0]` is zero.
     azip!((
         bin in spectrum.slice_mut(s![..fold_count]),
         &amplitude in ArrayView1::from(&shape.amplitude[..fold_count]),
@@ -616,9 +517,8 @@ pub fn stochastic_spectrum(
     });
 
     // Negative frequencies: bin `np2 - k` is `conj(bin k)` for k in `1..np`. A reversed view of
-    // the head assigned into the tail, which cannot be off by one the way an index expression
-    // can. Checked on np2 = 16, where np = 8: dest runs 9..15 while src runs 7 down to 1, so
-    // dest 9 takes src 7 and dest 15 takes src 1.
+    // the head assigned into the tail. On np2 = 16, np = 8: dest runs 9..15 while src runs 7
+    // down to 1, so dest 9 takes src 7 and dest 15 takes src 1.
     //
     // Bin `np` is its own mirror and belongs to the positive half, which is why the two halves
     // are disjoint and this can be a pair of views at all.
@@ -627,32 +527,18 @@ pub fn stochastic_spectrum(
 }
 
 /// Apply the radiation pattern, invert to a time series, scale and taper.
-/// (orig. `hb_high_ref.f:2234`)
 ///
 /// Completes Graves & Pitarka (2010) eq. 10 for one component: the spectrum from
 /// [`stochastic_spectrum`] carries `C·S·G·P`, and the conically averaged pattern `RP_ij` from
 /// [`crate::radiation`] goes on here. The inverse transform runs in place on `spectrum`,
 /// which is therefore left as scratch, and the real samples land in `time_series`.
 ///
-/// Lengths carry what the original passed as three separate counts: the radiation pattern
-/// covers the positive frequencies, so `radiation.len()` *is* `fold_count`, and the mirrored
-/// half is `radiation[1..fold_count-1]` walked backwards.
+/// The radiation pattern covers the positive frequencies, so `radiation.len()` is
+/// `fold_count`, and the mirrored half is `radiation[1..fold_count-1]` walked backwards.
 ///
-/// # The division here is the cancellation
-///
-/// [`AVERAGE_RADIATION_PATTERN`] and [`HORIZONTAL_PARTITION`] are multiplied in by
-/// [`stochastic_spectrum`] as part of Boore (1983) eq. 2's constant `C`, and divided back out
-/// here so that the conically averaged pattern stands in their place — which is what Graves &
-/// Pitarka (2010) eq. 11 asks for. They are two shared constants rather than four literals, so
-/// the pairing cannot drift.
-///
-/// # The taper constant was a typo in the original, and is fixed here
-///
-/// The taper step used `3.14159625`, which is **not** pi — the last digits of `3.14159265` are
-/// transposed. Every other occurrence in the source was some honest truncation of the correct
-/// value, so this one was a slip. The error is about 1.1e-6 relative, roughly thirty times the
-/// worst of those truncations, and it left the taper fractionally short of a half cosine so the
-/// final sample was not exactly zero. It is `std::f32::consts::PI` now and the taper closes.
+/// [`AVERAGE_RADIATION_PATTERN`] and [`HORIZONTAL_PARTITION`], multiplied in as part of Boore
+/// (1983) eq. 2's constant `C`, are divided back out here so that the conically averaged
+/// pattern stands in their place, as Graves & Pitarka (2010) eq. 11 asks.
 pub fn radiate_and_invert(
     mut spectrum: ArrayViewMut1<Complex32>,
     radiation: ArrayView1<f32>,
@@ -664,7 +550,7 @@ pub fn radiate_and_invert(
     // are only incidentally equal for the `np2` this program uses.
     let mirror_count = fold_count - 2;
 
-    // Positive frequencies, then the mirrored half. The pattern is SIGNED -- the polarity from
+    // Positive frequencies, then the mirrored half. The pattern is signed -- the polarity from
     // `crate::radiation` is carried through rather than discarded.
     //
     // `azip!` rather than `*=` because ndarray's operator overloads want matching element
@@ -706,9 +592,9 @@ mod tests {
     /// implementation has to look at the value that matters rather than at the thousand that
     /// do not. `3.5062997341156006` is `2b+1` for the fixed window shape.
     ///
-    /// The reference value is what the original's hand-rolled series returned; the two differ
-    /// by three ulps of `f64`, and the assertion below shows that difference does not survive
-    /// the narrowing to `f32` that the consumer applies.
+    /// The reference value is from an independent series evaluation; the two differ by three
+    /// ulps of `f64`, and that difference does not survive the narrowing to `f32` that the
+    /// consumer applies.
     #[test]
     fn the_production_gamma_argument_survives_narrowing_to_f32() {
         let gsa = 3.5062997341156006f64;
@@ -740,8 +626,7 @@ mod tests {
         PlanCache::new(0.005, 0.6, 0.2, 0.05)
     }
 
-    /// A shorter window gets a shorter transform. This is the whole point of the change, so
-    /// it is asserted rather than assumed.
+    /// A shorter window gets a shorter transform.
     #[test]
     fn a_shorter_window_gets_a_shorter_transform() {
         let mut plans = cache();
@@ -751,15 +636,12 @@ mod tests {
             short < long,
             "a 2 s window got {short} points and a 200 s window {long}"
         );
-        // `long` is what the segment maximum used to impose on EVERY subfault, including
-        // the 2 s one. That ratio is the waste this change removes.
         assert_eq!((short, long), (896, 81_920));
     }
 
     /// The cache returns one plan per length, not one per request.
     ///
-    /// If this regresses, every subfault rebuilds `np2` `powf` calls and the tables are no
-    /// longer hoisted out of the hot path at all.
+    /// If this regresses, every subfault rebuilds `np2` `powf` calls.
     #[test]
     fn the_cache_builds_one_plan_per_distinct_length() {
         let mut plans = cache();

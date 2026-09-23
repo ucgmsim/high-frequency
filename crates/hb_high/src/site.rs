@@ -11,7 +11,6 @@ use crate::fft::Complex32;
 use crate::state::VelocityModel;
 
 /// Quarter-wavelength amplification factors, one per frequency in the site table.
-/// (orig. `hb_high_ref.f:3020`)
 ///
 /// Boore & Joyner (1997), which is what Graves & Pitarka (2010) cite for the "gross impedance
 /// effects calculated using quarter wavelength theory". See `PHYSICS.md` §4.
@@ -35,9 +34,9 @@ use crate::state::VelocityModel;
 /// # The `as f32` casts are load-bearing
 ///
 /// The velocity-model fields are `f64` and the accumulators are `f32`, so every accumulation
-/// widens, computes, then narrows on assignment. Removing a cast, or hoisting the arithmetic
-/// into `f64` throughout, changes the result. `(stt - tt)` in particular is formed in `f32`
-/// *before* being widened.
+/// widens, computes, then narrows on assignment, matching production output. Removing a cast,
+/// or hoisting the arithmetic into `f64` throughout, changes the result. `(stt - tt)` in
+/// particular is formed in `f32` before being widened.
 pub fn site_amplification_factors(
     vmod: &VelocityModel,
     source_layer: usize,
@@ -63,8 +62,7 @@ pub fn site_amplification_factors(
         let mut ttp = (vmod[1].thickness_km / vmod[1].vsh_km_s) as f32;
 
         // Walk down until a quarter period has accumulated, or the source layer is reached.
-        // GENUINELY SEQUENTIAL -- each step's `ttp` depends on the previous one's -- so this
-        // stays a loop and cannot become an array operation.
+        // Sequential: each step's `ttp` depends on the previous one's.
         while !(ttp >= stt || i == source_layer) {
             zdep = (zdep as f64 + vmod[i].thickness_km) as f32;
             pz = (pz as f64 + vmod[i].density_g_cm3 * vmod[i].thickness_km / vmod[i].vsh_km_s) as f32;
@@ -84,7 +82,7 @@ pub fn site_amplification_factors(
 }
 
 /// Resample the amplification table onto a transform's frequency axis, as a **linear gain per
-/// bin**. (orig. `hb_high_ref.f:3120`)
+/// bin**.
 ///
 /// Piecewise-linear interpolation of `factors` against `ln(frequency)`, then exponentiated.
 /// Both inputs are natural logs — of frequency and of amplification respectively — which is why
@@ -92,12 +90,9 @@ pub fn site_amplification_factors(
 ///
 /// # Why this is separate from applying it
 ///
-/// The curve is a function of the **source layer and the transform length, and of nothing
-/// else** — not the component, not the ray, not the spectrum it multiplies. It used to be
-/// computed inside the application, which ran once per component, so the same `fold_count`
-/// exponentials and the same interpolation walk were repeated three times for every subfault
-/// and every ray. Building the curve once and multiplying by it three times is the same
-/// arithmetic in the same order, to the bit.
+/// The curve depends only on the source layer and the transform length, not on the
+/// component, the ray, or the spectrum it multiplies, so it is built once and applied to all
+/// three components.
 ///
 /// `gain` is `np2/2 + 1` long: the positive half of the spectrum plus Nyquist. The negative
 /// half is not a free choice — [`apply_site_amplification`] mirrors it.
@@ -116,7 +111,6 @@ pub fn site_gain_curve(
     mut gain: ArrayViewMut1<f32>,
 ) {
     let np = gain.len() - 1;
-    // The table's own length, rather than a count passed alongside it that could disagree.
     let table_count = factors.len();
 
     // `kn` is the table cursor, and the clamp past the end reads `factors[table_count - 1]`.
@@ -126,7 +120,7 @@ pub fn site_gain_curve(
     let mut fp = table_log_frequency[kn];
     let mut ap = factors[kn];
 
-    // DC. The factors are LOG amplitudes, so this exponentiates like every interior bin does.
+    // DC. The factors are log amplitudes, so this exponentiates like every interior bin does.
     // There is nothing to interpolate at zero frequency, so the bottom table entry is used.
     gain[0] = factors[0].exp();
     // Nyquist takes the top of the table, exponentiated for the same reason as DC. Unlike DC —
@@ -186,13 +180,9 @@ pub fn apply_site_amplification(spectrum: &mut [Complex32], gain: ArrayView1<f32
         &g in gain,
     ) *bin *= g);
 
-    // Re-impose Hermitian symmetry: bin `np2 - k` takes `conj(bin k)` for k in `1..np`. The two
-    // halves are disjoint, so this is a reversed view of the head assigned into the tail -- the
-    // same shape as the mirror in `stoc::stochastic_spectrum`, and spelled the same way on
-    // purpose.
-    //
-    // Checked on np2 = 16, where np = 8: dest runs 9..15 while src runs 7 down to 1, so dest 9
-    // takes src 7 and dest 15 takes src 1. A reversed view cannot be off by one.
+    // Re-impose Hermitian symmetry: bin `np2 - k` takes `conj(bin k)` for k in `1..np`, as a
+    // reversed view of the head assigned into the tail, the same as the mirror in
+    // `stoc::stochastic_spectrum`. For np2 = 16: dest 9 takes src 7 and dest 15 takes src 1.
     let mut view = ArrayViewMut1::from(spectrum);
     let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
     azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());

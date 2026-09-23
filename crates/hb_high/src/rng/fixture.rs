@@ -1,31 +1,19 @@
-//! A draw source for **validation only**, whose uniforms are frozen forever.
-//!
-//! # Why this exists
+//! A draw source for validation only, whose uniforms are frozen.
 //!
 //! `tests/snapshot.rs` pins the whole pipeline against numbers checked into
-//! `harness/golden/snapshot.txt`. That only means anything if the draws are stable across
-//! commits that are *not* meant to move the science — and the production generator is
-//! explicitly allowed to change. Driving the snapshot from a source that is not the
-//! production engine makes the comparison independent of it: a difference is then
-//! attributable to the code, because the uniform sequence provably did not move.
+//! `harness/golden/snapshot.txt`. Driving it from a source independent of the production
+//! generator (which is allowed to change) means a difference is attributable to the code,
+//! because the uniform sequence did not move.
 //!
-//! # Frozen means frozen, and applies to the uniforms only
+//! Do not change the recurrence or the `[0, 1)` conversion below. Its only job is to produce
+//! the same sequence indefinitely; nothing scientific is computed from it, and it needs only
+//! a decent spread over `[0, 1)`. It is SplitMix64 (Steele et al. 2014): short, and no state
+//! beyond a counter.
 //!
-//! **Do not change the recurrence or the `[0, 1)` conversion below, ever.** Not to improve
-//! it, not to match a new production engine, not to make it faster. Its only job is to
-//! produce the same sequence today and in five years. It has no statistical burden to
-//! carry: nothing scientific is computed from it, and the only property it needs is a
-//! decent spread over `[0, 1)` so the code paths exercised are representative.
-//!
-//! SplitMix64 (Steele et al. 2014), chosen because it is short enough to be obviously
-//! correct and has no state beyond a counter.
-//!
-//! **The normals are deliberately not frozen.** They come from
-//! [`Draws::normal`]'s default, which is the ziggurat — the same distribution code
-//! production runs. Freezing them here would leave the snapshot blind to the one thing it
-//! most needs to see: a change in how a normal deviate is formed. The cost is that a
-//! `rand_distr` upgrade can move the snapshot, which is the correct signal rather than a
-//! nuisance, and is why the version is pinned in `Cargo.toml`.
+//! The normals are deliberately not frozen: they come from the ziggurat, the same
+//! distribution code production runs, so the snapshot sees a change in how a normal deviate
+//! is formed. A `rand_distr` upgrade can therefore move the snapshot, which is why its
+//! version is pinned in `Cargo.toml`.
 
 use rand_core::{Infallible, TryRng, utils};
 
@@ -51,7 +39,7 @@ impl FixtureDraws {
         }
     }
 
-    /// One SplitMix64 output word. **Frozen** — see the module docs.
+    /// One SplitMix64 output word. Frozen — see the module docs.
     fn next_word(&mut self) -> u64 {
         self.state = self.state.wrapping_add(GAMMA);
         let mut z = self.state;
@@ -62,18 +50,15 @@ impl FixtureDraws {
 }
 
 impl Draws for FixtureDraws {
-    /// Narrowed to `i32` because that is what [`FixtureDraws::seed`] takes, and truncating is
-    /// right here rather than merely tolerable: this source exists so the snapshot's draws are
-    /// frozen, and its seeds only ever have to be *distinct*, not well spread.
+    /// Narrowed to `i32` because that is what [`FixtureDraws::seed`] takes; the seeds only
+    /// have to be distinct, not well spread.
     fn respawn(&self, seed: u64) -> Self {
         Self::seed(seed as i32)
     }
 
     /// The frozen `[0, 1)` sequence.
     ///
-    /// Bits 40..64 of the output word over `2^24`, which is what the module's shared
-    /// conversion computes from bits 32..64 — the same 24 bits, so this is the sequence it
-    /// always was. `the_uniform_sequence_is_frozen` pins it.
+    /// Bits 40..64 of the output word over `2^24`. `the_uniform_sequence_is_frozen` pins it.
     #[inline]
     fn uniform(&mut self) -> f32 {
         unit_interval_from((self.next_word() >> 32) as u32)
@@ -115,14 +100,11 @@ mod tests {
 
     /// The frozen sequence, pinned by value.
     ///
-    /// These are not "the right" numbers in any sense — they are *these* numbers, and the
-    /// point of the test is that they never change. If this fails, the recurrence or the
-    /// `[0, 1)` conversion moved, and every snapshot recorded before it is void.
+    /// If this fails, the recurrence or the `[0, 1)` conversion moved, and every snapshot
+    /// recorded before it is void.
     ///
-    /// Recorded as `f32` bit patterns rather than decimals so the comparison cannot be
-    /// loosened by accident. They were computed from the recurrence *independently*, in
-    /// Python, rather than by pasting what this implementation happened to print — a pin
-    /// taken from the code it guards cannot detect that the code was already wrong.
+    /// Recorded as `f32` bit patterns, computed from the recurrence independently in Python
+    /// rather than copied from this implementation's output.
     #[test]
     fn the_uniform_sequence_is_frozen() {
         let mut fixture = FixtureDraws::seed(20260807);

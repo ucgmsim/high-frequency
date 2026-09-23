@@ -1,35 +1,19 @@
 //! Property tests: the contracts a caller depends on, independent of how the code
-//! currently computes them.
+//! computes them.
 //!
-//! # Why these exist alongside the goldens
-//!
-//! The `tier*_golden.rs` suites compare against Fortran output bit for bit. They are
-//! excellent regression tests and useless as specifications: they say *what the
-//! numbers are*, never *what makes them right*, so every one of them dies the moment
-//! Stage 2 replaces an implementation.
-//!
-//! Everything here is written to survive that. No test asserts a computed value, a
-//! bit pattern, or anything about the internals — only relationships that must hold
-//! for **any** correct implementation. Swapping the radix-2 FFT for `realfft`, the
-//! transcribed gamma for a library one, or a 1-based wrapper for plain slices must leave this
-//! file untouched.
-//!
-//! That makes these tests the acceptance criteria for those swaps rather than an
-//! obstacle to them. A round-trip and linearity test on the transform is exactly what
-//! you want to keep when you change transforms.
+//! Unlike the golden tests, nothing here asserts a computed value, a bit pattern, or
+//! anything about the internals -- only relationships that must hold for any correct
+//! implementation, so an implementation can be replaced without touching this file.
 //!
 //! # Deliberately not asserted
 //!
-//! * **Scaling conventions.** The vendored transform is unnormalised, so a round-trip
-//!   multiplies by `n`. `realfft` may differ. So the test asserts the round trip is
-//!   *proportional* to the input with one constant, and never says what it is.
-//! * **Idempotence of `remove_quadratic_trend`.** Measured, and it does not hold —
-//!   a second pass moves the signal a further ~6% at n=64. Asserting it would have
-//!   been wishful.
+//! * **Transform scaling conventions.** The round trip is asserted *proportional* to the
+//!   input with one constant, never what the constant is.
+//! * **Idempotence of `remove_quadratic_trend`.** It does not hold: a second pass moves
+//!   the signal a further ~6% at n=64.
 //!
-//! Tolerances are set from measured worst cases with two or more orders of magnitude
-//! of headroom, so ordinary rounding differences from a reimplementation pass and a
-//! genuine break fails.
+//! Tolerances are set from measured worst cases with two or more orders of magnitude of
+//! headroom, so ordinary rounding differences pass and a genuine break fails.
 
 use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
@@ -66,9 +50,8 @@ fn spectrum(n: usize, seed: i32) -> Vec<Complex32> {
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// A point is zero distance from itself. Sounds trivial; it is the case that
-    /// catches a catastrophic-cancellation bug in the near-coincident regime, which
-    /// this routine has three separate formulations to avoid.
+    /// A point is zero distance from itself. Catches catastrophic cancellation in the
+    /// near-coincident regime.
     #[test]
     fn self_distance_is_zero(lat in -85.0f32..85.0, lon in -180.0f32..180.0) {
         let g = distance_azimuth(GeoPoint { lat_deg: lat, lon_deg: lon }, GeoPoint { lat_deg: lat, lon_deg: lon });
@@ -90,17 +73,15 @@ proptest! {
 
     /// For a nearby station the azimuth matches the flat-Earth bearing to the offset.
     ///
-    /// This is the property that pins **our use of** `geographiclib_rs` rather than the
-    /// library's own accuracy: the right slot out of a return tuple whose element meanings
-    /// change with its width, degrees rather than radians, the wrap into `[0, 360)`, and
-    /// the `f64` -> `f32` narrowing. Any of those going wrong moves the answer by tens or
-    /// hundreds of degrees, so a half-degree bound is ample.
+    /// This pins **our use of** `geographiclib_rs` rather than the library's accuracy:
+    /// the right slot out of a return tuple whose element meanings change with its width,
+    /// degrees rather than radians, the wrap into `[0, 360)`, and the `f64` -> `f32`
+    /// narrowing. Any of those going wrong moves the answer by tens or hundreds of
+    /// degrees, so a half-degree bound is ample.
     ///
-    /// It replaces a reciprocity test that asserted the azimuths at the two ends of a path
-    /// differ by 180 degrees. That is a SPHERE's property: on an ellipsoid a geodesic's
-    /// azimuth changes along its length, and over the 13,000 km separations the generator
-    /// was producing the two ends disagreed by 129 degrees, entirely correctly. Bounding
-    /// the offset instead makes the claim true rather than making the tolerance big.
+    /// Forward/back azimuth reciprocity (a 180-degree difference) is not tested: that is a
+    /// sphere's property, and on an ellipsoid a long geodesic's azimuth changes along its
+    /// length.
     #[test]
     fn azimuth_matches_the_flat_earth_bearing_nearby(
         lat in -70.0f32..70.0,
@@ -142,9 +123,8 @@ proptest! {
 /// Cardinal directions from the equator, and the scale of a degree.
 ///
 /// Parametrised rather than generated: these are the four cases a reader checks by
-/// hand, and the numbers are physical facts rather than recorded output. One degree
-/// of latitude is shorter than one of longitude at the equator because the Earth is
-/// flattened, which is why the routine carries a 0.9931177 correction.
+/// hand. At the equator a degree of latitude is shorter than one of longitude because
+/// the Earth is flattened.
 #[test]
 fn cardinal_azimuths_and_degree_scale() {
     for (dlat, dlon, want_az, what) in [
@@ -287,9 +267,8 @@ proptest! {
 
 proptest! {
     /// `eta^2 + p^2 == 1/v^2`. This *is* the definition of vertical slowness, and it
-    /// holds whichever branch of the square root the implementation selects — so it
-    /// pins the routine's contract without constraining the branch-cut choice that
-    /// `PORTING_RULES.md` §2 says must be transliterated literally.
+    /// holds whichever branch of the square root the implementation selects, so it pins
+    /// the contract without constraining the branch-cut choice.
     #[test]
     fn slowness_satisfies_its_defining_identity(
         velocity_km_s in 0.5f64..9.0,
@@ -334,9 +313,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// `Gamma(x+1) == x * Gamma(x)`. The functional equation, which any correct
-    /// gamma satisfies — so this survives replacing the transcribed Chebyshev form
-    /// with a library implementation, which §2.2b does.
+    /// `Gamma(x+1) == x * Gamma(x)`, the functional equation any correct gamma satisfies.
     #[test]
     fn gamma_satisfies_its_recurrence(x in 0.1f64..18.0) {
         let ratio = gamma(x + 1.0) / (x * gamma(x));
@@ -387,11 +364,10 @@ fn gamma_matches_factorials_and_the_half_integer_case() {
 proptest! {
     /// Forward then inverse recovers the input up to **one** constant factor.
     ///
-    /// Deliberately does not say what the factor is: the vendored kernel is
-    /// unnormalised and gives `n`, while a library transform may normalise on either
-    /// leg. What a caller relies on is that the pair is invertible and that the
-    /// scaling is uniform across bins — a per-bin scaling error is a real bug and
-    /// this catches it.
+    /// Deliberately does not say what the factor is: a transform may be unnormalised
+    /// (giving `n`) or normalise on either leg. What a caller relies on is that the pair
+    /// is invertible and the scaling is uniform across bins; a per-bin scaling error is a
+    /// real bug and this catches it.
     #[test]
     fn transform_round_trip_is_proportional_to_the_input(exponent in 3u32..9) {
         let n = 1usize << exponent;
@@ -467,7 +443,6 @@ proptest! {
             sum += v;
         }
         forward(work.as_mut_slice());
-        // DC is bin 0 now, not 1.
         prop_assert!(
             work[0].im.abs() <= 1e-4 * sum.abs().max(1.0),
             "DC bin {:?} should be real",
@@ -485,10 +460,8 @@ proptest! {
     /// the whole content of "remove the quadratic trend". Checked by third
     /// difference, which annihilates any quadratic exactly.
     ///
-    /// This is stronger than testing the integrated velocity and displacement, and
-    /// it is honest: the routine leaves the first two samples alone, so the
-    /// integrated quantities do not reach zero and asserting that they do would be
-    /// a test of a claim the code does not make.
+    /// The integrated velocity and displacement are not tested for zero: the routine
+    /// leaves the first two samples alone, so they do not reach it.
     #[test]
     fn correction_is_quadratic_in_sample_index(
         exponent in 5u32..11,
@@ -520,14 +493,9 @@ proptest! {
         // The correction is recovered by differencing two `f32` samples of magnitude
         // ~|acceleration|, so it carries about half an ulp of THAT magnitude however small
         // the correction itself is. The third difference sums four such values with
-        // coefficients 1, 3, 3, 1, so its noise floor is ~8 half-ulps and is set by the
-        // acceleration, not by the span.
-        //
-        // Normalising by `span` alone therefore asserts a precision the `f32` output
-        // cannot carry, and flakes exactly when `c1` and `c2` nearly cancel: the span
-        // shrinks and the noise floor does not. Seen for real at span = 1.8e-3, where the
-        // third difference was 2.1e-7 against a 1.8e-7 threshold -- the predicted floor,
-        // not a defect in the routine.
+        // coefficients 1, 3, 3, 1, so its noise floor is ~8 half-ulps of the acceleration.
+        // A bound relative to `span` alone would flake when the fitted coefficients nearly
+        // cancel and the span shrinks while the floor does not.
         let scale = before.iter().fold(0.0f64, |acc, a| acc.max(a.abs() as f64));
         let noise_floor = 8.0 * f32::EPSILON as f64 * scale;
         prop_assert!(
@@ -598,9 +566,8 @@ proptest! {
     }
 
     /// The normal deviates are renormalised to **unit RMS**, and `stochastic_spectrum`
-    /// calibrates its amplitude on that. The doc comment there is explicit that
-    /// substituting a plain N(0,1) generator would silently change output level, so
-    /// this is a contract rather than a statistical expectation — hence the tight
+    /// calibrates its amplitude on that; a plain N(0,1) generator would silently change
+    /// output level. A contract rather than a statistical expectation, hence the tight
     /// tolerance.
     #[test]
     fn normal_deviates_have_unit_rms(seed in any::<i32>(), exponent in 6u32..13) {
@@ -627,9 +594,7 @@ proptest! {
         );
     }
 
-    /// The same seed reproduces the same stream. This is the property the whole
-    /// validation campaign rests on: a gate that gave a different answer each run
-    /// could not be a gate.
+    /// The same seed reproduces the same stream.
     #[test]
     fn a_seed_reproduces_its_stream(seed in any::<i32>(), draws in 1usize..64) {
         let mut first = LegacyPcg::seed(seed);
@@ -659,15 +624,10 @@ proptest! {
 proptest! {
     /// A flat table applies a uniform gain of `exp(level)` to every interior bin.
     ///
-    /// The factors are **log** amplitudes, measured rather than assumed: a constant
-    /// table of 2.0 multiplies magnitudes by `e^2 = 7.389`, not by 2. The natural
-    /// reading — that a table of ones is the identity — is wrong, and a test written
-    /// on it would have failed for the right reason and invited a loosened tolerance.
+    /// The factors are **log** amplitudes: a constant table of 2.0 multiplies magnitudes
+    /// by `e^2 = 7.389`, not by 2, so a table of ones is not the identity.
     ///
-    /// Since §2.6 reconciled the DC and Nyquist bins to the same convention, the gain
-    /// is uniform across the whole half-spectrum. The loop still starts at bin 2
-    /// because DC is identically zero on entry from `stochastic_spectrum`, so its gain
-    /// is unobservable rather than wrong.
+    /// The gain is uniform across the whole half-spectrum, DC and Nyquist included.
     #[test]
     fn a_flat_table_applies_a_uniform_exponential_gain(
         exponent in 4u32..9,
@@ -722,8 +682,7 @@ proptest! {
         let (frequency, log_frequency, factors) = site_table(np2, level);
         amplify(spec.as_mut_slice(), &frequency, &log_frequency[..6], &factors[..6]);
         // Bin `i` counted from DC, so `spec[i]` is the positive frequency and
-        // `spec[np2 - i]` its Hermitian partner. 0-based, the Fortran's `i + 1` and
-        // `np2 - i + 1` lose their offsets.
+        // `spec[np2 - i]` its Hermitian partner.
         for i in 1..np2 / 2 {
             let positive = spec[i];
             let negative = spec[np2 - i];
@@ -739,8 +698,7 @@ proptest! {
     }
 }
 
-/// Resample the table and apply it, which is what `apply_site_amplification` did in one call
-/// before the curve was split out of it. The properties below are about the pair.
+/// Resample the site table onto the spectrum's frequencies and apply the gain.
 fn amplify(
     spectrum: &mut [Complex32],
     log_frequency_hz: &[f32],
@@ -909,13 +867,8 @@ proptest! {
 // End to end — simulate
 // ---------------------------------------------------------------------------
 
-// These exist because of a gap this suite had. §2.3 once left a loop bound at
-// `1..=np2` against a 0-based buffer of length `np2`; the binary panicked on every deck
-// and `cargo test` still reported 120 of 120 passing, because nothing here drove
-// `simulate`. The only end-to-end coverage was a shell script outside the test suite.
-//
-// Nothing below asserts a value, so none of it constrains further refactoring — they are
-// the coarsest possible statements that a simulation happened at all.
+// Coarse end-to-end checks that a simulation runs and produces a sane record. None of
+// them asserts a value.
 
 /// A plausible layered velocity model: thin slow layers near the surface, thickening and
 /// speeding up with depth, zero-thickness base as the reader expects.
@@ -1059,19 +1012,12 @@ fn simulate_is_deterministic_and_seed_dependent() {
         first.acc, other.acc,
         "a different seed must give a different record"
     );
-    // Geometry is unchanged, so the closest-subfault distance must not move.
 }
 
 /// A source below the whole velocity model must still produce a finite ray.
 ///
-/// This is the case `ray::source_layer` now returns `None` for. It used to fall out of the
-/// search loop as `layer_count` — one past the last layer — and be used as an index anyway,
-/// which read a zeroed layer with zero velocity and zero density and put NaNs into the
-/// travel time. It did not trap only because the arrays were sized to a compile-time ceiling
-/// rather than to the model.
-///
-/// Reachable in production: truncating the velocity model at the Moho can leave subfaults
-/// beneath the deepest layer.
+/// The case `ray::source_layer` returns `None` for. Reachable in production: truncating the
+/// velocity model at the Moho can leave subfaults beneath the deepest layer.
 #[test]
 fn a_source_below_the_model_stays_finite() {
     let vmod = velocity_model(12);

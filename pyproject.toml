@@ -24,6 +24,11 @@ dev = ["deptry", "ruff", "ty", "numpydoc"]
 
 [tool.deptry]
 pep621_dev_dependency_groups = ["test", "types"]
+# Developer scripts, not part of the package.
+extend_exclude = ["harness"]
+
+[tool.ty.src]
+exclude = ["harness"]
 
 [tool.setuptools.packages]
 find = { where = [

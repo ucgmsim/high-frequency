@@ -18,12 +18,10 @@ type FftPlan = Arc<dyn Fft<f32>>;
 
 thread_local! {
     /// Plans are cached per `(length, direction)`: building one is where `rustfft`
-    /// does its twiddle precomputation, so planning per call would reintroduce
-    /// exactly the cost this change removes.
+    /// does its twiddle precomputation, so planning per call would be expensive.
     ///
-    /// Thread-local rather than a global mutex because `simulate` is called once per
-    /// station and a future caller will want stations on separate threads; a shared
-    /// lock would serialise them on the hottest path in the program.
+    /// Thread-local rather than a global mutex so stations simulated on separate
+    /// threads never contend for a lock on the hottest path in the program.
     static PLANS: RefCell<HashMap<(usize, bool), FftPlan>> = RefCell::new(HashMap::new());
 }
 
@@ -42,18 +40,11 @@ const LENGTH_MULTIPLIERS: [usize; 4] = [1, 3, 5, 7];
 ///
 /// # Why not `next_power_of_two`
 ///
-/// It was the only option when the transform was a hand-rolled radix-2 kernel, and it
-/// survived the move to `rustfft` unexamined. A power-of-two ladder has **one** rung per
-/// octave, so it overshoots by up to 2x: a signal of 80,601 samples — an Alpine Fault
-/// subfault recorded in the lower North Island — rounds up to 131,072 where 81,920 = 5·2¹⁴
-/// will do.
-///
-/// That saving is close to linear in runtime and **not** mainly through the transform. Of
-/// the work a subfault does, the normal draws, the envelope, the spectral shape and the
-/// Hermitian mirror are all `O(np2)` elementwise passes; only the transform itself is
-/// `O(np2 log np2)`. So a shorter length wins on the elementwise majority even where a
-/// mixed-radix plan is less efficient per point than a radix-2 one — which is the reason
-/// this trades a power of two away rather than the other way round.
+/// A power-of-two ladder has one rung per octave, so it overshoots by up to 2x: a signal
+/// of 80,601 samples rounds up to 131,072 where 81,920 = 5·2¹⁴ will do. Most of a
+/// subfault's work (the normal draws, the envelope, the spectral shape and the Hermitian
+/// mirror) is `O(np2)` elementwise passes, so a shorter length wins even where a
+/// mixed-radix plan is less efficient per point than a radix-2 one.
 ///
 /// # Why four rungs and not every 7-smooth number
 ///
@@ -105,17 +96,12 @@ pub fn inverse(data: &mut [Complex32]) {
     transform(data, false)
 }
 
-/// in-place unnormalised complex FFT.
+/// In-place unnormalised complex FFT.
 fn transform(data: &mut [Complex32], forward: bool) {
-    // The length is the slice's, not a separate argument. Every call site passed
-    // exactly `data.len()`, so the parameter could only ever have disagreed with
-    // reality -- §2.3.
     let len = data.len();
-    // EVEN, not a power of two. `rustfft` plans any length, and lengths now come from
-    // `good_length` rather than `next_power_of_two`. What is still required is evenness:
-    // `stoc::stochastic_spectrum` and `site::apply_site_amplification` both re-impose
-    // Hermitian symmetry by splitting the spectrum at `len / 2`, and an odd length has no
-    // such split -- the Nyquist bin it mirrors about does not exist.
+    // Even, not necessarily a power of two: `stoc::stochastic_spectrum` and
+    // `site::apply_site_amplification` both re-impose Hermitian symmetry by splitting the
+    // spectrum at `len / 2`, and an odd length has no Nyquist bin to mirror about.
     assert!(
         len.is_multiple_of(2),
         "the transform requires an even length, got {len}"
@@ -227,12 +213,6 @@ mod tests {
         }
     }
 
-    /// **Never worse than the power of two it replaced.**
-    ///
-    /// This is the property that makes the change safe to adopt wholesale: the 7-smooth
-    /// ladder is a refinement of the powers of two, so it can only ever pick a length at or
-    /// below `next_power_of_two`. If this fails, some subfault got a *longer* transform than
-    /// before and the change is a regression for it.
     #[test]
     fn a_good_length_never_exceeds_the_power_of_two() {
         for at_least in (2..200_000).step_by(31) {
@@ -260,16 +240,5 @@ mod tests {
                 "good_length({at_least}) = {length} but {smaller:?} also qualifies"
             );
         }
-    }
-
-    /// The saving that motivated the change, pinned so it cannot silently regress.
-    ///
-    /// 80,601 samples is `2 * 201.5 s / 0.005 s`, an Alpine Fault subfault window recorded
-    /// in the lower North Island.
-    #[test]
-    fn the_alpine_case_saves_what_it_claims() {
-        // 5 * 2^14, against a power of two of 131,072 -- a 1.6x saving.
-        assert_eq!(good_length(80_601), 81_920);
-        assert_eq!(80_601usize.next_power_of_two(), 131_072);
     }
 }

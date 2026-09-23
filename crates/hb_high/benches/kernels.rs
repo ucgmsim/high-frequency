@@ -1,10 +1,4 @@
-//! Per-subprogram microbenchmarks.
-//!
-//! Baseline for Phase 3 optimisation work: nothing gets optimised until its cost
-//! is on record here. Conventions follow `IM_calculation`'s Rust benches —
-//! `harness = false`, `criterion_group!`/`criterion_main!`, `BenchmarkId::new`,
-//! `Throughput` where a natural unit exists, `std::hint::black_box`, and
-//! `sample_size(10)` for groups where a single iteration is already milliseconds.
+//! Per-kernel microbenchmarks.
 //!
 //! Two notes on method:
 //!
@@ -47,7 +41,7 @@ use ndarray::{ArrayView1, ArrayViewMut1};
 /// an Alpine Fault subfault recorded at 600 km reaches.
 const NP2S: &[usize] = &[1024, 1280, 4096, 16384, 65536, 81920];
 
-/// `nr` in the main program: the sample count for the conical radiation average.
+/// `nr`: the sample count for the conical radiation average.
 const NR: usize = 1000;
 
 const DT: f32 = 0.005;
@@ -89,7 +83,7 @@ fn ray_state(ksrc: usize) -> RayState {
     st
 }
 
-/// `/travel/` and `/coff/` filled by the real `build_ray_path`, so the downstream ray
+/// Ray state filled by the real `build_ray_path`, so the downstream ray
 /// kernels see self-consistent state.
 fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     let mut st = ray_state(ksrc);
@@ -99,7 +93,7 @@ fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     st
 }
 
-/// The frequency axis the main program builds: `dfr(i) = df*(i-1)`.
+/// The frequency axis the simulation builds: bin `i` at `i * df`, up to Nyquist.
 fn dfr_axis(np2: usize) -> Vec<f32> {
     let mut dfr = vec![0.0; np2];
     let df = 1.0 / (np2 as f32 * DT);
@@ -117,7 +111,7 @@ fn spectrum(np2: usize) -> Vec<Complex32> {
         .collect()
 }
 
-/// The 20-entry log-frequency site-amplification table from `:196-218`.
+/// A 20-entry log-frequency site-amplification table with random factors.
 fn site_table() -> (Vec<f32>, Vec<f32>) {
     const HZ: [f32; 20] = [
         0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
@@ -137,10 +131,7 @@ fn site_table() -> (Vec<f32>, Vec<f32>) {
 // FFT
 // ---------------------------------------------------------------------------
 
-/// The dominant cost. Prior EMOD3D profiling attributed ~19% of total runtime to
-/// `cexpf`/`sincosf` computing twiddles inside this routine alone, and measured a
-/// twiddle table as worth 1.35–1.43x while staying bit-identical. This group is
-/// the baseline that claim will be re-checked against.
+/// Forward and inverse transforms at the lengths the program produces.
 fn bench_fft(c: &mut Criterion) {
     let mut group = c.benchmark_group("fft");
     for &np2 in NP2S {
@@ -180,10 +171,8 @@ fn bench_rng(c: &mut Criterion) {
     });
 
     // `fill_normal` is called once per stochastic_spectrum, i.e. three times per subfault
-    // per ray, with n = np2. It is the largest single consumer of RNG traffic in the
-    // program, which is why both implementations are benched side by side: `legacy_normal`
-    // is Box-Muller plus a full renormalisation pass, `normal` is the ziggurat production
-    // runs. The ratio between them is what `rng::Pcg`'s docs claim.
+    // per ray, with n = np2 -- the largest consumer of RNG traffic. `legacy_normal` is
+    // Box-Muller plus a renormalisation pass; `normal` is the ziggurat used in production.
     for &n in &[1024usize, 4096, 65536] {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("normal", n), &n, |b, &n| {
@@ -234,7 +223,7 @@ fn bench_radiation(c: &mut Criterion) {
     let dfr = dfr_axis(np2);
     let mut rdna = vec![0.0; np2];
 
-    // The same arrival geometry both routines used as five loose positional f32s.
+    // One arrival geometry shared by both routines.
     const ARRIVAL: RadiationAngles = RadiationAngles {
         strike_rad: 1.2,
         dip_rad: 0.9,
@@ -339,7 +328,7 @@ fn bench_ray(c: &mut Criterion) {
             criterion::BatchSize::SmallInput,
         )
     });
-    // The whole cluster, as the main program calls it once per subfault per ray.
+    // The whole ray computation, as the simulation calls it once per subfault per ray.
     group.bench_function("green_function", |b| {
         b.iter_batched_ref(
             RayState::default,
@@ -419,9 +408,8 @@ fn bench_spectrum(c: &mut Criterion) {
                     qbar: 0.02,
                 };
                 let mut spectrum: ndarray::Array1<Complex32> = ndarray::Array1::zeros(np2);
-                // The shape is refreshed inside the loop so this still measures the whole
-                // per-component cost, which is what it always measured. `spectrum_shape` below
-                // is what shows how much of it the two horizontals now share.
+                // The shape is refreshed inside the loop so this measures the whole
+                // per-component cost.
                 let mut shape = SpectrumShape::with_capacity(np2);
                 b.iter(|| {
                     shape.refresh(&plan, &model, &path);
@@ -453,10 +441,8 @@ fn bench_spectrum(c: &mut Criterion) {
             },
         );
 
-        // Benched apart because they now run at different rates. The curve is built once per
-        // (subfault, ray) and the multiply runs three times, once per component, so the split
-        // is what shows whether moving the interpolation out of the per-component loop was
-        // worth anything.
+        // Benched apart because they run at different rates: the curve is built once per
+        // (subfault, ray) and the multiply runs once per component.
         group.bench_with_input(
             BenchmarkId::new("site_gain_curve", np2),
             &np2,
@@ -523,8 +509,8 @@ fn bench_spectrum(c: &mut Criterion) {
 // Geometry
 // ---------------------------------------------------------------------------
 
-/// `subfault_geometry` runs once per segment per station and calls `DELAZ5` once per
-/// subfault, so it scales with the subfault count rather than with `np2`.
+/// `subfault_geometry` runs once per segment per station and calls `distance_azimuth` once
+/// per subfault, so it scales with the subfault count rather than with `np2`.
 fn bench_geom(c: &mut Criterion) {
     let mut group = c.benchmark_group("geom");
     for &(nx, nw) in &[(2usize, 2usize), (16, 7), (257, 11)] {
@@ -532,12 +518,8 @@ fn bench_geom(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("subfault_geometry", format!("{nx}x{nw}")),
             &(nx, nw),
-            // `subfault_geometry` now allocates its five (nq, np) arrays itself and returns
-            // them, so this timing INCLUDES ~1.2 MB of allocation per call where it
-            // previously hoisted them out of the loop. That is the honest number:
-            // the driver allocates per segment too, so the old form was
-            // under-measuring real use. Expect a step change against baselines
-            // recorded before this.
+            // Includes the allocation of the returned arrays (~1.2 MB per call at the
+            // largest size), as the real caller pays it once per segment.
             |b, &(nx, nw)| {
                 b.iter(|| {
                     subfault_geometry(

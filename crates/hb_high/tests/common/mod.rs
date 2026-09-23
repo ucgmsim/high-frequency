@@ -1,34 +1,14 @@
 //! Shared scaffolding for the golden tests.
 //!
-//! Six test files carried a near-identical `Reader` struct, five copies of `eq32`, four
-//! of `eq64` and two of `near32` — around 200 duplicated lines whose only real variation
-//! was the `harness/golden/<tier>` subdirectory and the name of the regeneration script
-//! in the panic message. Both are parameters now.
-//!
-//! The duplication was not merely untidy. `io_golden`'s copy had drifted: it sliced
-//! `buf[pos..pos + 4]` with no bounds check, so a short or truncated fixture panicked
-//! with a slice-index message instead of the "ran off the end at byte N of M" the other
-//! five produce, and its `eq64` dropped the hex rendering that makes an ulp-level
-//! mismatch readable. Converging on one implementation fixes both for free.
-//!
-//! # Why the readers are small composable pieces, not one fixture builder
-//!
-//! The obvious factoring of the four velocity-model loaders is a single
-//! `vmod(count, fields)` taking a set of which fields to read. That would be a flag
-//! argument — the exact smell §2.8 is removing elsewhere in this crate — and it would be
-//! worse than the duplication, because the field *order* in each fixture is dictated by
-//! its Fortran driver's `write` statement and is not a property a caller should be
-//! choosing at all. So the shared pieces are `f64s`/`f32s`, and each tier spells out its
-//! own driver's dump order in terms of them. [`Golden::ray_seam_state`] is the one
-//! exception: tiers 2 and 3 read the *same* record layout, so it is one layout, not two.
+//! Field order in each fixture is fixed by the Fortran driver that wrote it, so each test
+//! spells out its own record layout in terms of the primitive readers (`f32s`, `f64s`,
+//! ...).
 
 // Each test binary links this module separately and uses a different subset, so anything
 // not used by *every* binary would otherwise warn in the others.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-
-use hb_high::state::{RayState, VelocityModel};
 
 /// Sequential reader over a Fortran `access='stream'` file.
 pub struct Golden {
@@ -39,20 +19,13 @@ pub struct Golden {
 
 impl Golden {
     /// Open `harness/golden/<tier>/<name>`.
-    ///
-    /// `tier` is both the subdirectory and the middle of the regeneration script's name,
-    /// so a missing fixture says exactly which script to run.
     pub fn open(tier: &str, name: &str) -> Self {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../harness/golden")
             .join(tier)
             .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!(
-                "reading {}: {e}. Run harness/kernels/gen_{tier}_golden.sh",
-                path.display()
-            )
-        });
+        let buf =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         Self {
             buf,
             pos: 0,
@@ -127,36 +100,6 @@ impl Golden {
             self.buf.len()
         );
     }
-
-    /// The `dump_state` record shared by the tier-2 and tier-3 drivers: `thickness_km`,
-    /// `vp_km_s` and `vsh_km_s` as `f64`, then `alp` and `als` as `f32`, for `layers`
-    /// layers.
-    ///
-    /// `layers` is the Fortran's deepest layer *number*, which doubles as a count from 1.
-    /// `Travel::deepest_layer` is a 0-based index since §2.3, so it is one lower — that
-    /// `- 1` is the whole reason this is shared rather than written out twice.
-    pub fn ray_seam_state(&mut self, layers: usize) -> (RayState, VelocityModel) {
-        let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); layers];
-        for layer in vmod.iter_mut() {
-            layer.thickness_km = self.f64();
-        }
-        for layer in vmod.iter_mut() {
-            layer.vp_km_s = self.f64();
-        }
-        for layer in vmod.iter_mut() {
-            layer.vsh_km_s = self.f64();
-        }
-        let mut st = RayState::default();
-        st.travel.reset_for(layers);
-        for slot in st.travel.p_traversals.iter_mut() {
-            *slot = self.f32();
-        }
-        for slot in st.travel.s_traversals.iter_mut() {
-            *slot = self.f32();
-        }
-        st.travel.deepest_layer = layers - 1;
-        (st, vmod)
-    }
 }
 
 /// Bit-for-bit `f32` comparison. The hex is not decoration: at this level the decimal
@@ -186,10 +129,8 @@ pub fn eq64(what: &str, got: f64, want: f64) {
 
 /// Relative `f32` comparison against a per-record scale.
 ///
-/// §2.1 replaced the vendored radix-2 kernel with `rustfft`, which sums the butterflies
-/// in a different order, so anything downstream of a transform can no longer be exact.
-/// The physics either side of it is unchanged and still worth checking, hence a loosened
-/// comparison rather than a deleted one.
+/// For anything downstream of an FFT: `rustfft` sums the butterflies in a different order
+/// from the Fortran's transform, so these values cannot be bit-exact.
 ///
 /// The scale is the record's peak rather than the individual value, so a bin that is
 /// legitimately near zero is not held to an impossible relative tolerance.
@@ -201,44 +142,4 @@ pub fn near32(what: &str, got: f32, want: f32, scale: f32) {
         "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
         (got - want).abs()
     );
-}
-
-/// Relative `f64` comparison at a caller-supplied tolerance.
-///
-/// The tolerance is a parameter, not a constant, because each tier's divergence has a
-/// different cause and a different measured size. Whoever passes it owns the argument for
-/// it — see `tier2_golden`'s, which records both the mechanism and the measured worst.
-#[track_caller]
-pub fn near64(what: &str, got: f64, want: f64, relative_tolerance: f64) {
-    let tol = relative_tolerance * want.abs().max(f64::MIN_POSITIVE);
-    assert!(
-        (got - want).abs() <= tol,
-        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
-        (got - want).abs()
-    );
-}
-
-/// Tracks the worst relative divergence across a fixture, so the number justifying a
-/// [`near64`] tolerance stays measured rather than remembered.
-#[derive(Default)]
-pub struct Divergence {
-    worst: f64,
-    at: String,
-}
-
-impl Divergence {
-    pub fn note(&mut self, what: &str, got: f64, want: f64) {
-        let rel = (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
-        if rel > self.worst {
-            self.worst = rel;
-            self.at = what.to_string();
-        }
-    }
-
-    pub fn report(&self, fixture: &str) {
-        println!(
-            "{fixture}: worst relative divergence {:.3e} at {}",
-            self.worst, self.at
-        );
-    }
 }

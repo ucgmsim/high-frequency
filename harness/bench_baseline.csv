@@ -1,13 +1,7 @@
-# Baseline timings, re-recorded at Stage 4 §4.6 on an 8-core box, otherwise idle.
+# Baseline timings from an 8-core box, otherwise idle. benches/whole.rs calls simulate()
+# directly, so process startup, parsing and file output are not measured.
 #
-# NOT COMPARABLE with the previous version of this file, which was last touched at the end
-# of Stage 1 and timed `hb_high` as a SUBPROCESS driven by a generated deck. §4.3 deleted
-# the binary, so benches/whole.rs now calls simulate() directly: process startup, `python3
-# mkdeck.py`, text parsing and a file write are all out of the measurement.
-#
-# The fault geometries are also built in code rather than read from fixtures, so `medium`
-# here is 14x8 = 112 subfaults rather than 2013p543824's 112 in a different arrangement.
-# Subfault count is what runtime scales with; the arrangement is not held fixed.
+# Fault geometries are built in code; runtime scales with subfault count, not arrangement.
 bench,subfaults,median_ms,notes
 whole_program/mini,4,3.44,"single segment 4x1, 40 s at dt=0.005"
 whole_program/medium,112,176.36,"single segment 14x8, 40 s at dt=0.005"

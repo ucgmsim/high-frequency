@@ -2,7 +2,7 @@
 //!
 //! A double couple does not radiate equally in all directions, and a single subfault's
 //! theoretical pattern is too sharp to be realistic. Graves & Pitarka (2010) therefore use a
-//! **conically averaged** pattern: perturb the five angles randomly and average. See
+//! conically averaged pattern: perturb the five angles randomly and average. See
 //! `PHYSICS.md` §5.
 
 use ndarray::{ArrayView1, ArrayViewMut1, azip};
@@ -21,9 +21,8 @@ const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
 
 /// Lower bound on the conical-average blend for a horizontal component.
 ///
-/// At 1.0 the blend is pinned to the conical average at every frequency, which is what
-/// "since using a conical average around theoretical ray, don't allow much purely theoretical
-/// rad pattern" asks for.
+/// At 1.0 the blend is pinned to the conical average at every frequency: because the average
+/// is already taken around the theoretical ray, little purely theoretical pattern is allowed.
 pub const CONICAL_FLOOR: f32 = 1.0;
 
 /// Fault orientation and the ray's arrival direction.
@@ -98,7 +97,7 @@ impl AngleTerms {
 /// `((sin_rake * (cos_dip² - sin_dip²)) * (cos_takeoff² - sin_takeoff²)) * sin_az`, and the
 /// parenthesisation below says so explicitly.
 ///
-/// Double-angle identities would simplify these and are **not** bit-equivalent.
+/// Double-angle identities would simplify these and are not bit-equivalent.
 #[inline]
 fn sv_from(t: AngleTerms) -> f32 {
     t.sin_rake
@@ -131,7 +130,7 @@ fn sh_from(t: AngleTerms) -> f32 {
         - t.sin_rake * t.sin_dip * t.cos_dip * t.sin_takeoff * 2.0 * t.sin_az * t.cos_az
 }
 
-/// Both shear radiation coefficients for a double couple. (orig. `hb_high_ref.f:2275`)
+/// Both shear radiation coefficients for a double couple.
 ///
 /// Aki & Richards, *Quantitative Seismology* (2nd ed.), ch. 4.
 #[inline]
@@ -146,31 +145,27 @@ pub fn radiation_pattern(angles: RadiationAngles) -> ShearRadiation {
 /// Only the SV coefficient.
 ///
 /// [`vertical_radiation_spectrum`] never uses the SH lobe, so it asks for the one it wants.
-///
-/// **This is a separation of concerns, not an optimisation** — the compiler eliminates an
-/// unused half either way.
 #[inline]
 pub fn sv_radiation(angles: RadiationAngles) -> f32 {
     sv_from(AngleTerms::of(angles))
 }
 
 /// Conically averaged radiation pattern for a horizontal component, per frequency bin.
-/// (orig. `hb_high_ref.f:1939`)
 ///
 /// This is `RP_ij` in Graves & Pitarka (2010) eq. 11: the pattern averaged over rays whose
-/// strike, dip, rake, azimuth and take-off angle are perturbed within **±45°** of their
+/// strike, dip, rake, azimuth and take-off angle are perturbed within ±45° of their
 /// theoretical values — a cone around the theoretical ray, on the reasoning that the true
 /// parameters are more likely near their nominal values than in an arbitrary orientation.
 ///
 /// [`CONE_WIDTH_RAD`] is 90°, so `(0.5 - u)` scaled by it gives ±45° exactly as the paper
 /// specifies.
 ///
-/// # This is the dominant consumer of random numbers
+/// # The dominant consumer of random numbers
 ///
-/// **Five draws per iteration, in the order `th, fa, strX, dipX, rakX`, and `sample_count` is
-/// 1000** — so 5,000 draws per call, twice per subfault per ray. The draw order and count are
-/// the phase spectrum (`PHYSICS.md` §9); changing either desynchronises every waveform that
-/// follows.
+/// Five draws per iteration, in the order take-off, azimuth, strike, dip, rake, and
+/// `sample_count` is 1000 — so 5,000 draws per call, twice per subfault per ray. The draw order
+/// and count are part of the realisation (`PHYSICS.md` §9); changing either changes every
+/// waveform that follows.
 ///
 /// # The frequency blend is inert
 ///
@@ -178,12 +173,6 @@ pub fn sv_radiation(angles: RadiationAngles) -> f32 {
 /// the result is the conical average at every frequency and the taper never bites. The
 /// expression is still written out in full, because
 /// `theoretical + (conical - theoretical) * 1.0` is not bitwise equal to `conical`.
-///
-/// # The return value is a discarded output
-///
-/// The blend's lower corner is returned because the caller once assigned it to a Butterworth
-/// low-cut, clobbering it. That filter is dead under production settings, so the clobber is
-/// real but inert. Returned explicitly rather than hidden.
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
     angles: &RadiationAngles,
@@ -191,7 +180,7 @@ pub fn horizontal_radiation_spectrum(
     component_rad: f32,
     sample_count: usize,
     radiation: ArrayViewMut1<f32>,
-) -> f32 {
+) {
     let &RadiationAngles {
         strike_rad,
         dip_rad,
@@ -205,7 +194,7 @@ pub fn horizontal_radiation_spectrum(
 
     let theoretical = radiation_pattern(*angles);
 
-    // Project SV and SH onto the requested horizontal component. The sum is formed BEFORE the
+    // Project SV and SH onto the requested horizontal component. The sum is formed before the
     // magnitude is taken (below), because taking it per-term lets a negative cos or sin
     // introduce an asymmetry that is not physical.
     let projected = theoretical.sv * (component_rad - azimuth_rad).cos()
@@ -217,11 +206,8 @@ pub fn horizontal_radiation_spectrum(
 
     let mut sum_of_squares = 0.0f32;
     for _sample in 0..sample_count {
-        // FIVE DRAWS, AND THIS IS THE ORDER. Bound to named locals rather than written
-        // straight into the struct literal below: field-initialiser order is what would
-        // decide the draw order there, so reordering the fields for readability would
-        // silently move every waveform. Here the order is a sequence of statements, which is
-        // not something anyone reorders by accident.
+        // Five draws, in this order. Bound to named locals rather than written into the struct
+        // literal below, so that reordering the fields cannot change the draw order.
         let takeoff = takeoff_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
         let azimuth = azimuth_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
         let strike = strike_rad + CONE_WIDTH_RAD * (0.5 - rng.uniform());
@@ -244,8 +230,8 @@ pub fn horizontal_radiation_spectrum(
 
     let conical_gain = (sum_of_squares / sample_count as f32).sqrt();
 
-    // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
-    // log-linear blend between. Inert as written -- see `radmin` above.
+    // Piecewise in frequency: theoretical pattern below `blend_low_hz`, conical average above
+    // `blend_high_hz`, log-linear blend between. Inert as written -- see `CONICAL_FLOOR`.
     azip!((
         gain in radiation,
         &freq in frequency_hz,
@@ -253,7 +239,7 @@ pub fn horizontal_radiation_spectrum(
         let blend = if freq <= blend_low_hz {
             CONICAL_FLOOR
         } else if freq <= blend_high_hz {
-            // The `max` applies to the QUOTIENT, not to the denominator. Written without the
+            // The `max` applies to the quotient, not to the denominator. Written without the
             // parentheses it binds to `.ln()` and silently changes the blend.
             ((freq / blend_low_hz).ln() / (blend_high_hz / blend_low_hz).ln())
                 .max(CONICAL_FLOOR)
@@ -262,20 +248,14 @@ pub fn horizontal_radiation_spectrum(
         };
         *gain = polarity * (theoretical_gain + (conical_gain - theoretical_gain) * blend);
     });
-
-    blend_low_hz
 }
 
 /// Conically averaged radiation pattern for the vertical component, per frequency bin.
-/// (orig. `hb_high_ref.f:2140`)
 ///
-/// The vertical needs no horizontal projection, so the pattern is just `RDSV * sin(takeoff)`,
+/// The vertical needs no horizontal projection, so the pattern is just `SV * sin(takeoff)`,
 /// and the average is taken over take-off angle and azimuth only.
 ///
 /// The take-off range is clamped to `[90°, 180°]`: only downgoing directions contribute.
-///
-/// Like [`horizontal_radiation_spectrum`], the returned `fr1` is a value the original wrote
-/// back into the caller's low-cut, and is inert for the same reason.
 pub fn vertical_radiation_spectrum(
     angles: &RadiationAngles,
     frequency_hz: ArrayView1<f32>,
@@ -283,7 +263,7 @@ pub fn vertical_radiation_spectrum(
     uniform_b: &[f32],
     sample_count: usize,
     radiation: ArrayViewMut1<f32>,
-) -> f32 {
+) {
     let &RadiationAngles {
         strike_rad,
         dip_rad,
@@ -301,10 +281,9 @@ pub fn vertical_radiation_spectrum(
     let takeoff_min_rad = (takeoff_rad - VERTICAL_CONE_HALF_WIDTH_RAD).max(DOWNGOING_MIN_RAD);
     let takeoff_max_rad = (takeoff_rad + VERTICAL_CONE_HALF_WIDTH_RAD).min(DOWNGOING_MAX_RAD);
 
-    // The two uniform arrays are consumed in lockstep, one pair per sample. They are FILLED by
-    // two separate sequential passes -- the first `nr` draws into `a`, the next `nr` into `b` --
-    // and THAT MUST NOT BECOME ONE INTERLEAVED PASS, or every vertical component moves.
-    // Zipping the consumption is free; zipping the fill is not.
+    // The two uniform arrays are consumed in lockstep, one pair per sample. They are filled by
+    // two separate sequential passes -- the first `sample_count` draws into `a`, the next into
+    // `b` -- and interleaving the fill would change every vertical component.
     //
     // The two limits are fixed above, so their cosines are loop invariants.
     let (cos_min, cos_max) = (takeoff_min_rad.cos(), takeoff_max_rad.cos());
@@ -326,9 +305,8 @@ pub fn vertical_radiation_spectrum(
     // Halved because the magnitudes above are folded about zero.
     let conical_gain = sum_of_magnitudes / sample_count as f32 / 2.0;
 
-    // Piecewise in frequency: theoretical pattern below `fr1`, conical average above `fr2`,
-    // linear blend between. Written as one expression per bin so the piecewise structure is
-    // visible rather than emerging from a fall-through.
+    // Piecewise in frequency: theoretical pattern below `blend_low_hz`, conical average above
+    // `blend_high_hz`, linear blend between.
     azip!((
         gain in radiation,
         &freq in frequency_hz,
@@ -343,6 +321,4 @@ pub fn vertical_radiation_spectrum(
             conical_gain
         };
     });
-
-    blend_low_hz
 }

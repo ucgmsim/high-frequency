@@ -7,74 +7,29 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 
-# Clippy is a gate here, not a suggestion box, and this section exists because it was
-# not one. `cargo clippy -p hb_high` did not COMPILE until §2.8: seven deny-level
-# `approx_constant` errors on the Fortran's truncated-pi literals aborted the run before
-# any lint reported, so 28 warnings accumulated invisibly -- eight of them
-# `needless_range_loop`, which is precisely the Fortran-ism the port is trying to shed.
-#
-# The lesson is that a lint nobody can run is worse than no lint, because it reads like
-# coverage. Opting in at the workspace level means a future `approx_constant` (or
-# anything else deny-by-default) fails loudly instead of silently masking the rest.
-#
-# Deliberately `warn`, not `deny`: the numerics work in this repo regularly needs a
-# temporary state that lints dislike, and a hard failure would tempt a blanket
-# `#![allow]` at the crate root -- which is how the 28 accumulated in the first place.
-# The convention is a targeted `#[allow]` with the reason written next to it; see
-# `rng.rs`'s module note for the shape.
-#
-# Only `hb_high` opts in so far (`[lints] workspace = true` in its manifest). `im` and
-# `validate` have 7 warnings between them and were outside §2.8's scope; opting them in
-# is a two-line change once someone cleans them.
+# Lints are `warn` locally so an in-progress numerics change is not blocked; CI runs
+# clippy with `-D warnings`. Silence an individual lint with a targeted `#[allow]` and
+# the reason beside it, never a crate-root `#![allow]`.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
 [workspace.lints.rust]
 unused = { level = "warn", priority = -1 }
 
-# Debug and release must still agree with EACH OTHER, even though neither is
-# bit-identical to the Fortran any more. That self-consistency is what catches a
-# dependence on optimisation-level float behaviour, which has already found one real
-# bug (PORTING_RULES.md §4b), so nothing here may enable fast-math or float
-# reassociation. `-ffast-math` has no per-crate Rust equivalent and is not wanted.
+# Debug and release builds must produce the same results; a disagreement means the code
+# depends on optimisation-level float behaviour (e.g. LLVM folds `powf(x, 0.5)` into
+# `sqrt(x)` at -O2 but not at -O0). Nothing here may enable fast-math or float
+# reassociation.
 #
-# Build-profile experiments, all MEASURED. Timing on this machine drifts 1-3% between
-# runs, which is the same size as the effects, so these are settled on hardware counters
-# (instructions retired is reproducible to 1 part in 10^7, and both counters are immune
-# to other work on the box, which matters because this one is rarely idle) rather than
-# wall clock.
+# Profile choices, measured on hardware counters (instructions and cycles) because
+# wall-clock noise is as large as the effects:
 #
-#   overflow-checks = false           1.87% MORE instructions retired. Genuinely
-#                                     counterintuitive; removing the checks perturbs
-#                                     codegen elsewhere by more than it saves. Stays on
-#                                     for a measured reason, not for symmetry with the
-#                                     old bit-identity contract.
-#
-# §5.7 RE-RAN THE LTO EXPERIMENT AND SPLIT IT IN TWO, which changed the answer. Stage 2
-# tested `lto = "fat"` and `codegen-units = 1` as ONE change, found it 1.2% slower, and
-# rejected both. They do not behave the same way. Six interleaved rounds each, whole
-# pipeline via the release snapshot binary:
-#
-#                       instructions        cycles          IPC     build
-#   baseline (cgu=16)   3,489,660,418   1,699,821,294      2.053    ~10 s
-#   codegen-units = 1   3,434,677,223   1,575,930,648      2.180     50 s
-#                            -1.58%         -7.29%
-#   + lto = "fat"       3,378,573,086   1,658,985,055      2.037     67 s
-#                            -3.18%         -2.40%
-#
-# LTO removes the MOST instructions and is still the worse option: it gives back most of
-# the cycle win by dropping IPC from 2.18 to 2.04. That is exactly the mechanism the old
-# note hypothesised -- rustfft's AVX kernels are hand-tuned and cross-crate inlining
-# disturbs their register allocation -- so the reasoning was right and only the bundling
-# was wrong. `codegen-units = 1` alone was never isolated until now.
-#
-# So LTO stays OFF and codegen-units = 1 is ON, at a cost of ~40 s per release rebuild.
-# Note this is a cycles win, not an instructions win; anyone re-testing must look at both
-# counters, because on instructions alone LTO wins and is wrong.
-#
-# NOT ISOLATED: whether ndarray's arrival in Stage 5 caused this, or whether cgu = 1 was
-# always worth 7%. Answering it needs a build of the pre-Stage-5 tree, which nobody has
-# done. Do not assume either way.
+#   overflow-checks = true    turning them off retired ~1.9% MORE instructions.
+#   codegen-units = 1         ~7% fewer cycles than the default of 16.
+#   lto                       off: removes more instructions than codegen-units = 1 alone
+#                             but lowers IPC (it disturbs rustfft's hand-tuned SIMD
+#                             kernels), so it is slower in cycles. Check both counters
+#                             when re-testing.
 [profile.release]
 debug = true
 overflow-checks = true

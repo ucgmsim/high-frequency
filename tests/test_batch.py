@@ -1,14 +1,8 @@
 """Batch invariants: the properties only a batched API can have.
 
-These are the tests that make a refactor confident rather than nervous. None of them
-asserts a computed sample value, so none of them obstructs changing how the numbers are
-produced — they assert the *relationships* a caller depends on, which must hold for any
-correct implementation.
-
-The three waveform invariants exist because the Fortran could not have them. It shared one
-RNG stream across its station loop, which is why ``nsite != 1`` had to be refused outright:
-a multi-station run was not the concatenation of single-station runs. Per-station seeding is
-what buys them, and these tests are what keep them.
+None of these asserts a computed sample value; they assert the *relationships* a caller
+depends on, which must hold for any correct implementation. Per-station seeding is what
+makes the three waveform invariants possible.
 """
 
 from collections.abc import Iterable
@@ -188,9 +182,8 @@ def test_a_batch_of_one_matches_the_batch(
 ) -> None:
     """One station alone equals that station inside a batch.
 
-    The Fortran could not satisfy this, which is the whole reason ``nsite != 1`` was
-    refused: its station loop shared one generator, so the second station's waveform
-    depended on the first.
+    Fails if stations share one generator, so that a station's waveform depends on those
+    simulated before it.
     """
     reference = simulate(slip_model, velocity_model, range(4))
     assert_not_silent(reference)
@@ -284,8 +277,8 @@ def test_station_seeds_subset_equals_slice(names: list[str], root: int) -> None:
 def test_adjacent_roots_share_no_seeds(names: list[str], root: int) -> None:
     """Adjacent root seeds give unrelated station seeds.
 
-    The property ``int32(root) ^ stable_hash(name)`` lacked: a bare XOR is not mixing, so
-    incrementing the root flipped one bit of every station seed.
+    A bare XOR of root and name hash would fail this: incrementing the root would flip one
+    bit of every station seed.
     """
     assert not (
         set(station_seeds(root, names).tolist())

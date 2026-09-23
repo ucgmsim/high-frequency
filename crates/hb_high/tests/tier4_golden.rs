@@ -1,12 +1,6 @@
-//! Bit-identity gate for `stochastic_spectrum` and `green_function`.
-//!
-//! Regenerate with `harness/kernels/gen_tier4_golden.sh`.
-//!
-//! **Fixture filenames are the FORTRAN routine names**, not this port's. They are
-//! written by the Fortran driver, which dumps one file per subprogram it exercises,
-//! so `cr.bin` holds the golden for what is now `ray::vertical_slowness`. Renaming
-//! them would mean editing the drivers and regenerating every golden, and the names
-//! are useful provenance where they are. See `REFACTOR.md` §1.4b.
+//! Golden tests for `stochastic_spectrum` and `green_function`, against fixtures produced
+//! by the original Fortran. Fixture filenames are the Fortran routine names (`stoc_f.bin`,
+//! `gf_amp_tt.bin`).
 
 use hb_high::fft::Complex32;
 use hb_high::ray::green_function;
@@ -42,11 +36,9 @@ fn stoc_f_matches_fortran() {
         let want_after: Vec<f32> = (0..8).map(|_| r.f32()).collect();
 
         let mut rng = LegacyPcg::seed(seed);
-        // The per-segment tables `SpectrumPlan` precomputes in the program. Built here from
-        // the golden's own inputs by struct literal rather than through `SpectrumPlan::new`,
-        // for two reasons: the golden records `np2` directly where `new` derives it from a
-        // window length, and building the tables here keeps this a test of the ARITHMETIC
-        // rather than of the caching. `powf` is deterministic, so hoisting it is bit-exact.
+        // Built by struct literal rather than `SpectrumPlan::new`: the golden records `np2`
+        // directly where `new` derives it from a window length, and this keeps the test
+        // about the arithmetic rather than the caching.
         let b = -eps * eta.ln() / (1.0 + eps * (eps.ln() - 1.0));
         let plan = SpectrumPlan {
             np2,
@@ -56,13 +48,11 @@ fn stoc_f_matches_fortran() {
             envelope_power: (0..np2).map(|i| (i as f32 * dt).powf(b)).collect(),
             frequency_hz: dfr.clone().into(),
         };
-        // `dlm` was argument 11 and unused; §5.3 deleted it from the signature. The golden
-        // still records it, so it is still read off the record and simply not passed.
+        // Recorded in the golden but unused by the computation.
         let _ = dlm;
         let mut cw: Array1<Complex32> = Array1::zeros(np2);
-        // The deterministic shape is `SpectrumShape::refresh` since Stage 6 §6.4, so this
-        // golden now drives the pair. The split is bit-exact -- the same arithmetic in the
-        // same order -- which is what this fixture checks.
+        // `SpectrumShape::refresh` computes the deterministic shape; `stochastic_spectrum`
+        // applies the random draws to it.
         let mut shape = SpectrumShape::with_capacity(np2);
         shape.refresh(
             &plan,
@@ -87,8 +77,7 @@ fn stoc_f_matches_fortran() {
         stochastic_spectrum(&mut rng, &plan, &mut shape, cw.view_mut());
 
         let tag = format!("stochastic_spectrum case {cases} (np2={np2} akapp={akapp})");
-        // Scale from the Fortran record, so the tolerance does not float with our
-        // own output.
+        // Scale from the golden, so the tolerance does not float with our own output.
         let scale = want
             .iter()
             .fold(0.0f32, |a, c| a.max(c.re.abs()).max(c.im.abs()));

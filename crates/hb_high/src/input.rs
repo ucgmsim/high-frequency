@@ -1,45 +1,43 @@
 //! The source and receiver data model: the slip model, the 1-D velocity model, and a
 //! station.
 //!
-//! This was `input.rs` because it held the readers for the three text files the Fortran
-//! deck named. §4.3 deleted them -- Python owns every file format now, reusing
-//! `source_modelling.stoch.StochFile` and `workflow.realisations.HFVelocityModel1D` -- and
-//! what is left is the data model plus the two derivations that belong next to the physics
-//! consuming them: Moho truncation and the air layer.
+//! File parsing lives in Python (`source_modelling.stoch.StochFile` and
+//! `workflow.realisations.HFVelocityModel1D`); this module holds the data model plus the two
+//! derivations that belong next to the physics consuming them: Moho truncation and the air
+//! layer.
 
 use crate::state::VelocityModelInput;
 
 /// One fault segment from the `.stoch` file.
 ///
-/// Slip, rise time and rupture time are stored as a subfault grid — along-strike by
-/// down-dip — rather than in the Fortran's `(lv, nq, np)` block.
+/// Slip, rise time and rupture time are stored as a subfault grid, along-strike by down-dip.
 #[derive(Clone, Debug)]
 pub struct Segment {
-    /// `elonq` — longitude of the segment's along-strike reference point.
+    /// Longitude of the segment's along-strike reference point.
     pub fault_lon_deg: f32,
-    /// `elatq` — latitude of the same point.
+    /// Latitude of the same point.
     pub fault_lat_deg: f32,
-    /// `nx` — subfault count along strike.
+    /// Subfault count along strike.
     pub along_strike_count: usize,
-    /// `nw` — subfault count down dip.
+    /// Subfault count down dip.
     pub down_dip_count: usize,
-    /// `dx` — subfault dimension along strike, km.
+    /// Subfault dimension along strike, km.
     pub subfault_length_km: f32,
-    /// `dw` — subfault dimension down dip, km.
+    /// Subfault dimension down dip, km.
     pub subfault_width_km: f32,
-    /// `strq` — strike, degrees clockwise from north.
+    /// Strike, degrees clockwise from north.
     pub strike_deg: f32,
-    /// `dipq` — dip, degrees from horizontal.
+    /// Dip, degrees from horizontal.
     pub dip_deg: f32,
-    /// `rakeq` — rake, degrees.
+    /// Rake, degrees.
     pub rake_deg: f32,
-    /// `dtop` — depth to the top edge of the segment, km.
+    /// Depth to the top edge of the segment, km.
     pub top_depth_km: f32,
-    /// `shyp` — hypocentre offset along strike from the segment centre, km.
+    /// Hypocentre offset along strike from the segment centre, km.
     pub hypocentre_along_strike_km: f32,
-    /// `dhyp` — hypocentre offset down dip from the top edge, km.
+    /// Hypocentre offset down dip from the top edge, km.
     pub hypocentre_down_dip_km: f32,
-    /// `astop` — half the fault length along strike,
+    /// Half the fault length along strike,
     /// `0.5 * along_strike_count * subfault_length_km`. Not read from the file;
     /// derived here because every consumer wants it.
     pub along_strike_offset_km: f32,
@@ -54,22 +52,18 @@ pub struct Segment {
 /// How far one subfault slipped, as the `.stoch` file gives it.
 ///
 /// A newtype because the quantity derived from it — a subfault's share of the total moment,
-/// `sim::MomentWeight` — is also a bare `f32` and means something else entirely. The two used
-/// to be **the same field**: `normalise_source` overwrote slip with relative moment and then
-/// with a normalised weight, so `Subfault::slip` meant three different things depending on how
-/// far through a run you were, and no comment on a call site could tell you which. Now the
-/// compiler will not let one stand in for the other.
+/// `sim::MomentWeight` — is also an `f32` and means something else entirely.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Slip(pub f32);
 
 /// What the `.stoch` file says about one subfault.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Subfault {
-    /// `sddp` — slip. Read from the file and **never modified**.
+    /// Slip. Read from the file and never modified.
     pub slip: Slip,
-    /// `rist` — rise time, s.
+    /// Rise time, s.
     pub rise_time_s: f32,
-    /// `rupt` — rupture time relative to origin, s.
+    /// Rupture time relative to origin, s.
     pub rupture_time_s: f32,
 }
 
@@ -119,7 +113,7 @@ impl Segment {
         }
     }
 
-    /// Subfault count, `nx * nw`.
+    /// Subfault count, `along_strike_count * down_dip_count`.
     pub fn subfault_total(&self) -> usize {
         self.subfaults.len()
     }
@@ -137,7 +131,8 @@ impl Segment {
         (down_dip - 1) * self.along_strike_count + (along_strike - 1)
     }
 
-    /// Subfault `along_strike` (`1..=nx`) at depth row `down_dip` (`1..=nw`).
+    /// Subfault `along_strike` (`1..=along_strike_count`) at depth row `down_dip`
+    /// (`1..=down_dip_count`).
     #[inline]
     pub fn at(&self, along_strike: usize, down_dip: usize) -> Subfault {
         self.subfaults[self.grid_index(along_strike, down_dip)]
@@ -153,14 +148,14 @@ impl Segment {
         self.subfaults.chunks_mut(self.along_strike_count)
     }
 
-    /// Subfault indices `(i, j)` with the **depth** index outermost: `j` varies
+    /// Subfault indices `(i, j)` with the depth index outermost: `j` varies
     /// slowest, `i` fastest.
     pub fn depth_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
         let (along_strike_count, down_dip_count) = (self.along_strike_count, self.down_dip_count);
         (1..=down_dip_count).flat_map(move |j| (1..=along_strike_count).map(move |i| (i, j)))
     }
 
-    /// Subfault indices `(i, j)` with the **strike** index outermost: `i` varies
+    /// Subfault indices `(i, j)` with the strike index outermost: `i` varies
     /// slowest, `j` fastest.
     pub fn strike_major(&self) -> impl Iterator<Item = (usize, usize)> + use<> {
         let (along_strike_count, down_dip_count) = (self.along_strike_count, self.down_dip_count);
@@ -268,45 +263,28 @@ pub fn build_velocity_model(
 /// Needed to get the correct free-surface reflection coefficient for
 /// surface-reflected rays. The model grows by one layer.
 ///
-/// Takes the model by value and hands it back: the caller owns it and does not want the
-/// original afterwards, so there is nothing for a `&mut` to buy.
-///
-/// # There is no velocity-model perturbation
-///
-/// The original had a `grandvel` routine that perturbed the layer velocities, gated on a
-/// `nl_skip` count of layers to leave alone. It was dead under every production deck and was
-/// never ported, so the count it consumed is gone too — along with the `+ 1` this function used
-/// to apply to it to keep it aligned with the inserted layer.
-///
 /// # The air layer's Q is never set, and it does not matter
 ///
 /// The air layer keeps the original first layer's `attenuation_p` and `attenuation_s` rather
-/// than getting air-like ones. **Neither field is ever read at index 0.** `attenuation_p` has
-/// no live reader at all, and `attenuation_s` is read only at `vmod[nh1]` and `vmod[nhj]` in
-/// `geometric_spreading`, where the layer indices come from `green_function`'s ray building
-/// and are never below `krec = 1`.
+/// than getting air-like ones. Neither field is ever read at index 0: `attenuation_p` has no
+/// reader, and `attenuation_s` is read only in `geometric_spreading`, at ray-segment layer
+/// indices that are never below the receiver layer, 1.
 pub fn insert_air_layer(mut vmod_in: VelocityModelInput) -> VelocityModelInput {
     if !(vmod_in[0].depth_km > 0.001 && vmod_in[0].vp_km_s > 0.01) {
         return vmod_in;
     }
 
-    // The air layer copies the old first layer's two attenuation values rather than getting
-    // air-like ones of its own -- see above, where that is shown to be unobservable. Starting
-    // from a copy is what says so: the five fields that are set below are exactly the five
-    // that differ.
+    // Starting from a copy of the old first layer: the five fields set below are exactly the
+    // five that differ (see above for why the attenuation values are left).
     let mut air = vmod_in[0];
-    // depth_km and thickness_km are real*4, so these literals are already f32.
     air.depth_km = 0.0001;
     air.thickness_km = 0.0001;
-    // vp_km_s, vsh_km_s and density_g_cm3 are real*8, but the Fortran literals are UNSUFFIXED
-    // and therefore only carry f32 precision -- PORTING_RULES.md §1b. Writing 0.001f64 here
-    // gives 0.001 exactly; the Fortran stores 0.0010000000474974513. Caught by the reader
-    // golden.
+    // Rounded through `f32` to reproduce the single-precision constants of the original code:
+    // it stores 0.0010000000474974513, not 0.001.
     air.vp_km_s = 0.001f32 as f64;
     air.vsh_km_s = 0.0005f32 as f64;
     air.density_g_cm3 = 0.001f32 as f64;
 
-    // A shift-everything-down-by-one loop is an insertion, and now says so.
     vmod_in.insert(0, air);
     vmod_in
 }
@@ -316,7 +294,7 @@ pub fn insert_air_layer(mut vmod_in: VelocityModelInput) -> VelocityModelInput {
 pub struct Station {
     pub longitude: f32,
     pub latitude: f32,
-    /// Name, `character*12` in the Fortran.
+    /// Station name.
     pub name: String,
 }
 
@@ -324,8 +302,8 @@ pub struct Station {
 mod tests {
     use super::*;
 
-    /// Layer records built the way a Python caller builds them, for the tests that used to
-    /// start from a text model: `(thickness_km, vp, vsh, density, qp, qs)` per layer.
+    /// Layer records built the way a Python caller builds them:
+    /// `(thickness_km, vp, vsh, density, qp, qs)` per layer.
     fn layers(rows: &[(f32, f64, f64, f64, f32, f32)]) -> Vec<crate::state::InputLayer> {
         rows.iter()
             .map(
@@ -386,8 +364,7 @@ mod tests {
 
     #[test]
     fn a_moho_in_the_first_layer_is_an_error_not_a_panic() {
-        // The Fortran reads depth_km(0) here, out of bounds. The array path
-        // returns an error instead: it faces untrusted input from Python.
+        // Returns an error rather than panicking: this faces untrusted input from Python.
         let layers = [crate::state::InputLayer {
             depth_km: 0.0,
             thickness_km: 1.0,
@@ -416,9 +393,6 @@ mod tests {
         ]);
         // vsmoho below the third layer's 4.6 truncates there.
         let v = build_velocity_model(&model, 4.0).unwrap();
-        // The model IS the layer count now -- there is no buffer past the end that could
-        // read as a plausible zero, which is what this assertion used to have to work
-        // around.
         assert_eq!(v.len(), 3);
         let base = v.len() - 1;
         assert_eq!(v[base].thickness_km, 0.0, "the Moho layer is zeroed");
@@ -433,8 +407,8 @@ mod tests {
         ]);
         let v = build_velocity_model(&model, 999.9).unwrap();
         assert_eq!(v.len(), 2);
-        // 0-based since §2.3: the base of a 2-layer model is index 1, and the first
-        // layer's cumulative depth is index 0.
+        // The base of a 2-layer model is index 1, and the first layer's cumulative depth is
+        // index 0.
         assert_eq!(v[1].thickness_km, 0.0);
         assert_eq!(v[0].depth_km, 1.0);
     }
@@ -455,8 +429,7 @@ mod tests {
             "production models do get the air layer"
         );
         assert_eq!(v[0].thickness_km, 0.0001);
-        // Not 0.001f64: the Fortran literal is unsuffixed in a real*8 context,
-        // so it carries only f32 precision. See PORTING_RULES.md §1b.
+        // Not 0.001f64: the original constant was single precision.
         assert_eq!(v[0].vp_km_s, 0.001f32 as f64);
         assert_eq!(v[0].vsh_km_s, 0.0005f32 as f64);
         assert_eq!(v[0].density_g_cm3, 0.001f32 as f64);
