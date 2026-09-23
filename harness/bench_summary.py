@@ -24,6 +24,7 @@ import csv
 import json
 import math
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 # Criterion writes `benchmarks.json` alongside estimates in some versions and not
@@ -31,7 +32,7 @@ from pathlib import Path
 ESTIMATES = "estimates.json"
 
 
-def find_runs(root: Path):
+def find_runs(root: Path) -> Iterator[tuple[str, str, str, dict, dict | None]]:
     """Yield (group, benchmark id, parameter, estimates dict, throughput or None).
 
     Criterion's layout is target/criterion/<group>/<id>/<param>/new/estimates.json
@@ -70,13 +71,14 @@ def find_runs(root: Path):
         yield group, bench, param, data, thr
 
 
-def point(data, key):
+def point(data: dict, key: str) -> float | None:
     """Criterion nests each statistic as {'confidence_interval': ..., 'point_estimate': ..., 'standard_error': ...}."""
     node = data.get(key) or {}
     return node.get("point_estimate")
 
 
-def human_ns(ns):
+def human_ns(ns: float | None) -> str:
+    """Format nanoseconds in the largest unit that keeps the value below 1000."""
     if ns is None:
         return ""
     for unit, scale in (("ns", 1.0), ("us", 1e3), ("ms", 1e6), ("s", 1e9)):
@@ -85,7 +87,7 @@ def human_ns(ns):
     return f"{ns / 1e9:.3f} s"
 
 
-def throughput_per_sec(thr, median_ns):
+def throughput_per_sec(thr: dict | None, median_ns: float | None) -> tuple[str, str]:
     """Elements or bytes per second, if the bench declared a throughput."""
     if not thr or not median_ns:
         return "", ""
@@ -96,7 +98,8 @@ def throughput_per_sec(thr, median_ns):
     return "", ""
 
 
-def collect(root: Path):
+def collect(root: Path) -> list[dict[str, str]]:
+    """One CSV row per benchmark found under `root`, sorted by name."""
     rows = []
     for group, bench, param, data, thr in find_runs(root):
         median = point(data, "median")
@@ -130,7 +133,8 @@ FIELDS = [
 ]
 
 
-def write_csv(rows, out: Path):
+def write_csv(rows: list[dict[str, str]], out: Path) -> None:
+    """Write `rows` to `out` as CSV."""
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
@@ -138,7 +142,8 @@ def write_csv(rows, out: Path):
     print(f"wrote {out} ({len(rows)} benchmarks)")
 
 
-def compare(rows, baseline: Path):
+def compare(rows: list[dict[str, str]], baseline: Path) -> int:
+    """Print medians that moved more than 5% against `baseline`, and added or removed benches."""
     with open(baseline) as f:
         old = {
             (r["group"], r["benchmark"], r["parameter"]): r for r in csv.DictReader(f)
@@ -179,7 +184,8 @@ def compare(rows, baseline: Path):
     return 0
 
 
-def main():
+def main() -> int:
+    """Entry point; see the module docstring for usage."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--criterion-dir", type=Path, default=Path("target/criterion"))
     ap.add_argument("--out", type=Path, default=Path("harness/bench_baseline.csv"))

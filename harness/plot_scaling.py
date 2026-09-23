@@ -19,10 +19,12 @@ import sys
 from pathlib import Path
 
 import matplotlib
+import matplotlib.axes
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 # Reference palette, light mode. Slots 1 and 2, validated as an adjacent pair.
 MEASURED = "#2a78d6"
@@ -33,7 +35,7 @@ INK_2 = "#52514e"
 GRID = "#e0dfda"
 
 
-def style(ax):
+def style(ax: matplotlib.axes.Axes) -> None:
     """Recessive grid and axes; the data is the only thing with weight."""
     ax.set_facecolor(SURFACE)
     ax.grid(True, which="both", color=GRID, linewidth=0.8, zorder=0)
@@ -48,6 +50,7 @@ def style(ax):
 
 
 def main(csv_path: str, out_dir: str) -> None:
+    """Write scaling.png and scaling.svg for the sweep in `csv_path` to `out_dir`."""
     frame = pd.read_csv(csv_path)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -117,10 +120,8 @@ def main(csv_path: str, out_dir: str) -> None:
           f"{100 * (per_station.max() / per_station.min() - 1):.1f}%")
 
 
-def _slope(x, y) -> float:
+def _slope(x: np.ndarray, y: np.ndarray) -> float:
     """Least-squares slope in log-log, which is the scaling exponent."""
-    import numpy as np
-
     return float(np.polyfit(np.log(x), np.log(y), 1)[0])
 
 

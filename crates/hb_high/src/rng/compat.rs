@@ -30,13 +30,11 @@ impl LegacyPcg {
     /// Seed by folding `irand, irand+1, ..., irand+7` into the state, then discard two draws.
     pub fn seed(irand: i32) -> Self {
         let mut state: u64 = 0;
-        let mut irand = irand;
-        for _ in 0..SEED_WORDS {
+        for word in irand..irand + SEED_WORDS {
             // Sign-extend through i64.
             state = state
                 .wrapping_mul(PCG_MULT)
-                .wrapping_add(irand as i64 as u64);
-            irand += 1;
+                .wrapping_add(word as i64 as u64);
         }
         let mut generator = Self {
             state,

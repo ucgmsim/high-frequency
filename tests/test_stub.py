@@ -13,6 +13,7 @@ import ast
 import dataclasses
 import inspect
 import pathlib
+from typing import Any
 
 import pytest
 
@@ -94,7 +95,7 @@ def test_the_stub_matches_the_extension(class_name: str) -> None:
         (RuptureVelocity, "self.source.rupture_velocity."),
     ],
 )
-def test_every_config_field_reaches_rust(group: type, prefix: str) -> None:
+def test_every_config_field_reaches_rust(group: type[Any], prefix: str) -> None:
     """No dataclass field is silently dropped on the way across the boundary.
 
     ``_to_rust`` names each field explicitly, so a field added to one of the groups and

@@ -21,6 +21,10 @@
 //! Any change to the draw structure (count, order, or generator) moves these numbers.
 //! Re-record with `UPDATE_SNAPSHOT=1` once the change has been validated, and say why in
 //! the commit message.
+//!
+//! Integers (the `argmax` fields) must match exactly. Floats may differ by a relative
+//! [`FLOAT_TOLERANCE`], because the platform `libm` rounds transcendentals differently
+//! from one system to another. A change to the draw structure moves them by far more.
 
 use hb_high::config::{
     HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
@@ -33,6 +37,24 @@ use ndarray::Array2;
 
 const GOLDEN: &str = "../../harness/golden/snapshot.txt";
 const COMPONENT_COUNT: usize = 3;
+const FLOAT_TOLERANCE: f64 = 1e-5;
+
+/// Whether two snapshot lines agree: integers exactly, floats to [`FLOAT_TOLERANCE`].
+fn lines_match(want: &str, got: &str) -> bool {
+    let (want, got): (Vec<_>, Vec<_>) = (
+        want.split_whitespace().collect(),
+        got.split_whitespace().collect(),
+    );
+    want.len() == got.len()
+        && want.iter().zip(&got).all(|(w, g)| {
+            w == g
+                || (w.contains('e')
+                    && match (w.parse::<f64>(), g.parse::<f64>()) {
+                        (Ok(w), Ok(g)) => (w - g).abs() <= FLOAT_TOLERANCE * w.abs().max(g.abs()),
+                        _ => false,
+                    })
+        })
+}
 
 /// Seven numbers per component that summarise one record without storing it.
 fn summarise(acc: &Array2<f32>, ndata: usize) -> String {
@@ -199,11 +221,16 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
 
     let recorded = std::fs::read_to_string(GOLDEN)
         .unwrap_or_else(|e| panic!("cannot read {GOLDEN}: {e}\nrecord it with UPDATE_SNAPSHOT=1"));
-    if recorded != produced {
+    let mismatched = recorded.lines().count() != produced.lines().count()
+        || recorded
+            .lines()
+            .zip(produced.lines())
+            .any(|(w, g)| !lines_match(w, g));
+    if mismatched {
         // Line-by-line, because "one of 4 cases moved" is the first thing to know and a
         // whole-string diff buries it.
         for (want, got) in recorded.lines().zip(produced.lines()) {
-            if want != got {
+            if !lines_match(want, got) {
                 eprintln!("  recorded: {want}\n  produced: {got}");
             }
         }
