@@ -43,8 +43,8 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
         env:
-          CIBW_SKIP: "pp* *-musllinux_*" # Skip PyPy and musl builds
-          CIBW_ARCHS_MACOS: "x86_64 arm64" # Build for Intel and Apple Silicon
+          CIBW_SKIP: "pp* *-musllinux_*"  # Skip PyPy and musl builds
+          CIBW_ARCHS_MACOS: "x86_64 arm64"  # Build for Intel and Apple Silicon
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_ARCHS_LINUX: "x86_64"
           # This is needed as for linux the wheel build process happens inside a container instead of the Github runner

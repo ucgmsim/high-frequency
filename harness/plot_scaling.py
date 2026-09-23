@@ -66,10 +66,27 @@ def main(csv_path: str, out_dir: str) -> None:
     # Anchored at the smallest measured point, so the line says "if it were
     # linear in subfault count, it would go here".
     linear = y[0] * x / x[0]
-    left.plot(x, linear, color=REFERENCE, linewidth=2, linestyle="--",
-              label="linear in subfaults", zorder=2)
-    left.plot(x, y, color=MEASURED, linewidth=2, marker="o", markersize=8,
-              markeredgecolor=SURFACE, markeredgewidth=2, label="measured", zorder=3)
+    left.plot(
+        x,
+        linear,
+        color=REFERENCE,
+        linewidth=2,
+        linestyle="--",
+        label="linear in subfaults",
+        zorder=2,
+    )
+    left.plot(
+        x,
+        y,
+        color=MEASURED,
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        markeredgecolor=SURFACE,
+        markeredgewidth=2,
+        label="measured",
+        zorder=3,
+    )
     left.set_xscale("log")
     left.set_yscale("log")
     left.set_xlabel("subfaults", color=INK_2, fontsize=10)
@@ -97,15 +114,37 @@ def main(csv_path: str, out_dir: str) -> None:
     # the per-station cost varies ~19% across this sample purely by geometry, so a reference
     # pinned to one station makes station mix look like curvature.
     rate = float((sx * sy).sum() / (sx * sx).sum())
-    right.plot(sx, rate * sx, color=REFERENCE, linewidth=2, linestyle="--",
-               label=f"linear at {rate:.2f} s/station", zorder=2)
-    right.plot(sx, sy, color=MEASURED, linewidth=2, marker="o", markersize=8,
-               markeredgecolor=SURFACE, markeredgewidth=2, label="measured", zorder=3)
+    right.plot(
+        sx,
+        rate * sx,
+        color=REFERENCE,
+        linewidth=2,
+        linestyle="--",
+        label=f"linear at {rate:.2f} s/station",
+        zorder=2,
+    )
+    right.plot(
+        sx,
+        sy,
+        color=MEASURED,
+        linewidth=2,
+        marker="o",
+        markersize=8,
+        markeredgecolor=SURFACE,
+        markeredgewidth=2,
+        label="measured",
+        zorder=3,
+    )
     right.set_xlabel("stations", color=INK_2, fontsize=10)
     right.set_ylabel("seconds", color=INK_2, fontsize=10)
     subfaults = int(stations.subfaults.iloc[0])
-    right.set_title(f"Runtime vs station count ({subfaults} subfaults)",
-                    color=INK, fontsize=12, loc="left", pad=12)
+    right.set_title(
+        f"Runtime vs station count ({subfaults} subfaults)",
+        color=INK,
+        fontsize=12,
+        loc="left",
+        pad=12,
+    )
     style(right)
     right.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
 
@@ -115,9 +154,11 @@ def main(csv_path: str, out_dir: str) -> None:
     print(f"wrote {out / 'scaling.png'} and {out / 'scaling.svg'}")
     print(f"fault-size log-log slope: {exponent:.3f}")
     per_station = stations.wall_s / stations.stations
-    print(f"station sweep, s/station: min {per_station.min():.3f} "
-          f"max {per_station.max():.3f} spread "
-          f"{100 * (per_station.max() / per_station.min() - 1):.1f}%")
+    print(
+        f"station sweep, s/station: min {per_station.min():.3f} "
+        f"max {per_station.max():.3f} spread "
+        f"{100 * (per_station.max() / per_station.min() - 1):.1f}%"
+    )
 
 
 def _slope(x: np.ndarray, y: np.ndarray) -> float:

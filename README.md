@@ -6,8 +6,13 @@ Stochastic high-frequency seismogram generation: a Rust port of EMOD3D's
 ```python
 import numpy as np
 from hf_simulation import (
-    FaultSegment, HfConfig, RecordParameters, SlipModel, Simulator,
-    VelocityModel1D, station_seeds,
+    FaultSegment,
+    HfConfig,
+    RecordParameters,
+    SlipModel,
+    Simulator,
+    VelocityModel1D,
+    station_seeds,
 )
 
 # The four groups mirror the simulation core's own decomposition, so a
@@ -18,8 +23,9 @@ config = HfConfig(record=RecordParameters(duration_s=40.0))
 # moment scaling do not depend on where the receiver is.
 simulator = Simulator(SlipModel([segment]), velocity_model, config)
 
-waveform = simulator.run_stations(         # (3, n_station, n_time), cm/s²
-    latitude_deg=latitudes, longitude_deg=longitudes,
+waveform = simulator.run_stations(  # (3, n_station, n_time), cm/s²
+    latitude_deg=latitudes,
+    longitude_deg=longitudes,
     station_seed=station_seeds(1234, station_names),
 )
 ```
@@ -65,7 +71,7 @@ the same cores oversubscribe them.
 ## Tests
 
 ```
-pytest tests/              batch invariants, seeding properties, the stub
+pytest                     batch invariants, seeding properties, the stub, doctests
 cargo test --workspace     properties, kernel goldens, end-to-end snapshot
 cargo clippy --workspace   zero warnings, enforced in CI
 cargo bench                per-fault-size timings (HB_BENCH_SLOW=1 for alpine)
@@ -80,6 +86,9 @@ Re-record with `UPDATE_SNAPSHOT=1` and say why in the commit message.
 CI runs the Rust tests in both debug and release, which must agree with each
 other: a disagreement means the output depends on optimisation-level float
 behaviour.
+
+`uvx lefthook install` sets up git hooks that mirror CI: autofixes on commit,
+and the lint, format, type and docstring gates on push.
 
 ## Scope
 
