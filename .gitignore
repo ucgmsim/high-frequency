@@ -24,3 +24,5 @@ harness/science_*_n*.csv
 papers/*.pdf
 __pycache__/
 Todoist Export_*.csv
+.coverage
+htmlcov/
