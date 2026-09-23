@@ -24,8 +24,6 @@ ndarray = "0.17.2"
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11"
-# The gamma property tests call `libm::tgamma` directly.
-libm = "0.2"
 
 [lib]
 name = "hb_high"

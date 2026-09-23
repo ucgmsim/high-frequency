@@ -10,8 +10,6 @@
 
 use std::path::PathBuf;
 
-use hb_high::state::{RayState, VelocityModel};
-
 /// Sequential reader over a Fortran `access='stream'` file.
 pub struct Golden {
     buf: Vec<u8>,
@@ -26,12 +24,8 @@ impl Golden {
             .join("../../harness/golden")
             .join(tier)
             .join(name);
-        let buf = std::fs::read(&path).unwrap_or_else(|e| {
-            panic!(
-                "reading {}: {e}. Run harness/kernels/gen_{tier}_golden.sh",
-                path.display()
-            )
-        });
+        let buf =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         Self {
             buf,
             pos: 0,
@@ -106,34 +100,6 @@ impl Golden {
             self.buf.len()
         );
     }
-
-    /// The `dump_state` record: `thickness_km`, `vp_km_s` and `vsh_km_s` as `f64`, then
-    /// `alp` and `als` as `f32`, for `layers` layers.
-    ///
-    /// `layers` is the Fortran's 1-based deepest layer number; `Travel::deepest_layer` is
-    /// a 0-based index, hence the `- 1`.
-    pub fn ray_seam_state(&mut self, layers: usize) -> (RayState, VelocityModel) {
-        let mut vmod: VelocityModel = vec![hb_high::state::Layer::default(); layers];
-        for layer in vmod.iter_mut() {
-            layer.thickness_km = self.f64();
-        }
-        for layer in vmod.iter_mut() {
-            layer.vp_km_s = self.f64();
-        }
-        for layer in vmod.iter_mut() {
-            layer.vsh_km_s = self.f64();
-        }
-        let mut st = RayState::default();
-        st.travel.reset_for(layers);
-        for slot in st.travel.p_traversals.iter_mut() {
-            *slot = self.f32();
-        }
-        for slot in st.travel.s_traversals.iter_mut() {
-            *slot = self.f32();
-        }
-        st.travel.deepest_layer = layers - 1;
-        (st, vmod)
-    }
 }
 
 /// Bit-for-bit `f32` comparison. The hex is not decoration: at this level the decimal
@@ -176,43 +142,4 @@ pub fn near32(what: &str, got: f32, want: f32, scale: f32) {
         "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
         (got - want).abs()
     );
-}
-
-/// Relative `f64` comparison at a caller-supplied tolerance.
-///
-/// The tolerance is a parameter because each fixture's divergence has a different cause
-/// and size; the caller documents why its value is justified.
-#[track_caller]
-pub fn near64(what: &str, got: f64, want: f64, relative_tolerance: f64) {
-    let tol = relative_tolerance * want.abs().max(f64::MIN_POSITIVE);
-    assert!(
-        (got - want).abs() <= tol,
-        "{what}: rust {got:?} vs fortran {want:?} (delta {:.3e}, tolerance {tol:.3e})",
-        (got - want).abs()
-    );
-}
-
-/// Tracks the worst relative divergence across a fixture, so the number justifying a
-/// [`near64`] tolerance stays measured rather than remembered.
-#[derive(Default)]
-pub struct Divergence {
-    worst: f64,
-    at: String,
-}
-
-impl Divergence {
-    pub fn note(&mut self, what: &str, got: f64, want: f64) {
-        let rel = (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
-        if rel > self.worst {
-            self.worst = rel;
-            self.at = what.to_string();
-        }
-    }
-
-    pub fn report(&self, fixture: &str) {
-        println!(
-            "{fixture}: worst relative divergence {:.3e} at {}",
-            self.worst, self.at
-        );
-    }
 }

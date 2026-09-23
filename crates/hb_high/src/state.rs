@@ -122,16 +122,6 @@ pub enum Interaction {
     Direct,
 }
 
-impl Interaction {
-    pub fn as_fortran(self) -> i32 {
-        match self {
-            Self::Transmission => 0,
-            Self::Reflection => 1,
-            Self::Direct => 2,
-        }
-    }
-}
-
 /// Direction a ray segment travels, encoded `+1` (up) and `-1` (down).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Direction {
@@ -158,25 +148,6 @@ impl Direction {
         match self {
             Self::Up => Self::Down,
             Self::Down => Self::Up,
-        }
-    }
-
-    /// The layer on the other side of the interface below a segment in `layer`.
-    ///
-    /// Upgoing from layer 0 would underflow; that is unreachable, and panics if it ever is
-    /// not.
-    #[inline]
-    pub fn step_from(self, layer: usize) -> usize {
-        match self {
-            Self::Up => layer - 1,
-            Self::Down => layer + 1,
-        }
-    }
-
-    pub fn as_fortran(self) -> i32 {
-        match self {
-            Self::Up => 1,
-            Self::Down => -1,
         }
     }
 }

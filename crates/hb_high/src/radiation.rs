@@ -173,10 +173,6 @@ pub fn sv_radiation(angles: RadiationAngles) -> f32 {
 /// the result is the conical average at every frequency and the taper never bites. The
 /// expression is still written out in full, because
 /// `theoretical + (conical - theoretical) * 1.0` is not bitwise equal to `conical`.
-///
-/// # Return value
-///
-/// The blend's lower corner, `blend_low_hz`. Callers currently ignore it.
 pub fn horizontal_radiation_spectrum(
     rng: &mut impl crate::rng::Draws,
     angles: &RadiationAngles,
@@ -184,7 +180,7 @@ pub fn horizontal_radiation_spectrum(
     component_rad: f32,
     sample_count: usize,
     radiation: ArrayViewMut1<f32>,
-) -> f32 {
+) {
     let &RadiationAngles {
         strike_rad,
         dip_rad,
@@ -252,8 +248,6 @@ pub fn horizontal_radiation_spectrum(
         };
         *gain = polarity * (theoretical_gain + (conical_gain - theoretical_gain) * blend);
     });
-
-    blend_low_hz
 }
 
 /// Conically averaged radiation pattern for the vertical component, per frequency bin.
@@ -262,9 +256,6 @@ pub fn horizontal_radiation_spectrum(
 /// and the average is taken over take-off angle and azimuth only.
 ///
 /// The take-off range is clamped to `[90°, 180°]`: only downgoing directions contribute.
-///
-/// Like [`horizontal_radiation_spectrum`], returns the blend's lower corner, which callers
-/// currently ignore.
 pub fn vertical_radiation_spectrum(
     angles: &RadiationAngles,
     frequency_hz: ArrayView1<f32>,
@@ -272,7 +263,7 @@ pub fn vertical_radiation_spectrum(
     uniform_b: &[f32],
     sample_count: usize,
     radiation: ArrayViewMut1<f32>,
-) -> f32 {
+) {
     let &RadiationAngles {
         strike_rad,
         dip_rad,
@@ -330,6 +321,4 @@ pub fn vertical_radiation_spectrum(
             conical_gain
         };
     });
-
-    blend_low_hz
 }
