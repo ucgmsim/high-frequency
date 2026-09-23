@@ -16,20 +16,25 @@
 //! headroom, so ordinary rounding differences pass and a genuine break fails.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
-    SiteParameters, SourceParameters,
+    HfConfig, PathParameters, RecordParameters, RuptureVelocity, SiteParameters, SourceParameters,
 };
 use hb_high::fft::{Complex32, Complex64};
 use hb_high::fft::{forward, inverse, remove_quadratic_trend};
 use hb_high::geom::{FaultPlane, GeoPoint, distance_azimuth, subfault_geometry};
-use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::path_duration::PathDurationModel;
 use hb_high::radiation::{RadiationAngles, radiation_pattern};
-use hb_high::ray::vertical_slowness;
+use hb_high::ray::{RayShape, vertical_slowness};
 use hb_high::rng::{Draws, LegacyPcg};
 use hb_high::site::{apply_site_amplification, site_gain_curve};
+use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
+use hb_high::source::RuptureVelocityTaper;
 use libm::tgamma as gamma;
 use ndarray::{ArrayView1, ArrayViewMut1};
 use proptest::prelude::*;
+
+#[path = "common/fixtures.rs"]
+mod fixtures;
+use fixtures::{DIRECT_RAY, crustal_model as velocity_model};
 
 /// Angular difference in degrees, folded into `[0, 180]`.
 fn angle_gap_deg(a: f32, b: f32) -> f32 {
@@ -55,7 +60,7 @@ proptest! {
     #[test]
     fn self_distance_is_zero(lat in -85.0f32..85.0, lon in -180.0f32..180.0) {
         let g = distance_azimuth(GeoPoint { lat_deg: lat, lon_deg: lon }, GeoPoint { lat_deg: lat, lon_deg: lon });
-        prop_assert_eq!(g.deltkm, 0.0);
+        prop_assert_eq!(g.distance_km, 0.0);
     }
 
     /// Distance does not depend on which point you call the source.
@@ -66,9 +71,9 @@ proptest! {
     ) {
         let there = distance_azimuth(GeoPoint { lat_deg: lat_a, lon_deg: lon_a }, GeoPoint { lat_deg: lat_b, lon_deg: lon_b });
         let back = distance_azimuth(GeoPoint { lat_deg: lat_b, lon_deg: lon_b }, GeoPoint { lat_deg: lat_a, lon_deg: lon_a });
-        prop_assume!(there.deltkm > 10.0);
-        let rel = (there.deltkm - back.deltkm).abs() / there.deltkm;
-        prop_assert!(rel < 1e-5, "{} vs {}", there.deltkm, back.deltkm);
+        prop_assume!(there.distance_km > 10.0);
+        let rel = (there.distance_km - back.distance_km).abs() / there.distance_km;
+        prop_assert!(rel < 1e-5, "{} vs {}", there.distance_km, back.distance_km);
     }
 
     /// For a nearby station the azimuth matches the flat-Earth bearing to the offset.
@@ -99,9 +104,9 @@ proptest! {
         let want = east.atan2(north).to_degrees().rem_euclid(360.0);
 
         prop_assert!(
-            angle_gap_deg(g.azesdg, want as f32) < 0.5,
+            angle_gap_deg(g.azimuth_deg, want as f32) < 0.5,
             "at ({lat},{lon}) + ({dlat},{dlon}): azimuth {}, flat-Earth bearing {want}",
-            g.azesdg
+            g.azimuth_deg
         );
     }
 
@@ -112,10 +117,10 @@ proptest! {
         lat_b in -85.0f32..85.0, lon_b in -180.0f32..180.0,
     ) {
         let g = distance_azimuth(GeoPoint { lat_deg: lat_a, lon_deg: lon_a }, GeoPoint { lat_deg: lat_b, lon_deg: lon_b });
-        prop_assert!((0.0..360.0).contains(&g.azesdg), "azimuth {} out of range", g.azesdg);
+        prop_assert!((0.0..360.0).contains(&g.azimuth_deg), "azimuth {} out of range", g.azimuth_deg);
         prop_assert!(
-            (0.0..std::f32::consts::TAU).contains(&g.azes),
-            "azimuth {} rad", g.azes
+            (0.0..std::f32::consts::TAU).contains(&g.azimuth_rad),
+            "azimuth {} rad", g.azimuth_rad
         );
     }
 }
@@ -144,14 +149,14 @@ fn cardinal_azimuths_and_degree_scale() {
             },
         );
         assert!(
-            angle_gap_deg(g.azesdg, want_az) < 0.01,
+            angle_gap_deg(g.azimuth_deg, want_az) < 0.01,
             "due {what}: azimuth {}, want {want_az}",
-            g.azesdg
+            g.azimuth_deg
         );
         assert!(
-            (100.0..125.0).contains(&g.deltkm),
+            (100.0..125.0).contains(&g.distance_km),
             "one degree {what} is {} km, not a plausible degree",
-            g.deltkm
+            g.distance_km
         );
     }
     // Flattening: a degree of latitude is the shorter of the two.
@@ -165,7 +170,7 @@ fn cardinal_azimuths_and_degree_scale() {
             lon_deg: 0.0,
         },
     )
-    .deltkm;
+    .distance_km;
     let lon_km = distance_azimuth(
         GeoPoint {
             lat_deg: 0.0,
@@ -176,7 +181,7 @@ fn cardinal_azimuths_and_degree_scale() {
             lon_deg: 1.0,
         },
     )
-    .deltkm;
+    .distance_km;
     assert!(
         lat_km < lon_km,
         "lat {lat_km} should be < lon {lon_km} at the equator"
@@ -217,7 +222,7 @@ proptest! {
         for i in 1..=along {
             for j in 1..=down {
                 let ray = g.at(i, j);
-                let (slant, horiz, depth) = (ray.slant_km, ray.horiz_km, ray.depth_km);
+                let (slant, horiz, depth) = (ray.slant_km, ray.horizontal_km, ray.depth_km);
                 prop_assert!(slant.is_finite() && horiz.is_finite() && depth.is_finite());
                 let hyp = (horiz * horiz + depth * depth).sqrt();
                 prop_assert!(
@@ -744,10 +749,15 @@ proptest! {
         frac in 0.3f32..1.0, shallow in 0.2f32..1.0, deep in 0.2f32..1.0,
         hypocentre_km in 0.0f32..40.0,
     ) {
-        let taper = RuptureVelocity {
-            frac, shallow, deep, rv_sig1: 0.0,
-        }
-        .resolve(hypocentre_km);
+        let taper = RuptureVelocityTaper::new(
+            RuptureVelocity {
+                fraction: frac,
+                shallow_factor: shallow,
+                deep_factor: deep,
+                sigma: 0.0,
+            },
+            hypocentre_km,
+        );
         for edge in [
             taper.shallow_top_km,
             taper.shallow_base_km,
@@ -774,10 +784,15 @@ proptest! {
         frac in 0.3f32..1.0, shallow in 0.2f32..1.0, deep in 0.2f32..1.0,
         hypocentre_km in 0.0f32..40.0, depth_km in 0.0f32..120.0,
     ) {
-        let taper = RuptureVelocity {
-            frac, shallow, deep, rv_sig1: 0.0,
-        }
-        .resolve(hypocentre_km);
+        let taper = RuptureVelocityTaper::new(
+            RuptureVelocity {
+                fraction: frac,
+                shallow_factor: shallow,
+                deep_factor: deep,
+                sigma: 0.0,
+            },
+            hypocentre_km,
+        );
         let got = taper.factor(depth_km);
         let low = frac * shallow.min(deep).min(1.0);
         let high = frac * shallow.max(deep).max(1.0);
@@ -794,7 +809,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 /// Render a `.stoch` file for the given segment shapes, with slip `1.0` everywhere.
-fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
+fn slip_model(segments: &[(usize, usize, f32, f32)]) -> SlipModel {
     let built = segments
         .iter()
         .map(|&(along, down, length_km, width_km)| {
@@ -822,7 +837,7 @@ fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
                 .build()
         })
         .collect();
-    StochModel::new(built)
+    SlipModel::new(built)
 }
 
 proptest! {
@@ -870,59 +885,32 @@ proptest! {
 // Coarse end-to-end checks that a simulation runs and produces a sane record. None of
 // them asserts a value.
 
-/// A plausible layered velocity model: thin slow layers near the surface, thickening and
-/// speeding up with depth, zero-thickness base as the reader expects.
-fn velocity_model(layers: usize) -> hb_high::state::VelocityModelInput {
-    let built: Vec<hb_high::state::InputLayer> = (0..layers)
-        .map(|k| {
-            let frac = k as f64 / (layers - 1) as f64;
-            let vsh_km_s = 0.5 + 4.1 * frac;
-            let qs = 50.0 + 150.0 * frac;
-            hb_high::state::InputLayer {
-                // Derived by build_velocity_model, which accumulates it down the column.
-                depth_km: 0.0,
-                thickness_km: if k == layers - 1 {
-                    0.0
-                } else {
-                    (0.05 + 3.0 * frac) as f32
-                },
-                vp_km_s: vsh_km_s * 1.75,
-                vsh_km_s,
-                density_g_cm3: 1.81 + 1.5 * frac,
-                attenuation_p: (2.0 * qs) as f32,
-                attenuation_s: qs as f32,
-            }
-        })
-        .collect();
-    build_velocity_model(&built, 999.9).expect("valid velocity model")
-}
-
 /// Production-shaped configuration.
 ///
-/// Deliberately *not* all production values: `czero`, the two taper multipliers and the
+/// Deliberately *not* all production values: `c₀`, the two taper multipliers and the
 /// path-duration model differ, so that a property depending on a default rather than on the
 /// configured value shows up here.
 fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
             stress_drop_bars: 50.0,
-            czero: 2.1,
-            calpha: 0.1,
+            corner_frequency_constant: 2.1,
+            corner_frequency_alpha: 0.1,
             rupture_velocity: RuptureVelocity {
-                frac: 0.8,
-                shallow: 0.7,
-                deep: 0.7,
-                rv_sig1: 0.1,
+                fraction: 0.8,
+                shallow_factor: 0.7,
+                deep_factor: 0.7,
+                sigma: 0.1,
             },
         },
         path: PathParameters {
-            rayset: vec![RayType(1)],
-            q_exponent: 0.6,
+            rayset: vec![DIRECT_RAY],
+            q_frequency_exponent: 0.6,
             path_duration: PathDurationModel::Bt2014Wus,
         },
         site: SiteParameters {
             kappa_s: 0.045,
-            f_max_hz: 10.0,
+            fmax_hz: 10.0,
         },
         record: RecordParameters {
             duration_s: 20.0,
@@ -945,8 +933,8 @@ fn hf_config_with_duration(duration_s: f32) -> HfConfig {
 /// A simulator over the given inputs, for the tests that run more than one.
 fn hf_simulator(
     config: &HfConfig,
-    slip: &StochModel,
-    vmod: &hb_high::state::VelocityModelInput,
+    slip: &SlipModel,
+    vmod: &hb_high::velocity::VelocityModelInput,
 ) -> hb_high::sim::Simulator {
     hb_high::sim::Simulator::new(config, slip, vmod).expect("the fixture slip model is consistent")
 }
@@ -955,10 +943,9 @@ fn hf_simulator(
 fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
     let vmod = velocity_model(20);
-    let station = Station {
-        longitude: 173.4,
-        latitude: -43.1,
-        name: "TEST".to_string(),
+    let station = GeoPoint {
+        lon_deg: 173.4,
+        lat_deg: -43.1,
     };
     hb_high::sim::Simulator::new(&config(), &slip, &vmod)
         .expect("the fixture slip model is consistent")
@@ -1023,24 +1010,24 @@ fn a_source_below_the_model_stays_finite() {
     let vmod = velocity_model(12);
     let model_bottom_km: f32 = vmod.iter().map(|l| l.thickness_km).sum();
 
-    let mut state = hb_high::state::RayState::default();
+    let mut state = hb_high::ray::RayState::default();
     for depth_km in [model_bottom_km + 1.0, model_bottom_km * 2.0, 500.0] {
         let green = hb_high::ray::green_function(
             &mut state,
             &vmod
                 .iter()
                 .copied()
-                .map(hb_high::state::Layer::from)
+                .map(hb_high::velocity::Layer::from)
                 .collect(),
             depth_km,
             60.0,
-            1,
-            hb_high::state::WaveMode::Sh,
+            RayShape::Upgoing { multiples: 0 },
+            hb_high::ray::WaveMode::Sh,
         );
         for (name, value) in [
-            ("rp0", green.rp0),
-            ("stime", green.stime),
-            ("rpath", green.rpath),
+            ("ray_parameter_s_per_km", green.ray_parameter_s_per_km),
+            ("travel_time_s", green.travel_time_s),
+            ("path_length_km", green.path_length_km),
             ("qbar", green.qbar),
         ] {
             assert!(
@@ -1049,9 +1036,9 @@ fn a_source_below_the_model_stays_finite() {
             );
         }
         assert!(
-            green.stime > 0.0,
+            green.travel_time_s > 0.0,
             "source at {depth_km} km: travel time {} should be positive",
-            green.stime
+            green.travel_time_s
         );
     }
 }
@@ -1067,15 +1054,14 @@ fn a_source_below_the_model_stays_finite() {
 fn a_record_too_short_for_the_arrivals_reports_clipping() {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
     let vmod = velocity_model(20);
-    let station = Station {
-        // Far enough that the S arrival is tens of seconds in.
-        longitude: 176.0,
-        latitude: -40.0,
-        name: "FAR".to_string(),
+    // Far enough that the S arrival is tens of seconds in.
+    let station = GeoPoint {
+        lon_deg: 176.0,
+        lat_deg: -40.0,
     };
 
     let long_enough = hf_config_with_duration(300.0);
-    let complete = hf_simulator(&long_enough, &slip, &vmod).run(station.clone(), 42);
+    let complete = hf_simulator(&long_enough, &slip, &vmod).run(station, 42);
     assert!(
         complete.clipping.is_complete(),
         "a 300 s record should hold this arrival, got {:?}",

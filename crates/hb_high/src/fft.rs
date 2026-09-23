@@ -35,7 +35,7 @@ const LENGTH_MULTIPLIERS: [usize; 4] = [1, 3, 5, 7];
 ///
 /// Returns the smallest even number of the form `m · 2^a` with `m` drawn from
 /// `LENGTH_MULTIPLIERS` — a ladder of four rungs per octave. Evenness is required by the
-/// Hermitian mirrors that `stoc::stochastic_spectrum` and `site::apply_site_amplification`
+/// Hermitian mirrors that `spectrum::stochastic_spectrum` and `site::apply_site_amplification`
 /// re-impose about the Nyquist bin.
 ///
 /// # Why not `next_power_of_two`
@@ -48,7 +48,7 @@ const LENGTH_MULTIPLIERS: [usize; 4] = [1, 3, 5, 7];
 ///
 /// # Why four rungs and not every 7-smooth number
 ///
-/// Because the ladder sets how many [`crate::stoc::SpectrumPlan`]s a station builds, and a
+/// Because the ladder sets how many [`crate::spectrum::SpectrumPlan`]s a station builds, and a
 /// plan carries `O(np2)` precomputed transcendentals. Measured over 1,854 subfault windows
 /// spread across 5–209 s, which is an Alpine Fault station's range:
 ///
@@ -91,7 +91,7 @@ pub fn forward(data: &mut [Complex32]) {
 
 /// Synthesis transform.
 ///
-/// Unnormalised; [`crate::stoc::radiate_and_invert`] divides by `np2`.
+/// Unnormalised; [`crate::spectrum::radiate_and_invert`] divides by `np2`.
 pub fn inverse(data: &mut [Complex32]) {
     transform(data, false)
 }
@@ -99,7 +99,7 @@ pub fn inverse(data: &mut [Complex32]) {
 /// In-place unnormalised complex FFT.
 fn transform(data: &mut [Complex32], forward: bool) {
     let len = data.len();
-    // Even, not necessarily a power of two: `stoc::stochastic_spectrum` and
+    // Even, not necessarily a power of two: `spectrum::stochastic_spectrum` and
     // `site::apply_site_amplification` both re-impose Hermitian symmetry by splitting the
     // spectrum at `len / 2`, and an odd length has no Nyquist bin to mirror about.
     assert!(

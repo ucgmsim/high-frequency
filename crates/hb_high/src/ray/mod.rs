@@ -16,8 +16,75 @@
 //!
 //! These citations are signposts rather than verified equation references, so nothing below
 //! is annotated with an equation number.
+use std::f32::consts::PI;
+
 use crate::fft::Complex64;
-use crate::state::{Direction, Interaction, Layer, RayState, Rays, VelocityModel, WaveMode};
+use crate::geom::SubfaultRay;
+use crate::velocity::{Layer, VelocityModel};
+
+mod state;
+pub use state::{Coefficients, Direction, Interaction, RayState, Rays, Travel, WaveMode};
+
+/// One requested ray path: the `j` of Graves & Pitarka (2010) eq. 10's sum over paths — direct,
+/// Moho-reflected, and multiples.
+///
+/// Production runs the direct upgoing ray alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RayType {
+    /// Not traced: a straight line from subfault to station, with a nominal medium. See
+    /// [`trace`].
+    StraightLine,
+    /// Traced through the layered model.
+    Traced(RayShape),
+}
+
+/// The topology of a traced ray.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RayShape {
+    /// Leaves the source upward, then bounces off the Moho `multiples` extra times.
+    Upgoing { multiples: u32 },
+    /// Leaves the source downward and reflects off the Moho, then bounces `multiples` extra
+    /// times.
+    DownToMoho { multiples: u32 },
+}
+
+impl RayType {
+    /// Decode the integer ray code the configuration carries: `0` is the straight line, and a
+    /// positive code is a traced ray, decoded by [`RayShape::from_code`]. Negative codes name
+    /// nothing and give `None`.
+    pub fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::StraightLine),
+            _ => RayShape::from_code(code).map(Self::Traced),
+        }
+    }
+}
+
+impl RayShape {
+    /// Decode a positive ray code. The **parity** picks the take-off direction — odd leaves
+    /// upward, even downward — and each further pair adds one Moho multiple: `1` is the direct
+    /// ray, `2` the Moho reflection, `3` the direct ray plus one multiple, and so on.
+    pub fn from_code(code: i32) -> Option<Self> {
+        let code = u32::try_from(code).ok().filter(|&code| code > 0)?;
+        Some(if code % 2 == 1 {
+            Self::Upgoing {
+                multiples: (code - 1) / 2,
+            }
+        } else {
+            Self::DownToMoho {
+                multiples: (code - 2) / 2,
+            }
+        })
+    }
+
+    /// Which way the ray leaves the source.
+    pub fn takeoff(self) -> Takeoff {
+        match self {
+            Self::Upgoing { .. } => Takeoff::Up,
+            Self::DownToMoho { .. } => Takeoff::Down,
+        }
+    }
+}
 
 /// Complex vertical slowness `eta = sqrt(1/velocity_km_s^2 - ray_parameter^2)`, with an
 /// explicit branch-cut choice.
@@ -61,11 +128,6 @@ pub fn build_ray_path(
     source_depth_km: f64,
     receiver_depth_km: f64,
 ) {
-    state.love = if state.rays.wave_modes[0] == WaveMode::Sh {
-        2
-    } else {
-        1
-    };
     let n = state.rays.segment_count();
     // A zero-segment ray would underflow every `n - 1` below.
     assert!(n >= 1, "build_ray_path needs at least one ray segment");
@@ -105,7 +167,6 @@ pub fn build_ray_path(
     if n == 1 && receiver_depth_km >= source_depth_km {
         nup = Direction::Down;
     }
-    state.travel.takeoff = nup;
 
     // Interaction type at each interface and direction of each segment.
     state.coefficients.directions[0] = nup;
@@ -224,7 +285,7 @@ fn traversed_layers<'a>(
         .map(|((layer, &p), &s)| TraversedLayer { layer, p, s })
 }
 
-/// Returns `(rp, qb)`: total ray path length in km, and the path-integrated
+/// Returns `(path_length_km, qbar)`: total ray path length, and the path-integrated
 /// attenuation operator `sum(t_i / Qs_i)`.
 pub fn geometric_spreading(
     state: &RayState,
@@ -233,60 +294,57 @@ pub fn geometric_spreading(
     ray_parameter: f64,
     takeoff: Takeoff,
 ) -> (f64, f32) {
-    let nh1 = state.rays.layer_indices[0];
+    let source_layer = state.rays.layer_indices[0];
 
-    // Layers above the source layer, skipping the air layer at index 0. `1..nh1` rather than
-    // `1..=nh1 - 1` so a source in layer 0 cannot underflow.
-    let dep: f64 = vmod[1..nh1].iter().map(|l| l.thickness_km).sum();
+    // Layers above the source layer, skipping the air layer at index 0. `1..source_layer`
+    // rather than `1..=source_layer - 1` so a source in layer 0 cannot underflow.
+    let above_source_km: f64 = vmod[1..source_layer].iter().map(|l| l.thickness_km).sum();
 
-    let th1 = match takeoff {
-        Takeoff::Up => source_depth_km - dep,
-        Takeoff::Down => dep + vmod[nh1].thickness_km - source_depth_km,
+    // How far the first segment travels vertically within the source layer.
+    let first_segment_km = match takeoff {
+        Takeoff::Up => source_depth_km - above_source_km,
+        Takeoff::Down => above_source_km + vmod[source_layer].thickness_km - source_depth_km,
     };
 
-    // Substituted only for a post-critical ray, where `sin(i) >= 1` would make `denom`
-    // imaginary.
-    //
-    // This is not `min(sini, SIN_INCIDENCE_CLAMP)`. A value between
-    // the clamp and 1 -- 0.9999995, say -- is post-critical by neither test and is kept
-    // exactly, where `min` would pull it down to the clamp and move the spreading.
-    // Snell's law: sin(i)/v = p.
-    let incidence_sine = ray_parameter * vmod[nh1].vsh_km_s;
-    let sini = if incidence_sine >= 1.0 {
+    let first = &vmod[source_layer];
+    let length_km = first_segment_km * incidence_secant(ray_parameter, first.vsh_km_s);
+    let time_s = length_km / first.vsh_km_s;
+
+    let mut path_length_km = length_km;
+    let mut qbar = (time_s / first.attenuation_s as f64) as f32;
+
+    for &layer_index in &state.rays.layer_indices[1..] {
+        let layer = &vmod[layer_index];
+        let length_km = layer.thickness_km * incidence_secant(ray_parameter, layer.vsh_km_s);
+        let time_s = length_km / layer.vsh_km_s;
+
+        path_length_km += length_km;
+        // Narrowed on every iteration: single-precision accumulation, as in the original code.
+        qbar = (qbar as f64 + time_s / layer.attenuation_s as f64) as f32;
+    }
+
+    if path_length_km == 0.0 {
+        path_length_km = 0.001f32 as f64;
+    }
+    (path_length_km, qbar)
+}
+
+/// `1/cos(i)` for a segment at `velocity_km_s`, from Snell's law `sin(i)/v = p` — the factor
+/// that turns a segment's vertical extent into its length along the ray.
+///
+/// `sin(i)` is replaced by [`SIN_INCIDENCE_CLAMP`] only for a post-critical ray, where
+/// `sin(i) >= 1` would make the root imaginary. This is not `min(sin_i, SIN_INCIDENCE_CLAMP)`:
+/// a value between the clamp and 1 -- 0.9999995, say -- is post-critical by neither test and is
+/// kept exactly, where `min` would pull it down to the clamp and move the spreading.
+#[inline]
+fn incidence_secant(ray_parameter: f64, velocity_km_s: f64) -> f64 {
+    let incidence_sine = ray_parameter * velocity_km_s;
+    let sine = if incidence_sine >= 1.0 {
         SIN_INCIDENCE_CLAMP
     } else {
         incidence_sine
     };
-    let denom = 1.0 / (1.0 - sini * sini).sqrt();
-
-    let ri = th1 * denom;
-    let ti = ri / vmod[nh1].vsh_km_s;
-
-    let mut rsum = ri;
-    let mut qb = (ti / vmod[nh1].attenuation_s as f64) as f32;
-
-    for j in 1..state.rays.segment_count() {
-        let nhj = state.rays.layer_indices[j];
-        let incidence_sine = ray_parameter * vmod[nhj].vsh_km_s;
-        let sini = if incidence_sine >= 1.0 {
-            SIN_INCIDENCE_CLAMP
-        } else {
-            incidence_sine
-        };
-        let denom = 1.0 / (1.0 - sini * sini).sqrt();
-
-        let ri = vmod[nhj].thickness_km * denom;
-        let ti = ri / vmod[nhj].vsh_km_s;
-
-        rsum += ri;
-        // Narrowed on every iteration: single-precision accumulation, as in the original code.
-        qb = (qb as f64 + ti / vmod[nhj].attenuation_s as f64) as f32;
-    }
-
-    if rsum == 0.0 {
-        rsum = 0.001f32 as f64;
-    }
-    (rsum, qb)
+    1.0 / (1.0 - sine * sine).sqrt()
 }
 
 /// Cagniard complex travel time as a function of complex ray parameter:
@@ -405,60 +463,22 @@ pub fn stationary_ray_parameter(
     (p0, t.re)
 }
 
-/// Take-off direction from the source — the parity of the ray type.
+/// Take-off direction from the source. See [`RayShape::takeoff`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Takeoff {
-    /// Odd ray type — the ray leaves the source upward.
+    /// The ray leaves the source upward.
     Up,
-    /// Even ray type — down to the Moho, then back up.
+    /// Down to the Moho, then back up.
     Down,
 }
 
-impl Takeoff {
-    /// Every call site passes `ray_type >= 0`. A negative value leaves the take-off angle
-    /// undefined, so it is rejected at the boundary rather than deep inside a formula.
-    pub fn from_ray_type(ray_type: i32) -> Self {
-        assert!(
-            ray_type >= 0,
-            "ray type {ray_type} is negative; th1 would be undefined"
-        );
-        if ray_type % 2 == 1 {
-            Self::Up
-        } else {
-            Self::Down
-        }
-    }
-}
-
-/// The ray topology `green_function` builds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RayShape {
-    /// Odd. `multiples = (ray_type - 1) / 2`.
-    Upgoing { multiples: i32 },
-    /// Even. `multiples = (ray_type - 2) / 2`.
-    DownToMoho { multiples: i32 },
-}
-
-impl RayShape {
-    fn from_ray_type(ray_type: i32) -> Self {
-        match Takeoff::from_ray_type(ray_type) {
-            Takeoff::Up => Self::Upgoing {
-                multiples: (ray_type - 1) / 2,
-            },
-            Takeoff::Down => Self::DownToMoho {
-                multiples: (ray_type - 2) / 2,
-            },
-        }
-    }
-}
-
 /// The ray segment list under construction.
-struct RayPath<'a> {
+struct SegmentList<'a> {
     rays: &'a mut Rays,
     mode: WaveMode,
 }
 
-impl<'a> RayPath<'a> {
+impl<'a> SegmentList<'a> {
     fn new(rays: &'a mut Rays, mode: WaveMode) -> Self {
         rays.layer_indices.clear();
         rays.wave_modes.clear();
@@ -505,8 +525,8 @@ impl<'a> RayPath<'a> {
     }
 
     fn moho_multiple(&mut self, vmod: &VelocityModel, receiver: usize, bottom_layer: usize) {
-        let kbot = self.descend_to_moho(vmod, receiver, bottom_layer);
-        self.ascend_to(kbot, receiver);
+        let turning_layer = self.descend_to_moho(vmod, receiver, bottom_layer);
+        self.ascend_to(turning_layer, receiver);
     }
 }
 
@@ -561,24 +581,21 @@ fn deepest_layer_with_thickness(vmod: &VelocityModel) -> (usize, f64) {
 /// Outputs of [`green_function`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GreenFunction {
-    /// Ray parameter.
-    pub rp0: f32,
-    /// Travel time, seconds.
-    pub stime: f32,
-    /// Ray path length, km.
-    pub rpath: f32,
+    /// The stationary ray parameter `p`, s/km.
+    pub ray_parameter_s_per_km: f32,
+    pub travel_time_s: f32,
+    pub path_length_km: f32,
     /// Path-integrated attenuation, `sum(t_i/Qs_i)`.
     pub qbar: f32,
 }
 
-/// Builds the ray segment description for a given source depth and ray type,
+/// Builds the ray segment description for a given source depth and ray shape,
 /// then drives [`build_ray_path`], [`stationary_ray_parameter`] and
 /// [`geometric_spreading`] to return ray parameter, travel time, path length and path
 /// attenuation.
 ///
-/// Sole writer of `state.rays`. Production passes [`WaveMode::Sh`]. `ray_type` odd means an
-/// upgoing ray, even means down-going then Moho-reflected, and values above 2 add Moho
-/// multiples — production passes 1, so the multiple loops never run.
+/// Sole writer of `state.rays`. Production passes [`WaveMode::Sh`] and the direct upgoing
+/// ray, so the multiple loops never run.
 ///
 /// The Moho is taken to be above the first layer of zero thickness, or the
 /// deepest layer if none is zero.
@@ -586,18 +603,18 @@ pub struct GreenFunction {
 /// A source below the whole model is in the half-space, so it is placed just inside the
 /// deepest layer that has thickness.
 ///
-/// Note that if the source layer is shallower than `krec` (index 1) the upgoing segment loop
-/// produces zero segments, which [`build_ray_path`] rejects with a panic.
+/// Note that if the source layer is shallower than the receiver layer (index 1) the upgoing
+/// segment loop produces zero segments, which [`build_ray_path`] rejects with a panic.
 pub fn green_function(
     state: &mut RayState,
     vmod: &VelocityModel,
-    src_depth: f32,
-    range: f32,
-    ray_type: i32,
+    source_depth_km: f32,
+    range_km: f32,
+    shape: RayShape,
     wave_mode: WaveMode,
 ) -> GreenFunction {
-    // The receiver sits in the second layer, index 1.
-    let krec = 1usize;
+    // The receiver sits in the second layer, index 1, below the air layer.
+    let receiver_layer = 1usize;
     let layer_count = vmod.len();
     // Deepest layer, 0-based. The Moho loops below run to `bottom_layer - 1` because they
     // test the thickness of the layer below the one they are on, and the bottom layer is
@@ -605,14 +622,13 @@ pub fn green_function(
     let bottom_layer = layer_count - 1;
 
     state.rays.degeneracy = 1;
-    let hr = vmod[0].thickness_km;
-    let rr = range as f64;
+    let receiver_depth_km = vmod[0].thickness_km;
 
-    // A source below every layer is in the half-space. `sim::source_layer_for` already reads
-    // that case as "the half-space is the bottom layer"; here it also has to be somewhere the
-    // ray geometry can start from, so it goes just inside the base of the deepest layer that
-    // has any thickness.
-    let (ksrc, hs) = match source_layer(vmod, src_depth as f64) {
+    // A source below every layer is in the half-space. `velocity::layer_containing` already
+    // reads that case as "the half-space is the bottom layer"; here it also has to be
+    // somewhere the ray geometry can start from, so it goes just inside the base of the
+    // deepest layer that has any thickness.
+    let (source_layer, source_depth_km) = match source_layer(vmod, source_depth_km as f64) {
         (Some(layer), depth_km) => (layer, depth_km),
         (None, _) => {
             let (deepest, base_km) = deepest_layer_with_thickness(vmod);
@@ -620,34 +636,136 @@ pub fn green_function(
         }
     };
 
-    let mut path = RayPath::new(&mut state.rays, wave_mode);
+    let mut path = SegmentList::new(&mut state.rays, wave_mode);
     // Both arms are the same two operations in a different order, plus the same Moho
-    // bounce repeated `multiples` times. Production passes ray type 1, so `multiples` is
-    // 0 and the bounce loops never run.
-    match RayShape::from_ray_type(ray_type) {
+    // bounce repeated `multiples` times.
+    match shape {
         RayShape::Upgoing { multiples } => {
-            path.ascend_to(ksrc, krec);
+            path.ascend_to(source_layer, receiver_layer);
             for _ in 0..multiples {
-                path.moho_multiple(vmod, krec, bottom_layer);
+                path.moho_multiple(vmod, receiver_layer, bottom_layer);
             }
         }
         RayShape::DownToMoho { multiples } => {
-            let kbot = path.descend_to_moho(vmod, ksrc, bottom_layer);
-            path.ascend_to(kbot, krec);
+            let turning_layer = path.descend_to_moho(vmod, source_layer, bottom_layer);
+            path.ascend_to(turning_layer, receiver_layer);
             for _ in 0..multiples {
-                path.moho_multiple(vmod, krec, bottom_layer);
+                path.moho_multiple(vmod, receiver_layer, bottom_layer);
             }
         }
     }
 
-    build_ray_path(state, vmod, hs, hr);
-    let (p0, t0) = stationary_ray_parameter(state, vmod, rr);
-    let (rpd, qbar) = geometric_spreading(state, vmod, hs, p0, Takeoff::from_ray_type(ray_type));
+    build_ray_path(state, vmod, source_depth_km, receiver_depth_km);
+    let (ray_parameter, travel_time_s) = stationary_ray_parameter(state, vmod, range_km as f64);
+    let (path_length_km, qbar) =
+        geometric_spreading(state, vmod, source_depth_km, ray_parameter, shape.takeoff());
 
     GreenFunction {
-        rp0: p0 as f32,
-        stime: t0 as f32,
-        rpath: rpd as f32,
+        ray_parameter_s_per_km: ray_parameter as f32,
+        travel_time_s: travel_time_s as f32,
+        path_length_km: path_length_km as f32,
         qbar,
+    }
+}
+
+/// Nominal `Q₀` for the straight-line path, which does not trace the medium and so cannot
+/// integrate the real per-layer attenuation.
+const STRAIGHT_LINE_Q: f32 = 150.0;
+/// Nominal shear velocity for the same, km/s.
+const STRAIGHT_LINE_VELOCITY_KM_S: f32 = 3.7;
+/// Where the window starts, as a fraction of the straight-line travel time.
+const STRAIGHT_LINE_WINDOW_START_FRACTION: f32 = 0.7;
+
+/// One ray path from a subfault to the station, after tracing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TracedPath {
+    /// Path length along the ray, km. Not epicentral distance.
+    pub path_length_km: f32,
+    /// `q̄`, the travel-time weighted `Σ t/q` along the path (Ou & Herrmann 1990).
+    pub qbar: f32,
+    /// Take-off angle at the source, radians.
+    pub takeoff_rad: f32,
+    pub onset: Onset,
+}
+
+/// When a path's contribution starts, which the two path models answer differently.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Onset {
+    /// A traced ray arrives this long after the subfault ruptures. The shaping window starts
+    /// before that, by the envelope's lead-in to its peak.
+    Arrival { travel_time_s: f32 },
+    /// The straight-line model places the window start directly, with no lead-in.
+    WindowStart { window_start_s: f32 },
+}
+
+/// Trace one ray from a subfault to the station.
+///
+/// `shear_velocity_km_s` is `β` at the subfault: the straight-line model's attenuation uses it,
+/// and a traced ray's incidence angle follows from it by Snell's law.
+pub fn trace(
+    state: &mut RayState,
+    vmod: &VelocityModel,
+    ray_type: RayType,
+    geometry: &SubfaultRay,
+    shear_velocity_km_s: f32,
+) -> TracedPath {
+    match ray_type {
+        RayType::StraightLine => {
+            let path_length_km = geometry.slant_km;
+            TracedPath {
+                path_length_km,
+                qbar: path_length_km / (shear_velocity_km_s * STRAIGHT_LINE_Q),
+                takeoff_rad: geometry.takeoff_rad,
+                onset: Onset::WindowStart {
+                    window_start_s: STRAIGHT_LINE_WINDOW_START_FRACTION * path_length_km
+                        / STRAIGHT_LINE_VELOCITY_KM_S,
+                },
+            }
+        }
+        RayType::Traced(shape) => {
+            let green = green_function(
+                state,
+                vmod,
+                geometry.depth_km,
+                geometry.horizontal_km,
+                shape,
+                WaveMode::Sh,
+            );
+            // Incidence angle from the ray parameter: `sin(i)/β = p`.
+            let sine = shear_velocity_km_s * green.ray_parameter_s_per_km;
+            let incidence = if sine > 1.0 { 0.5 * PI } else { sine.asin() };
+            TracedPath {
+                path_length_km: green.path_length_km,
+                qbar: green.qbar,
+                // An upgoing ray's take-off is measured from the other pole.
+                takeoff_rad: match shape.takeoff() {
+                    Takeoff::Up => PI - incidence,
+                    Takeoff::Down => incidence,
+                },
+                onset: Onset::Arrival {
+                    travel_time_s: green.travel_time_s,
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ray_codes_split_on_zero_then_parity() {
+        assert_eq!(RayType::from_code(0), Some(RayType::StraightLine));
+        for (code, shape) in [
+            (1, RayShape::Upgoing { multiples: 0 }),
+            (2, RayShape::DownToMoho { multiples: 0 }),
+            (3, RayShape::Upgoing { multiples: 1 }),
+            (4, RayShape::DownToMoho { multiples: 1 }),
+        ] {
+            assert_eq!(RayType::from_code(code), Some(RayType::Traced(shape)));
+        }
+        assert_eq!(RayShape::from_code(0), None, "0 is not a traced ray");
+        assert_eq!(RayType::from_code(-1), None, "negative codes name nothing");
     }
 }

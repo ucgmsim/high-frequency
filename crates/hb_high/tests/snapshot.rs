@@ -26,14 +26,14 @@
 //! [`FLOAT_TOLERANCE`], because the platform `libm` rounds transcendentals differently
 //! from one system to another. A change to the draw structure moves them by far more.
 
-use hb_high::config::{
-    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
-    SiteParameters, SourceParameters,
-};
-use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
+use hb_high::geom::GeoPoint;
+use hb_high::rng::FixtureDraws;
 use hb_high::sim::Simulator;
-use hb_high::state::VelocityModelInput;
 use ndarray::Array2;
+
+#[path = "common/fixtures.rs"]
+mod fixtures;
+use fixtures::{crustal_model, production_config, uniform_fault};
 
 const GOLDEN: &str = "../../harness/golden/snapshot.txt";
 const COMPONENT_COUNT: usize = 3;
@@ -91,95 +91,8 @@ fn summarise(acc: &Array2<f32>, ndata: usize) -> String {
     fields.join(" ")
 }
 
-/// A uniform-slip single-segment fault, `along` by `down` subfaults.
-fn uniform_fault(along: usize, down: usize) -> StochModel {
-    let segment = Segment::builder()
-        .fault_lon_deg(173.0)
-        .fault_lat_deg(-43.0)
-        .along_strike_count(along)
-        .down_dip_count(down)
-        .subfault_length_km(1.5)
-        .subfault_width_km(1.5)
-        .strike_deg(220.0)
-        .dip_deg(60.0)
-        .rake_deg(160.0)
-        .top_depth_km(1.0)
-        .hypocentre_along_strike_km(0.0)
-        .hypocentre_down_dip_km(1.5)
-        .subfaults(vec![
-            Subfault {
-                slip: Slip(50.0),
-                rise_time_s: 0.5,
-                rupture_time_s: 0.0
-            };
-            along * down
-        ])
-        .build();
-    StochModel::new(vec![segment])
-}
-
-/// A smoothly graded crustal model with a thin near-surface layer, so `insert_air_layer`
-/// fires as it does on every production model.
-fn crustal_model(layers: usize) -> VelocityModelInput {
-    let built: Vec<hb_high::state::InputLayer> = (0..layers)
-        .map(|k| {
-            let frac = k as f64 / (layers - 1) as f64;
-            let vsh_km_s = 0.5 + 4.1 * frac;
-            let qs = 50.0 + 150.0 * frac;
-            hb_high::state::InputLayer {
-                depth_km: 0.0,
-                thickness_km: if k == layers - 1 {
-                    0.0
-                } else {
-                    (0.05 + 3.0 * frac) as f32
-                },
-                vp_km_s: vsh_km_s * 1.75,
-                vsh_km_s,
-                density_g_cm3: 1.81 + 1.5 * frac,
-                attenuation_p: (2.0 * qs) as f32,
-                attenuation_s: qs as f32,
-            }
-        })
-        .collect();
-    build_velocity_model(&built, 999.9).expect("valid velocity model")
-}
-
-fn production_config(duration: f32) -> HfConfig {
-    HfConfig {
-        source: SourceParameters {
-            stress_drop_bars: 50.0,
-            czero: 2.0,
-            calpha: 0.1,
-            rupture_velocity: RuptureVelocity {
-                frac: 0.8,
-                shallow: 0.6,
-                deep: 0.6,
-                rv_sig1: 0.1,
-            },
-        },
-        path: PathParameters {
-            rayset: vec![RayType(1)],
-            q_exponent: 0.6,
-            path_duration: PathDurationModel::Gp2010,
-        },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            f_max_hz: 10.0,
-        },
-        record: RecordParameters {
-            duration_s: duration,
-            dt_s: 0.005,
-        },
-    }
-}
-
 #[test]
 fn the_whole_pipeline_matches_the_recorded_snapshot() {
-    // The frozen fixture draw source, not the production generator: a snapshot is only a
-    // pin if the numbers are reproducible, and `FixtureDraws` exists to never change.
-    // SAFETY: set before any simulation runs, and this test is the only reader.
-    unsafe { std::env::set_var("HB_FIXTURE_RNG", "1") };
-
     // Fixed inputs spanning two grid shapes, not a realistic earthquake.
     let vmod = crustal_model(20);
 
@@ -189,14 +102,16 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
         let origin = &slip.segments[0];
 
         for (seed, duration) in [(12345u64, 40.0f32), (987654321, 60.0)] {
-            let station = Station {
-                longitude: origin.fault_lon_deg + 0.3,
-                latitude: origin.fault_lat_deg + 0.3,
-                name: "TEST".to_string(),
+            let station = GeoPoint {
+                lon_deg: origin.fault_lon_deg + 0.3,
+                lat_deg: origin.fault_lat_deg + 0.3,
             };
+            // The frozen fixture draw source, not the production generator: a snapshot is
+            // only a pin if the numbers are reproducible, and `FixtureDraws` exists to never
+            // change.
             let sim = Simulator::new(&production_config(duration), &slip, &vmod)
                 .expect("the fixture slip model is consistent")
-                .run(station, seed);
+                .run_with::<FixtureDraws>(station, seed);
 
             // A snapshot of an all-zero record is a gate that cannot fail.
             let peak = sim.acc.iter().fold(0.0f32, |m, v| m.max(v.abs()));

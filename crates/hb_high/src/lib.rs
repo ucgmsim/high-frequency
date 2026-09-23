@@ -13,7 +13,7 @@
 //! Two papers carry almost all of the method:
 //!
 //! * **Boore (1983)**, *BSSA* 73(6A), 1865–1894 — the point-source stochastic method,
-//!   equations 1–11. That is [`stoc`].
+//!   equations 1–11. That is [`spectrum`].
 //! * **Graves & Pitarka (2010)**, *BSSA* 100(5A), 2095–2123 — the finite-fault wrapper,
 //!   equations 10–17. That is [`sim`].
 //!
@@ -31,16 +31,19 @@
 //! | module | what it does |
 //! | --- | --- |
 //! | [`sim`] | walks the rupture and sums subfault contributions — the entry point |
-//! | [`stoc`] | one subfault's spectrum, and its inverse transform |
+//! | [`spectrum`] | one subfault's spectrum, and its inverse transform |
+//! | [`source`] | slip to moment weights, the moment scaling and the rupture-velocity taper |
 //! | [`radiation`] | double-couple pattern and its conical average |
 //! | [`site`] | quarter-wavelength site amplification |
 //! | [`ray`] | ray tracing, travel times and path attenuation |
+//! | [`path_duration`] | how the shaping window lengthens with distance |
 //! | [`geom`] | subfault geometry on a WGS84 geodesic |
-//! | [`config`] | typed configuration, with defaults resolved in one place |
-//! | [`input`] | the source and receiver data model |
-//! | [`state`] | the velocity model and ray-tracing state |
+//! | [`record`] | the output record, where a contribution lands in it, and what did not fit |
+//! | [`config`] | the caller's configuration, as plain data |
+//! | [`slip_model`] | the fault segments and their subfault grids |
+//! | [`velocity`] | the 1-D velocity model: Moho truncation, the air layer, layer lookup |
 //! | [`fft`] | the transform, and the baseline correction that shares its callers |
-//! | [`rng`] | the generators, and the draw-count contract |
+//! | [`rng`] | the generators, the draw-count contract and sub-stream seeding |
 //!
 //! # Three things that cannot move
 //!
@@ -57,11 +60,14 @@
 pub mod config;
 pub mod fft;
 pub mod geom;
-pub mod input;
+pub mod path_duration;
 pub mod radiation;
 pub mod ray;
+pub mod record;
 pub mod rng;
 pub mod sim;
 pub mod site;
-pub mod state;
-pub mod stoc;
+pub mod slip_model;
+pub mod source;
+pub mod spectrum;
+pub mod velocity;
