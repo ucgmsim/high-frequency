@@ -1,11 +1,13 @@
 name: CI
 
-on: [pull_request]
+on:
+  pull_request:
+  push:
+    branches: [master]
 
 jobs:
   ci:
-    # @main rather than @v1: the v1 tag predates the Cargo.toml-gated Rust jobs.
-    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@main
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@v2
     with:
       # Docstring scope and exclusions come from [tool.npdlint] in pyproject.toml.
       exclude-init: false
