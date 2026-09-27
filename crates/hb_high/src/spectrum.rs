@@ -41,6 +41,35 @@ const FREE_SURFACE_AMPLIFICATION: f32 = 2.0;
 /// Boore (1983) eq. 2 is CGS throughout, so distances and velocities convert on the way in.
 const CM_PER_KM: f32 = 100_000.0;
 
+/// The Saragoni–Hart envelope's shape, Boore (1983) eq. 7–11: where the peak sits as a
+/// fraction of the window, and what fraction of the peak it has decayed to by the end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowShape {
+    /// `ε` — the envelope peak, as a fraction of the window duration.
+    pub peak_fraction: f32,
+    /// `η` — the envelope at the end of the window, as a fraction of the peak.
+    pub end_fraction: f32,
+}
+
+impl WindowShape {
+    /// Boore (1983, p. 1869)'s own values, and the ones Graves & Pitarka (2010) use: the peak
+    /// sits at 0.2 of the duration, decayed to 0.05 of the peak by the end.
+    pub const BOORE_1983: Self = Self {
+        peak_fraction: 0.2,
+        end_fraction: 0.05,
+    };
+
+    /// `b`, Boore (1983) eq. 8 — the envelope's power-law exponent, from the shape alone.
+    ///
+    /// The one place it is formed: the plan's `t^b` table and the refresh's `c` and `a` must
+    /// agree on it exactly.
+    #[inline]
+    pub fn exponent(self) -> f32 {
+        let (eps, eta) = (self.peak_fraction, self.end_fraction);
+        -eps * eta.ln() / (1.0 + eps * (eps.ln() - 1.0))
+    }
+}
+
 /// Transform length, frequency axis, and the transcendentals that depend only on them.
 ///
 /// One of these is built per distinct transform length and reused across every subfault, ray
@@ -62,6 +91,9 @@ pub struct SpectrumPlan {
     ///
     /// `b` comes from the window shape, which is fixed for the whole run.
     pub envelope_power: Array1<f32>,
+    /// The raised-cosine taper [`radiate_and_invert`] applies over the final tenth of the
+    /// time series, `np2/10` samples long.
+    pub taper: Array1<f32>,
 }
 
 impl SpectrumPlan {
@@ -114,7 +146,7 @@ impl SpectrumPlan {
     ///
     /// `np2` comes from [`Self::length_for`] on the production path. It is taken directly so
     /// that a test fixture recording `np2` as an input can build a plan of exactly that length.
-    pub fn new(np2: usize, dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+    pub fn new(np2: usize, dt: f32, q_exponent: f32, window: WindowShape) -> Self {
         assert!(
             np2 >= 2 && np2.is_multiple_of(2),
             "a spectrum plan needs an even length of at least 2, got {np2}"
@@ -127,10 +159,14 @@ impl SpectrumPlan {
         let log_frequency_hz = frequency_hz.mapv(f32::ln);
         let path_exponent = frequency_hz.mapv(|f| f.powf(1.0 - q_exponent));
 
-        // Boore (1983) eq. 8, the envelope shape parameter, from the window shape alone.
-        // Duplicated in `stochastic_spectrum`, which needs `b` again to form `c`.
-        let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
+        let b = window.exponent();
         let envelope_power = Array1::from_iter((0..np2).map(|i| (i as f32 * dt).powf(b)));
+
+        // The `i + 1` is what makes the last sample land on `cos(π)` and the taper reach zero.
+        let taper_len = np2 / 10;
+        let step = PI / taper_len as f32;
+        let taper =
+            Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
 
         SpectrumPlan {
             np2,
@@ -139,6 +175,7 @@ impl SpectrumPlan {
             log_frequency_hz,
             path_exponent,
             envelope_power,
+            taper,
         }
     }
 }
@@ -158,8 +195,7 @@ impl SpectrumPlan {
 pub struct PlanCache {
     dt: f32,
     q_exponent: f32,
-    window_eps: f32,
-    window_eta: f32,
+    window: WindowShape,
     /// Keyed by `np2`. A `HashMap` rather than a sorted `Vec` because the lengths arrive in
     /// no useful order and the count is small either way.
     plans: HashMap<usize, SpectrumPlan>,
@@ -168,12 +204,11 @@ pub struct PlanCache {
 impl PlanCache {
     /// A cache for a run with these fixed window and path parameters.
     #[must_use]
-    pub fn new(dt: f32, q_exponent: f32, window_eps: f32, window_eta: f32) -> Self {
+    pub fn new(dt: f32, q_exponent: f32, window: WindowShape) -> Self {
         Self {
             dt,
             q_exponent,
-            window_eps,
-            window_eta,
+            window,
             plans: HashMap::new(),
         }
     }
@@ -189,11 +224,10 @@ impl PlanCache {
     /// Public so that a caller sizing scratch buffers can ask for the longest plan it will
     /// need before the subfault loop starts.
     pub fn for_length(&mut self, np2: usize) -> &SpectrumPlan {
-        let (dt, q_exponent, window_eps, window_eta) =
-            (self.dt, self.q_exponent, self.window_eps, self.window_eta);
+        let (dt, q_exponent, window) = (self.dt, self.q_exponent, self.window);
         self.plans
             .entry(np2)
-            .or_insert_with(|| SpectrumPlan::new(np2, dt, q_exponent, window_eps, window_eta))
+            .or_insert_with(|| SpectrumPlan::new(np2, dt, q_exponent, window))
     }
 
     /// How many distinct lengths have been built. For tests and profiling.
@@ -211,14 +245,11 @@ impl PlanCache {
 
 /// Spectral-model constants that are fixed for the whole run.
 ///
-/// The cut between this and [`RayPath`] is the useful one: everything here is the same on every
+/// The cut between this and [`SpectrumInputs`] is the useful one: everything here is the same on every
 /// one of the hundreds of thousands of calls in a run, and everything there changes on each.
 pub struct SourceModel {
     pub dt: f32,
-    /// Envelope shape: `ε` is where the peak sits as a fraction of the duration, `η` how far
-    /// the envelope has decayed by the end. Boore (1983) uses 0.2 and 0.05, and so does this.
-    pub window_eps: f32,
-    pub window_eta: f32,
+    pub window: WindowShape,
     /// `σ_p · dl³` — the subfault moment scale, in dyn·cm.
     pub subevent_moment: f32,
     /// `κ`, the near-surface attenuation operator's decay constant, in seconds. Production
@@ -230,7 +261,7 @@ pub struct SourceModel {
 }
 
 /// One `(subfault, ray, component)`'s own path, and the medium at its source.
-pub struct RayPath {
+pub struct SpectrumInputs {
     /// Ray path length, not epicentral distance.
     pub distance_km: f32,
     /// Shaping-window length, Boore (1983) `T_w`.
@@ -309,18 +340,17 @@ impl SpectrumShape {
     /// Rebuild the envelope and the amplitude for one `(subfault, ray, f_max)`.
     ///
     /// See [`SpectrumShape`] for the physics.
-    pub fn refresh(&mut self, plan: &SpectrumPlan, model: &SourceModel, path: &RayPath) {
+    pub fn refresh(&mut self, plan: &SpectrumPlan, model: &SourceModel, path: &SpectrumInputs) {
         // Destructured so that the arithmetic below reads as arithmetic, under the names the
         // derivation uses.
         let &SourceModel {
             dt,
-            window_eps,
-            window_eta,
+            window,
             subevent_moment,
             kappa_s,
             moment_scale,
         } = model;
-        let &RayPath {
+        let &SpectrumInputs {
             distance_km,
             window_s,
             shear_velocity_km_s,
@@ -346,8 +376,8 @@ impl SpectrumShape {
         // parameterisation of Boore (1983) eq. 7–11. `b` and `c` are eq. 8 and 9; they place the
         // envelope peak at a fraction `ε` of the duration and bring it down to a fraction `η` of
         // the peak by the end.
-        let b = -window_eps * window_eta.ln() / (1.0 + window_eps * (window_eps.ln() - 1.0));
-        let c = b / window_eps / window_s;
+        let b = window.exponent();
+        let c = b / window.peak_fraction / window_s;
         // Boore (1983) eq. 11, `a = [(2c)^(2b+1) / Γ(2b+1)]^(1/2)`, which normalises the envelope
         // to unit squared area. The mixed precision is deliberate: `2b+1` is formed in `f32`, the
         // division and sqrt happen in `f64`, and the result narrows back.
@@ -542,6 +572,7 @@ pub fn stochastic_spectrum(
 pub fn radiate_and_invert(
     mut spectrum: ArrayViewMut1<Complex32>,
     radiation: ArrayView1<f32>,
+    taper: ArrayView1<f32>,
     mut time_series: ArrayViewMut1<f32>,
 ) {
     let np2 = spectrum.len();
@@ -573,19 +604,15 @@ pub fn radiate_and_invert(
     let scale = 1.0 / (AVERAGE_RADIATION_PATTERN * HORIZONTAL_PARTITION * np2 as f32);
     azip!((sample in &mut time_series, &bin in &spectrum) *sample = scale * bin.re);
 
-    // Raised-cosine taper over the final tenth, so the transient closes smoothly instead of
-    // being truncated. The `i + 1` is what makes the last sample land on `cos(π)` and the
-    // taper reach zero.
-    let taper_len = np2 / 10;
-    let step = std::f32::consts::PI / taper_len as f32;
-    let taper = Array1::from_shape_fn(taper_len, |i| 0.5 * (1.0 + ((i + 1) as f32 * step).cos()));
-    let mut tail = time_series.slice_mut(s![np2 - taper_len..]);
+    // Raised-cosine taper over the final tenth — the plan's [`SpectrumPlan::taper`] — so the
+    // transient closes smoothly instead of being truncated.
+    let mut tail = time_series.slice_mut(s![np2 - taper.len()..]);
     tail *= &taper;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PlanCache;
+    use super::{PlanCache, WindowShape};
     use libm::tgamma as gamma;
 
     /// The one gamma argument production actually evaluates, pinned so that a future change of
@@ -623,7 +650,7 @@ mod tests {
 
     /// A cache built for a run's parameters.
     fn cache() -> PlanCache {
-        PlanCache::new(0.005, 0.6, 0.2, 0.05)
+        PlanCache::new(0.005, 0.6, WindowShape::BOORE_1983)
     }
 
     /// A shorter window gets a shorter transform.

@@ -22,15 +22,16 @@ use hb_high::radiation::{
     RadiationAngles, horizontal_radiation_spectrum, radiation_pattern, vertical_radiation_spectrum,
 };
 use hb_high::ray::{
-    Takeoff, build_ray_path, cagniard_time, cagniard_time_derivative, geometric_spreading,
-    green_function, stationary_ray_parameter, vertical_slowness,
+    RayShape, RayState, Takeoff, WaveMode, build_ray_path, cagniard_time, cagniard_time_derivative,
+    geometric_spreading, green_function, stationary_ray_parameter, vertical_slowness,
 };
 use hb_high::rng::{Draws, LegacyPcg, Pcg};
 use hb_high::site::{apply_site_amplification, site_amplification_factors, site_gain_curve};
-use hb_high::state::WaveMode;
-use hb_high::state::{Layer, RayState, VelocityModel};
-use hb_high::stoc::stochastic_spectrum;
-use hb_high::stoc::{RayPath, SourceModel, SpectrumPlan, SpectrumShape, radiate_and_invert};
+use hb_high::spectrum::{
+    SourceModel, SpectrumInputs, SpectrumPlan, SpectrumShape, WindowShape, radiate_and_invert,
+    stochastic_spectrum,
+};
+use hb_high::velocity::{Layer, VelocityModel};
 use ndarray::{ArrayView1, ArrayViewMut1};
 
 /// Transform lengths the program actually produces.
@@ -338,7 +339,7 @@ fn bench_ray(c: &mut Criterion) {
                     &v,
                     black_box(28.0),
                     black_box(60.0),
-                    1,
+                    RayShape::Upgoing { multiples: 0 },
                     WaveMode::Sh,
                 ))
             },
@@ -359,10 +360,8 @@ fn bench_spectrum(c: &mut Criterion) {
     for &np2 in NP2S {
         let nf = np2 / 2 + 1;
         let dfr = dfr_axis(np2);
-        // Precomputed per-segment tables, as `SpectrumPlan` supplies in the real program.
-        let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - 0.6)).collect();
-        let b = -0.2f32 * 0.05f32.ln() / (1.0 + 0.2 * (0.2f32.ln() - 1.0));
-        let env_pow: Vec<f32> = (0..np2).map(|i| (i as f32 * DT).powf(b)).collect();
+        // The length-only tables, built once outside the timing as `PlanCache` does.
+        let plan = SpectrumPlan::new(np2, DT, 0.6, WindowShape::BOORE_1983);
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
         let src = spectrum(np2);
         let (fn_, an) = site_table();
@@ -382,23 +381,14 @@ fn bench_spectrum(c: &mut Criterion) {
             &np2,
             |b, &np2| {
                 let mut g = LegacyPcg::seed(5);
-                let plan = SpectrumPlan {
-                    np2,
-                    fold_count: nf,
-                    log_frequency_hz: log_dfr.clone().into(),
-                    path_exponent: path_exp.clone().into(),
-                    envelope_power: env_pow.clone().into(),
-                    frequency_hz: dfr.clone().into(),
-                };
                 let model = SourceModel {
                     dt: DT,
-                    window_eps: 0.2,
-                    window_eta: 0.05,
+                    window: WindowShape::BOORE_1983,
                     subevent_moment: 3.0e22,
                     kappa_s: 0.045,
                     moment_scale: 2.1,
                 };
-                let path = RayPath {
+                let path = SpectrumInputs {
                     distance_km: 60.0,
                     window_s: 2.0,
                     shear_velocity_km_s: 3.2,
@@ -433,6 +423,7 @@ fn bench_spectrum(c: &mut Criterion) {
                         radiate_and_invert(
                             spectrum.view_mut(),
                             radiation.view(),
+                            plan.taper.view(),
                             time_series.view_mut(),
                         )
                     },

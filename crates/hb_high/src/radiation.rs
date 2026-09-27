@@ -25,6 +25,12 @@ const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
 /// is already taken around the theoretical ray, little purely theoretical pattern is allowed.
 pub const CONICAL_FLOOR: f32 = 1.0;
 
+/// How many perturbed orientations the conical average is taken over, for either component.
+///
+/// This is a draw count as well as a sample count: a horizontal average draws five uniforms
+/// per sample, and the vertical average reads this many from each of its two pre-drawn tables.
+pub const CONICAL_SAMPLE_COUNT: usize = 1000;
+
 /// Fault orientation and the ray's arrival direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RadiationAngles {

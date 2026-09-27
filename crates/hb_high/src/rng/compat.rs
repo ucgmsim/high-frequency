@@ -69,7 +69,7 @@ impl LegacyPcg {
 
 impl Draws for LegacyPcg {
     /// Narrowed to `i32` because that is the width this generator's seeding was defined at.
-    fn respawn(&self, seed: u64) -> Self {
+    fn from_seed(seed: u64) -> Self {
         Self::seed(seed as i32)
     }
 
@@ -96,7 +96,7 @@ impl Draws for LegacyPcg {
 
     /// Box-Muller pairs, then the whole vector rescaled so `sum(out^2) == out.len()`.
     ///
-    /// The rescale does not affect the spectrum: [`crate::stoc::stochastic_spectrum`]
+    /// The rescale does not affect the spectrum: [`crate::spectrum::stochastic_spectrum`]
     /// normalises by the realised power, which cancels any scale factor. It is kept only to
     /// reproduce the original stream; [`super::Pcg`] does not carry it.
     ///

@@ -10,6 +10,27 @@
 
 use std::path::PathBuf;
 
+use hb_high::ray::WaveMode;
+
+/// Decode a golden fixture's stored wave mode: `3` SV, `4` SH, `5` P.
+pub fn wave_mode_from_code(code: i32) -> WaveMode {
+    match code {
+        3 => WaveMode::Sv,
+        4 => WaveMode::Sh,
+        5 => WaveMode::P,
+        _ => panic!("wave mode {code} is not one of 3 (SV), 4 (SH) or 5 (P)"),
+    }
+}
+
+/// Re-encode a wave mode for comparison against a golden fixture.
+pub fn wave_mode_code(mode: WaveMode) -> i32 {
+    match mode {
+        WaveMode::Sv => 3,
+        WaveMode::Sh => 4,
+        WaveMode::P => 5,
+    }
+}
+
 /// Sequential reader over a Fortran `access='stream'` file.
 pub struct Golden {
     buf: Vec<u8>,

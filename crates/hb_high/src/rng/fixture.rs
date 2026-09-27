@@ -17,12 +17,7 @@
 
 use rand_core::{Infallible, TryRng, utils};
 
-use super::{Draws, unit_interval_from};
-
-/// SplitMix64's increment and its two finalising multipliers.
-const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-const MIX_A: u64 = 0xBF58_476D_1CE4_E5B9;
-const MIX_B: u64 = 0x94D0_49BB_1331_11EB;
+use super::{Draws, SPLITMIX_GAMMA, splitmix_finalise, unit_interval_from};
 
 /// The validation draw source. See the module docs.
 #[derive(Clone, Debug)]
@@ -35,24 +30,21 @@ impl FixtureDraws {
     /// gate compares two builds at matched seeds, not one build against a constant.
     pub fn seed(irand: i32) -> Self {
         Self {
-            state: (irand as i64 as u64) ^ GAMMA,
+            state: (irand as i64 as u64) ^ SPLITMIX_GAMMA,
         }
     }
 
     /// One SplitMix64 output word. Frozen — see the module docs.
     fn next_word(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(GAMMA);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(MIX_A);
-        z = (z ^ (z >> 27)).wrapping_mul(MIX_B);
-        z ^ (z >> 31)
+        self.state = self.state.wrapping_add(SPLITMIX_GAMMA);
+        splitmix_finalise(self.state)
     }
 }
 
 impl Draws for FixtureDraws {
     /// Narrowed to `i32` because that is what [`FixtureDraws::seed`] takes; the seeds only
     /// have to be distinct, not well spread.
-    fn respawn(&self, seed: u64) -> Self {
+    fn from_seed(seed: u64) -> Self {
         Self::seed(seed as i32)
     }
 

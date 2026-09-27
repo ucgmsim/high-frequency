@@ -23,7 +23,7 @@ The authors state the lineage themselves (Graves & Pitarka 2010, p. 2100):
 > (1995), Beresnev and Atkinson (1997), and Hartzell et al. (1999).
 
 So there are two papers to keep open. **Boore (1983)** gives the point-source stochastic method —
-that is `stoc.rs`. **Graves & Pitarka (2010)** wraps it in a finite fault — that is `sim.rs`.
+that is `spectrum.rs`. **Graves & Pitarka (2010)** wraps it in a finite fault — that is `sim.rs`.
 
 The central idea of the stochastic method is worth stating plainly, because it is unusual and it
 explains the shape of the whole program:
@@ -46,8 +46,8 @@ A_i(f) = Σ_j  C_ij · S_i(f) · G_ij(f) · P(f)
         radiation source   path   high-cut
 ```
 
-`sim.rs` walks the subfaults and rays; `stoc.rs` builds one `A_i(f)` and inverse-transforms it;
-`radiation.rs` supplies `C_ij`; `site.rs` adds the site term; `ray.rs` traces the rays that give
+`sim.rs` walks the subfaults and rays; `spectrum.rs` builds one `A_i(f)` and inverse-transforms it;
+`radiation.rs` supplies `C_ij`; `site.rs` adds the site term; `ray/` traces the rays that give
 `G_ij`.
 
 ---
@@ -64,7 +64,7 @@ at low frequency and flat above `f_c` (Boore 1983, eq. 3, "following Aki (1967) 
 S(ω, ω_c) = ω² / (1 + (ω/ω_c)²)
 ```
 
-In `stoc.rs` this is `a1`, with the constant of proportionality (Boore 1983, eq. 2):
+In `spectrum.rs` this is `a1`, with the constant of proportionality (Boore 1983, eq. 2):
 
 ```
 C = R_θφ · FS · PRTITN / (4π ρ β³)
@@ -98,7 +98,7 @@ S_i(f) = m_i · F · f² · [1 + F(f/f_ci)²]⁻¹     where  F = M₀ / (N σ_p
 
 G&P describe `F` as scaling "the subfault corner frequency to that of the mainshock" while
 ensuring the summed moment matches. **It is worth doing the algebra, because it is not obvious
-from the code.** With `S = F` and `x = (f/f_ci)²`, `stoc.rs` computes
+from the code.** With `S = F` and `x = (f/f_ci)²`, `spectrum.rs` computes
 
 ```
 a1    ∝ M₀ f² / (1 + x)                    the subfault's own spectrum
@@ -113,7 +113,7 @@ went looking for a genuine *two-corner* spectrum — one with a sag between `f_a
 Boore, Di Alessandro & Abrahamson (2014) eq. 4 — you would not find one here.
 
 **A departure from the published method.** G&P define `F` with `N`, linear in subfault count.
-`sim.rs` uses `√N`, matching the production Fortran. G&P (2015) does not revise `F`, so this
+`source.rs` uses `√N`, matching the production Fortran. G&P (2015) does not revise `F`, so this
 is a local choice rather than something the literature licenses.
 
 ---
@@ -126,7 +126,7 @@ Three separate effects, all in `G_ij(f)` (Graves & Pitarka 2010, eq. 14):
 G_ij(f) = (I_i(f)/r_ij) · exp[ −π f^(1−x) Σ_k t_ijk / q_k ]
 ```
 
-**Geometric spreading** is `1/r`: body waves on a spherical wavefront. In `stoc.rs` this is the
+**Geometric spreading** is `1/r`: body waves on a spherical wavefront. In `spectrum.rs` this is the
 division by `distance_cm`. Note it is the *ray path length*, not the epicentral distance.
 
 **Anelastic attenuation** is the exponential. The physical content is `exp(−ωR/2Qβ)`
@@ -136,7 +136,7 @@ factor `Q`. Two refinements matter for reading the code:
 - `Q` is **frequency dependent**, `Q(f) = Q₀ f^x`, which turns `ωR/2Qβ` into `π f^(1−x) · q̄`.
   The code precomputes `f^(1−x)` per frequency bin as `path_exponent`.
 - `q̄` is a **travel-time weighted average** over the layers the ray actually crosses
-  (Ou & Herrmann 1990), accumulated in `ray.rs`. For the straight-ray case it reduces to
+  (Ou & Herrmann 1990), accumulated in `ray/`. For the straight-ray case it reduces to
   `q̄ = R/(βQ)` with `Q = 150β` — i.e. G&P eq. 15's `q_k = a + bβ_k` with `a=0, b=150`.
 
 **Near-surface attenuation (κ)** is the last few hundred metres beneath the station, where most
@@ -148,7 +148,7 @@ decays as a clean exponential in `f` there, parameterised by a single number `κ
 P(f) = exp(−π κ f)
 ```
 
-Production uses `κ = 0.045 s`. In `stoc.rs` the κ term is folded into the same `exp` as the path
+Production uses `κ = 0.045 s`. In `spectrum.rs` the κ term is folded into the same `exp` as the path
 attenuation — one transcendental instead of two, which is an arithmetic identity, not an
 approximation.
 
@@ -208,7 +208,7 @@ where `RP_ij` is "a conically averaged radiation pattern term spanning a range o
 mechanism and take-off angle". `radiation.rs` draws its five perturbations over a 90° full width
 — exactly ±45°.
 
-**The non-obvious part, which no amount of reading the code reveals on its own:** `stoc.rs`'s
+**The non-obvious part, which no amount of reading the code reveals on its own:** `spectrum.rs`'s
 constant `C` carries `R_θφ = 0.63` and `PRTITN = 0.71`, but `radiate_and_invert` later divides by
 `0.63 × 0.71` after multiplying in the conical pattern. **The constants cancel exactly.** Their
 only job is to be cancelled, so that the conically averaged pattern stands where Boore's average
@@ -315,8 +315,8 @@ Code identifier to symbol.
 | `moment_scale` | `F` | Frankel finite-fault factor (§2) | — |
 | `stress_drop_bars` | `Δσ`, `σ_p` | Brune stress parameter | bars |
 | `corner_frequency_hz` | `f_ci` | subfault corner frequency | Hz |
-| `czero` | `c₀` | corner-frequency constant (= 2.0) | — |
-| `calpha` | `c_α` | `α_τ` coefficient (= 0.1) | — |
+| `corner_frequency_constant` | `c₀` | corner-frequency constant (= 2.0) | — |
+| `corner_frequency_alpha` | `c_α` | `α_τ` coefficient (= 0.1) | — |
 | `avg_subfault_km` | `dl` | average subfault dimension | km |
 | `total_moment_dyn_cm` | `M_o` | total seismic moment | dyn·cm |
 | `Slip` | `d_i` | subfault slip, as the `.stoch` file gives it | cm |
@@ -331,10 +331,10 @@ Code identifier to symbol.
 | `density_g_cm3`                  | `ρ`          | density at the source                | g/cm³ |
 | `path_length_km`, `distance_km`  | `R`, `r_ij`  | ray path length (**not** epicentral) | km    |
 | `qbar`                           | `q̄`          | travel-time weighted `Σt/q`          | s     |
-| `q_exponent`                     | `x`          | exponent in `Q(f) = Q₀f^x`           | —     |
+| `q_frequency_exponent`           | `x`          | exponent in `Q(f) = Q₀f^x`           | —     |
 | `attenuation_s`, `attenuation_p` | `Q_s`, `Q_p` | per-layer quality factors            | —     |
 | `kappa_s`                        | `κ`          | near-surface decay (= 0.045)         | s     |
-| `f_max_hz`                       | `f_max`      | high-cut corner                      | Hz    |
+| `fmax_hz`                        | `f_max`      | high-cut corner                      | Hz    |
 | `p_traversals`, `s_traversals`   | —            | per-layer path multipliers           | —     |
 
 ### Time series
@@ -342,8 +342,8 @@ Code identifier to symbol.
 | code | symbol | meaning | units |
 |---|---|---|---|
 | `window_s` | `T_w` | shaping-window length | s |
-| `window_peak_fraction`, `window_end_fraction` | `ε`, `η` | envelope shape (= 0.2, 0.05) | — |
-| `np2` | — | FFT length, a power of two | samples |
+| `WindowShape::peak_fraction`, `::end_fraction` | `ε`, `η` | envelope shape (= 0.2, 0.05) | — |
+| `np2` | — | FFT length, 7-smooth and even | samples |
 | `fold_count` | — | positive-frequency bins, `np2/2 + 1` | — |
 | `dt` | `Δt` | sample interval | s |
 | `ndata` | — | output samples per component | — |
@@ -393,7 +393,7 @@ needs a domain judgement, not a tidy-up.
 If you are new to this and want the shortest path to understanding:
 
 1. **Boore (1983)** §"The essence of the method" and eq. 1–11 — four pages, and it is the whole
-   of `stoc.rs`.
+   of `spectrum.rs`.
 2. **Graves & Pitarka (2010)** §"High-Frequency Simulation", p. 2100 — eq. 10–17, two columns,
    and it is the whole of `sim.rs`.
 3. §2 and §5 of this document, for the two things the code does that the papers do not make

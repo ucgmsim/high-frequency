@@ -5,10 +5,69 @@
 //! amplification is the impedance contrast between the source region and the column averaged
 //! down to that depth.
 
-use ndarray::{ArrayView1, ArrayViewMut1, Axis, azip, s};
+use std::sync::OnceLock;
+
+use ndarray::{Array1, ArrayView1, ArrayViewMut1, Axis, azip, s};
 
 use crate::fft::Complex32;
-use crate::state::VelocityModel;
+use crate::velocity::VelocityModel;
+
+/// The frequencies the amplification factors are tabulated at, Hz. The curve applied to a
+/// spectrum is interpolated between them in `ln f`; see [`site_gain_curve`].
+pub const TABLE_FREQUENCY_HZ: [f32; 20] = [
+    0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00, 7.00,
+    10.00, 20.00, 30.00, 50.00, 70.00,
+];
+
+/// The site response of one velocity model, for a source in any of its layers.
+///
+/// The amplification factors depend only on the model and the source layer, so each layer's
+/// are computed once, the first time a source in that layer asks, and shared from then on.
+/// Lazily rather than up front because only the layers that hold a subfault are ever asked
+/// for, and [`site_amplification_factors`] is only defined for those.
+pub struct SiteResponse {
+    /// `ln` of [`TABLE_FREQUENCY_HZ`].
+    table_log_frequency: Array1<f32>,
+    /// One slot per layer of the model.
+    factors_by_layer: Vec<OnceLock<Array1<f32>>>,
+}
+
+impl SiteResponse {
+    pub fn new(vmod: &VelocityModel) -> Self {
+        Self {
+            table_log_frequency: Array1::from_iter(TABLE_FREQUENCY_HZ.iter().map(|f| f.ln())),
+            factors_by_layer: (0..vmod.len()).map(|_| OnceLock::new()).collect(),
+        }
+    }
+
+    /// The linear gain per bin for a source in `source_layer`, on a transform's frequency axis.
+    ///
+    /// `vmod` must be the model this was built for.
+    pub fn gain_curve(
+        &self,
+        vmod: &VelocityModel,
+        source_layer: usize,
+        log_frequency_hz: ArrayView1<f32>,
+        gain: ArrayViewMut1<f32>,
+    ) {
+        let factors = self.factors_by_layer[source_layer].get_or_init(|| {
+            let mut factors = Array1::zeros(TABLE_FREQUENCY_HZ.len());
+            site_amplification_factors(
+                vmod,
+                source_layer,
+                self.table_log_frequency.view(),
+                factors.view_mut(),
+            );
+            factors
+        });
+        site_gain_curve(
+            log_frequency_hz,
+            self.table_log_frequency.view(),
+            factors.view(),
+            gain,
+        );
+    }
+}
 
 /// Quarter-wavelength amplification factors, one per frequency in the site table.
 ///
@@ -100,7 +159,7 @@ pub fn site_amplification_factors(
 /// # `log_frequency_hz` must be sorted ascending
 ///
 /// The interpolation cursor only ever advances, so an unsorted axis silently produces wrong
-/// factors rather than an error. [`crate::stoc::SpectrumPlan`] is the only producer and does
+/// factors rather than an error. [`crate::spectrum::SpectrumPlan`] is the only producer and does
 /// emit ascending frequencies.
 pub fn site_gain_curve(
     // `ln(frequency_hz[i])`, from the transform's plan. Index 0 is never read: `ln(0)` has no
@@ -182,7 +241,7 @@ pub fn apply_site_amplification(spectrum: &mut [Complex32], gain: ArrayView1<f32
 
     // Re-impose Hermitian symmetry: bin `np2 - k` takes `conj(bin k)` for k in `1..np`, as a
     // reversed view of the head assigned into the tail, the same as the mirror in
-    // `stoc::stochastic_spectrum`. For np2 = 16: dest 9 takes src 7 and dest 15 takes src 1.
+    // `spectrum::stochastic_spectrum`. For np2 = 16: dest 9 takes src 7 and dest 15 takes src 1.
     let mut view = ArrayViewMut1::from(spectrum);
     let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
     azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
