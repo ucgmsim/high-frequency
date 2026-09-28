@@ -12,10 +12,10 @@ use ndarray::{ArrayView1, ArrayViewMut1, azip};
 pub const CONE_WIDTH_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
 /// Half-width of the vertical component's take-off cone.
 const VERTICAL_CONE_HALF_WIDTH_RAD: f32 = 40.0 * (std::f32::consts::PI / 180.0);
-/// Straight down: the shallowest take-off the vertical average accepts.
-const DOWNGOING_MIN_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
+/// Horizontal: the shallowest take-off the vertical average accepts.
+const UPGOING_MIN_RAD: f32 = 90.0 * (std::f32::consts::PI / 180.0);
 /// Straight up.
-const DOWNGOING_MAX_RAD: f32 = 180.0 * (std::f32::consts::PI / 180.0);
+const UPGOING_MAX_RAD: f32 = 180.0 * (std::f32::consts::PI / 180.0);
 /// One full azimuthal turn.
 const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
 
@@ -255,7 +255,7 @@ pub fn horizontal_radiation_spectrum(
 /// The vertical needs no horizontal projection, so the pattern is just `SV * sin(takeoff)`,
 /// and the average is taken over take-off angle and azimuth only.
 ///
-/// The take-off range is clamped to `[90°, 180°]`: only downgoing directions contribute.
+/// The take-off range is clamped to `[90°, 180°]`: only upgoing directions contribute.
 pub fn vertical_radiation_spectrum(
     angles: &RadiationAngles,
     frequency_hz: ArrayView1<f32>,
@@ -277,9 +277,9 @@ pub fn vertical_radiation_spectrum(
 
     let theoretical_gain = sv_radiation(*angles) * takeoff_rad.sin();
 
-    // Only downgoing directions contribute, so the cone is clipped to [90°, 180°].
-    let takeoff_min_rad = (takeoff_rad - VERTICAL_CONE_HALF_WIDTH_RAD).max(DOWNGOING_MIN_RAD);
-    let takeoff_max_rad = (takeoff_rad + VERTICAL_CONE_HALF_WIDTH_RAD).min(DOWNGOING_MAX_RAD);
+    // Only upgoing directions contribute, so the cone is clipped to [90°, 180°].
+    let takeoff_min_rad = (takeoff_rad - VERTICAL_CONE_HALF_WIDTH_RAD).max(UPGOING_MIN_RAD);
+    let takeoff_max_rad = (takeoff_rad + VERTICAL_CONE_HALF_WIDTH_RAD).min(UPGOING_MAX_RAD);
 
     // The two uniform arrays are consumed in lockstep, one pair per sample. They are filled by
     // two separate sequential passes -- the first `sample_count` draws into `a`, the next into
@@ -321,4 +321,26 @@ pub fn vertical_radiation_spectrum(
             conical_gain
         };
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    /// `sim::trace_ray` sets `takeoff_rad = PI - incidence` for the production `Upgoing` ray,
+    /// with `incidence` in `[0, PI/2]`, landing in `[PI/2, PI]`. That is the range the vertical
+    /// average's take-off clamp accepts, so the clamp keeps *upgoing* directions, not
+    /// "downgoing" ones.
+    #[test]
+    fn upgoing_bounds_match_the_upgoing_takeoff_convention() {
+        assert_eq!(UPGOING_MIN_RAD, PI / 2.0);
+        assert_eq!(UPGOING_MAX_RAD, PI);
+
+        for incidence_millis in 0..=1570 {
+            let incidence = incidence_millis as f32 / 1000.0;
+            let takeoff_rad = PI - incidence;
+            assert!((UPGOING_MIN_RAD..=UPGOING_MAX_RAD).contains(&takeoff_rad));
+        }
+    }
 }
