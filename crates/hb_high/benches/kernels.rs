@@ -366,10 +366,7 @@ fn bench_spectrum(c: &mut Criterion) {
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
         let src = spectrum(np2);
         let (fn_, an) = site_table();
-        let mut rdna = vec![0.0; np2];
-        for slot in rdna.iter_mut().take(nf) {
-            *slot = 0.7;
-        }
+        let rdna = vec![0.7; nf];
 
         group.throughput(Throughput::Elements(np2 as u64));
 
