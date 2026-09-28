@@ -190,7 +190,7 @@ impl StochModel {
                 * seg.subfault_width_km;
 
             let zhyp =
-                seg.top_depth_km + seg.hypocentre_down_dip_km / seg.dip_deg.to_radians().sin();
+                seg.top_depth_km + seg.hypocentre_down_dip_km * seg.dip_deg.to_radians().sin();
             if zhyp > max_hypocentre_depth_km {
                 max_hypocentre_depth_km = zhyp;
             }
