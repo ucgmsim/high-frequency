@@ -899,15 +899,27 @@ impl SubfaultSource {
     /// both. A contribution ruled out here is ruled out for real: this prunes, it does not
     /// approximate.
     ///
+    /// [`RayKind::StraightRay`] is not traced, so it does not go through `green.stime` at
+    /// all: its real start is `trace_ray`'s own formula, with no `ε·window` lead-in. When
+    /// `rayset` contains one, that exact formula is used instead wherever it is earlier, so
+    /// the bound stays valid for every ray kind actually requested.
+    ///
     /// # What it saves
     ///
     /// It gates the ray tracing, not just the synthesis. `trace_ray` runs an iterative
     /// root-find for the stationary ray parameter and a per-layer spreading integral, and a
     /// contribution that cannot reach the record needs neither. Two divisions decide it.
-    fn earliest_start_sample(&self, run: &RunScalars) -> i32 {
+    fn earliest_start_sample(&self, run: &RunScalars, rayset: &[RayType]) -> i32 {
         let travel_time_s = self.geometry.slant_km / run.max_shear_velocity_km_s;
         let window_start_s = travel_time_s - run.window_peak_fraction * self.window_s;
-        (self.rupture_time_s / run.dt).trunc() as i32 + (window_start_s / run.dt).trunc() as i32
+        let mut bound_s = window_start_s;
+        if rayset.iter().any(|ray| ray.kind() == RayKind::StraightRay) {
+            let straight_ray_window_start_s = STRAIGHT_RAY_WINDOW_START_FRACTION
+                * self.geometry.slant_km
+                / STRAIGHT_RAY_VELOCITY_KM_S;
+            bound_s = bound_s.min(straight_ray_window_start_s);
+        }
+        (self.rupture_time_s / run.dt).trunc() as i32 + (bound_s / run.dt).trunc() as i32
     }
 }
 
@@ -1085,8 +1097,9 @@ fn subfault_pass(
 
         // Ruled out before a single ray is traced; the bound is exact, see `SubfaultSource::earliest_start_sample`. Every ray of this subfault
         // shares the bound, because it is built from the straight-line distance rather than
-        // from any particular path.
-        let earliest = source.earliest_start_sample(run);
+        // from any particular path (`rayset` only narrows it further when a straight ray is
+        // requested).
+        let earliest = source.earliest_start_sample(run, rayset);
         if earliest > run.ndata as i32 {
             census.pairs_attempted += rayset.len();
             census.pairs_outside_record += rayset.len();
@@ -1657,5 +1670,96 @@ mod tests {
             accumulate_reference(&mut want, &subfault_acc, 2.0, start, np2, ndata);
             assert_eq!(got, want, "start_sample = {start}");
         }
+    }
+
+    /// `earliest_start_sample`'s docstring claims the bound is exact for every ray kind, but
+    /// its formula uses the traced-ray lead-in (`ε·window`) rather than the straight-ray one
+    /// (`0.7·R/3.7`, no lead-in). For a slow `max_shear_velocity_km_s` the traced-ray bound
+    /// falls *after* the real straight-ray start, so a subfault whose only ray is the straight
+    /// ray gets pruned even though its contribution reaches the record.
+    ///
+    /// `R = 300 km`, `vmax = 4.0 km/s`, `window = 60 s`: bound = `300/4.0 - 0.2*60 = 63.0 s`,
+    /// real start = `0.7*300/3.7 = 56.76 s` (issue #7's own numbers).
+    #[test]
+    fn earliest_start_sample_bounds_the_straight_ray_start() {
+        let run = RunScalars {
+            dt: 0.1,
+            fmax_hz: 0.0,
+            kappa_s: 0.0,
+            q_exponent: 0.0,
+            window_peak_fraction: 0.2,
+            window_end_fraction: 0.05,
+            corner_const: 0.0,
+            calpha: 0.0,
+            rupture_velocity_sigma: 0.0,
+            avg_subfault_km: 1.0,
+            subevent_moment: 0.0,
+            moment_scale: 1.0,
+            conical_sample_count: 0,
+            site_table_len: 0,
+            ndata: 10_000,
+            max_shear_velocity_km_s: 4.0,
+        };
+
+        let source = SubfaultSource {
+            geometry: SubfaultRay {
+                slant_km: 300.0,
+                azimuth_rad: 0.0,
+                takeoff_rad: 0.0,
+                horiz_km: 300.0,
+                depth_km: 0.0,
+            },
+            weight: MomentWeight(1.0),
+            rupture_time_s: 0.0,
+            window_s: 60.0,
+            layer: 0,
+            shear_velocity_km_s: 4.0,
+            density_g_cm3: 2.7,
+            corner_frequency_hz: 1.0,
+        };
+
+        let vmod: VelocityModel = Vec::new();
+        let rupture = RuptureVelocityTaper {
+            frac: 0.8,
+            shallow_factor: 1.0,
+            deep_factor: 1.0,
+            shallow_top_km: 0.0,
+            shallow_base_km: 0.0,
+            deep_top_km: 0.0,
+            deep_base_km: 0.0,
+        };
+        let deviates = Deviates {
+            radv_uniform_a: Vec::new(),
+            radv_uniform_b: Vec::new(),
+        };
+        let siteamp_log_freq: Array1<f32> = Array1::zeros(0);
+        let rayset = [RayType(0)];
+        let ctx = RunContext {
+            vmod: &vmod,
+            rupture: &rupture,
+            run: &run,
+            rayset: &rayset,
+            deviates: &deviates,
+            siteamp_log_freq: &siteamp_log_freq,
+            station_seed: 0,
+        };
+        let segment = SegmentAngles {
+            strike_rad: 0.0,
+            dip_rad: 0.0,
+            rake_rad: 0.0,
+            corner_coeff: 0.0,
+        };
+
+        let mut state = RayState::default();
+        let ray = trace_ray(&mut state, &source, RayType(0), &ctx);
+        let arrival = arrival_time_and_angles(&ray, &source, &segment, &run);
+
+        let earliest = source.earliest_start_sample(&run, &rayset);
+        assert!(
+            earliest <= arrival.start_sample,
+            "earliest_start_sample ({earliest}) must not exceed the real straight-ray start \
+             ({})",
+            arrival.start_sample
+        );
     }
 }
