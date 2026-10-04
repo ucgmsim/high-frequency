@@ -16,13 +16,6 @@ jobs:
       enable-coverage: true
       cov-package: hf_simulation
       cov-fail-under: 95
-
-  # The shared workflow tests the debug profile only. Debug and release must agree,
-  # because LLVM folds `powf(x, 0.5)` into `sqrt(x)` at -O2 but not at -O0.
-  rust-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked --release
+      # Debug and release must agree, because LLVM folds `powf(x, 0.5)` into
+      # `sqrt(x)` at -O2 but not at -O0, so test the release profile too.
+      rust-test-release: true
