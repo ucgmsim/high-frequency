@@ -63,14 +63,10 @@ fn config() -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![RayType(1)],
-            q_exponent: 0.6,
             path_duration: PathDurationModel::from_deck(11)
                 .expect("11 is Boore & Thompson (2014) WUS"),
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            f_max_hz: 10.0,
-        },
+        site: SiteParameters { f_max_hz: 10.0 },
         record: RecordParameters {
             duration_s: DURATION_S,
             dt_s: DT_S,
@@ -120,6 +116,8 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
         let values: Vec<f64> = (0..count)
             .map(|k| {
                 let station = Station {
+                    kappa_s: 0.045,
+                    q_exponent: 0.6,
                     name: name.to_owned(),
                     latitude,
                     longitude,
@@ -175,6 +173,8 @@ fn scaling(
         let (mut pairs, mut computed, mut landed) = (0usize, 0usize, 0usize);
         for (index, (name, latitude, longitude)) in stations.iter().take(count).enumerate() {
             let station = Station {
+                kappa_s: 0.045,
+                q_exponent: 0.6,
                 name: name.clone(),
                 latitude: *latitude,
                 longitude: *longitude,
@@ -418,6 +418,8 @@ fn main() {
             continue;
         }
         let station = Station {
+            kappa_s: 0.045,
+            q_exponent: 0.6,
             name: name.to_owned(),
             latitude,
             longitude,

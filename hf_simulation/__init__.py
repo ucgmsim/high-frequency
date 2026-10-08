@@ -78,6 +78,8 @@ from hf_simulation._hf_simulation import (
 
 __all__ = [
     "COMPONENTS",
+    "DEFAULT_KAPPA_S",
+    "DEFAULT_Q_FREQUENCY_EXPONENT",
     "FaultSegment",
     "HfConfig",
     "PathDurationModel",
@@ -130,6 +132,12 @@ class PathDurationModel(enum.IntEnum):
 # Component order of the returned array's first axis. It matches the production Fortran's
 # output files and the order `hf_sim.py` labels its xarray dimension with.
 COMPONENTS = ("090", "000", "ver")
+
+# Production values of the per-station parameters, used when a caller passes none.
+DEFAULT_KAPPA_S = 0.045
+"""Near-surface attenuation, seconds. Anderson and Hough (1984)."""
+DEFAULT_Q_FREQUENCY_EXPONENT = 0.6
+"""The x in Q(f) = Q0 * f^x."""
 
 # Bytes of BLAKE2b digest used for a station-name hash. Eight gives a 64-bit value with no
 # collisions across the largest station lists in use (5000 names measured clean).
@@ -265,25 +273,27 @@ class SourceParameters:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PathParameters:
-    """The path from source to site: which rays, and how the medium attenuates."""
+    """The path from source to site shared by every station.
+
+    The Q frequency exponent varies by station, so it is an argument of
+    :meth:`Simulator.run_stations` instead.
+    """
 
     rayset: tuple[Ray, ...] = (Ray.DIRECT,)
     """Ray paths to sum over."""
-    q_frequency_exponent: float = 0.6
-    """The x in Q(f) = Q0 * f^x."""
     path_duration_model: PathDurationModel = PathDurationModel.GRAVES_PITARKA_2010
     """How record duration grows with distance."""
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SiteParameters:
-    """The near-surface: what happens in the last few hundred metres.
+    """The near-surface parameters shared by every station.
 
     Quarter-wavelength site amplification is always applied and is not a field here.
+    Kappa varies by station, so it is an argument of :meth:`Simulator.run_stations`
+    instead.
     """
 
-    kappa_s: float = 0.045
-    """Near-surface attenuation, seconds. Anderson and Hough (1984)."""
     fmax_hz: float = 10.0
     """High-frequency cutoff."""
 
@@ -336,12 +346,9 @@ class HfConfig:
             ),
             path=_RustPathParameters(
                 rayset=[int(ray) for ray in self.path.rayset],
-                q_frequency_exponent=self.path.q_frequency_exponent,
                 path_duration_model=int(self.path.path_duration_model),
             ),
-            site=_RustSiteParameters(
-                kappa_s=self.site.kappa_s, fmax_hz=self.site.fmax_hz
-            ),
+            site=_RustSiteParameters(fmax_hz=self.site.fmax_hz),
             record=_RustRecordParameters(
                 duration_s=self.record.duration_s, dt=self.record.dt
             ),
@@ -395,6 +402,10 @@ class Simulator:
         latitude_deg: npt.NDArray[np.float32],
         longitude_deg: npt.NDArray[np.float32],
         station_seed: npt.NDArray[np.uint64],
+        kappa_s: float | npt.NDArray[np.float32] = DEFAULT_KAPPA_S,
+        q_frequency_exponent: float | npt.NDArray[np.float32] = (
+            DEFAULT_Q_FREQUENCY_EXPONENT
+        ),
     ) -> npt.NDArray[np.float32]:
         """Simulate a batch of stations.
 
@@ -406,6 +417,12 @@ class Simulator:
             Station longitudes, one per station.
         station_seed : npt.NDArray[np.uint64]
             Per-station seeds, one per station. See :func:`station_seeds`.
+        kappa_s : float or npt.NDArray[np.float32], optional
+            Near-surface attenuation, seconds, one per station. A scalar applies to every
+            station. Default :data:`DEFAULT_KAPPA_S`.
+        q_frequency_exponent : float or npt.NDArray[np.float32], optional
+            The x in Q(f) = Q0 * f^x, one per station. A scalar applies to every station.
+            Default :data:`DEFAULT_Q_FREQUENCY_EXPONENT`.
 
         Returns
         -------
@@ -416,21 +433,38 @@ class Simulator:
         Raises
         ------
         ValueError
-            If the three arrays do not have one entry per station, or the batch is empty.
+            If the arrays do not have one entry per station, or the batch is empty.
         """
         latitude = np.ascontiguousarray(latitude_deg, dtype=np.float32)
         longitude = np.ascontiguousarray(longitude_deg, dtype=np.float32)
         seeds = np.ascontiguousarray(station_seed, dtype=np.uint64)
+        # A scalar means every station; `broadcast_to` gives a read-only view, so it is
+        # copied to a contiguous array the Rust side can take as a slice.
+        kappa = np.ascontiguousarray(
+            np.broadcast_to(np.asarray(kappa_s, np.float32), latitude.shape)
+            if np.ndim(kappa_s) == 0
+            else np.asarray(kappa_s, np.float32)
+        )
+        q_exponent = np.ascontiguousarray(
+            np.broadcast_to(
+                np.asarray(q_frequency_exponent, np.float32), latitude.shape
+            )
+            if np.ndim(q_frequency_exponent) == 0
+            else np.asarray(q_frequency_exponent, np.float32)
+        )
 
         lengths = {
             "latitude_deg": latitude.shape,
             "longitude_deg": longitude.shape,
             "station_seed": seeds.shape,
+            "kappa_s": kappa.shape,
+            "q_frequency_exponent": q_exponent.shape,
         }
         if len(set(lengths.values())) != 1:
             raise ValueError(
-                "latitude_deg, longitude_deg and station_seed must have one entry per "
-                f"station; got shapes {lengths}"
+                "latitude_deg, longitude_deg, station_seed, kappa_s and "
+                "q_frequency_exponent must have one entry per station; got shapes "
+                f"{lengths}"
             )
         if latitude.size == 0:
             raise ValueError("no stations given, so there is nothing to simulate")
@@ -439,4 +473,6 @@ class Simulator:
             latitude_deg=latitude,
             longitude_deg=longitude,
             station_seed=seeds,
+            kappa_s=kappa,
+            q_frequency_exponent=q_exponent,
         )

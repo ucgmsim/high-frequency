@@ -86,13 +86,9 @@ fn production_config() -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![RayType(1)],
-            q_exponent: 0.6,
             path_duration: PathDurationModel::Gp2010,
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            f_max_hz: 10.0,
-        },
+        site: SiteParameters { f_max_hz: 10.0 },
         record: RecordParameters {
             duration_s: 40.0,
             dt_s: 0.005,
@@ -117,6 +113,8 @@ fn bench_whole(c: &mut Criterion) {
         }
         let slip = uniform_fault(along, down);
         let station = Station {
+            kappa_s: 0.045,
+            q_exponent: 0.6,
             longitude: 173.3,
             latitude: -42.7,
             name: "BENCH".to_string(),
@@ -161,6 +159,8 @@ fn bench_batch(c: &mut Criterion) {
 
     let stations: Vec<Station> = (0..BATCH_STATIONS)
         .map(|i| Station {
+            kappa_s: 0.045,
+            q_exponent: 0.6,
             // Spread over about a degree, so the batch is not one geometry repeated.
             longitude: 173.3 + 0.05 * i as f32,
             latitude: -42.7 - 0.05 * i as f32,
