@@ -159,13 +159,9 @@ fn production_config(duration: f32) -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![RayType(1)],
-            q_exponent: 0.6,
             path_duration: PathDurationModel::Gp2010,
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            f_max_hz: 10.0,
-        },
+        site: SiteParameters { f_max_hz: 10.0 },
         record: RecordParameters {
             duration_s: duration,
             dt_s: 0.005,
@@ -190,6 +186,8 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
 
         for (seed, duration) in [(12345u64, 40.0f32), (987654321, 60.0)] {
             let station = Station {
+                kappa_s: 0.045,
+                q_exponent: 0.6,
                 longitude: origin.fault_lon_deg + 0.3,
                 latitude: origin.fault_lat_deg + 0.3,
                 name: "TEST".to_string(),

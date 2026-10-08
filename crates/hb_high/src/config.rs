@@ -263,24 +263,23 @@ pub struct SourceParameters {
     pub rupture_velocity: RuptureVelocity,
 }
 
-/// The path from source to site: which rays, and how the medium attenuates along them.
+/// The path from source to site that is shared by every station: which rays, and how
+/// duration grows with distance.
+///
+/// The path attenuation exponent varies by station, so it lives on [`crate::input::Station`].
 #[derive(Clone, Debug)]
 pub struct PathParameters {
     /// Which ray paths to sum over. Production is `[RayType(1)]`.
     pub rayset: Vec<RayType>,
-    /// `x` in `Q(f) = Q₀·f^x`, the frequency exponent of the quality factor.
-    pub q_exponent: f32,
     pub path_duration: PathDurationModel,
 }
 
-/// The near-surface: what happens in the last few hundred metres.
+/// The near-surface parameters shared by every station.
 ///
 /// Quarter-wavelength site amplification ([`crate::site`]) is always applied, so it has no
-/// field here.
+/// field here. `κ` varies by station, so it lives on [`crate::input::Station`].
 #[derive(Clone, Debug)]
 pub struct SiteParameters {
-    /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
-    pub kappa_s: f32,
     /// `f_max` — the high-cut corner, Hz. See `PHYSICS.md` §3 on the `f_max`-versus-`κ`
     /// question; both parameters exist because both physical interpretations do.
     pub f_max_hz: f32,
@@ -298,8 +297,9 @@ pub struct RecordParameters {
 /// Everything needed to simulate, with nothing about where the inputs came from or where the
 /// output goes.
 ///
-/// Nothing per-station lives here — not the seed, not the location — because one of these
-/// drives a whole batch of stations through [`crate::sim::Simulator`].
+/// Nothing per-station lives here — not the seed, not the location, not `κ` or the `Q`
+/// exponent — because one of these drives a whole batch of stations through
+/// [`crate::sim::Simulator`]. Those are on [`crate::input::Station`].
 #[derive(Clone, Debug)]
 pub struct HfConfig {
     pub source: SourceParameters,

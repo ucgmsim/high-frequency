@@ -78,20 +78,14 @@ class SourceParameters:
     ) -> None: ...
 
 class PathParameters:
-    """The path from source to site."""
+    """The path from source to site shared by every station."""
 
-    def __init__(
-        self,
-        *,
-        rayset: list[int],
-        q_frequency_exponent: float,
-        path_duration_model: int,
-    ) -> None: ...
+    def __init__(self, *, rayset: list[int], path_duration_model: int) -> None: ...
 
 class SiteParameters:
-    """The near-surface."""
+    """The near-surface parameters shared by every station."""
 
-    def __init__(self, *, kappa_s: float, fmax_hz: float) -> None: ...
+    def __init__(self, *, fmax_hz: float) -> None: ...
 
 class RecordParameters:
     """The shape of the record to produce."""
@@ -125,4 +119,6 @@ class Simulator:
         latitude_deg: FloatArray1D,
         longitude_deg: FloatArray1D,
         station_seed: SeedArray,
+        kappa_s: FloatArray1D,
+        q_frequency_exponent: FloatArray1D,
     ) -> FloatArray3D: ...
