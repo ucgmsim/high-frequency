@@ -289,13 +289,18 @@ pub fn insert_air_layer(mut vmod_in: VelocityModelInput) -> VelocityModelInput {
     vmod_in
 }
 
-/// One station.
+/// One station, with the site and path parameters that vary from station to station.
 #[derive(Clone, Debug)]
 pub struct Station {
     pub longitude: f32,
     pub latitude: f32,
     /// Station name.
     pub name: String,
+    /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
+    pub kappa_s: f32,
+    /// `x` in `Q(f) = Q₀·f^x`, the frequency exponent of the quality factor along this
+    /// station's paths.
+    pub q_exponent: f32,
 }
 
 #[cfg(test)]

@@ -240,7 +240,8 @@ impl PySourceParameters {
     }
 }
 
-/// The path from source to site: which rays, and how the medium attenuates along them.
+/// The path from source to site shared by every station: which rays, and how duration grows
+/// with distance.
 #[pyclass(frozen, name = "PathParameters")]
 pub struct PyPathParameters {
     inner: PathParameters,
@@ -249,12 +250,8 @@ pub struct PyPathParameters {
 #[pymethods]
 impl PyPathParameters {
     #[new]
-    #[pyo3(signature = (*, rayset, q_frequency_exponent, path_duration_model))]
-    fn new(
-        rayset: Vec<i32>,
-        q_frequency_exponent: f32,
-        path_duration_model: i32,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (*, rayset, path_duration_model))]
+    fn new(rayset: Vec<i32>, path_duration_model: i32) -> PyResult<Self> {
         // Only the checks Python cannot make for itself: this one decodes a non-contiguous
         // integer set that the Rust enum owns.
         let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
@@ -265,14 +262,13 @@ impl PyPathParameters {
         Ok(Self {
             inner: PathParameters {
                 rayset: rayset.into_iter().map(RayType).collect(),
-                q_exponent: q_frequency_exponent,
                 path_duration,
             },
         })
     }
 }
 
-/// The near-surface: what happens in the last few hundred metres.
+/// The near-surface parameters shared by every station.
 ///
 /// Quarter-wavelength site amplification is always applied and is not a field here.
 #[pyclass(frozen, name = "SiteParameters")]
@@ -283,13 +279,10 @@ pub struct PySiteParameters {
 #[pymethods]
 impl PySiteParameters {
     #[new]
-    #[pyo3(signature = (*, kappa_s, fmax_hz))]
-    fn new(kappa_s: f32, fmax_hz: f32) -> Self {
+    #[pyo3(signature = (*, fmax_hz))]
+    fn new(fmax_hz: f32) -> Self {
         Self {
-            inner: SiteParameters {
-                kappa_s,
-                f_max_hz: fmax_hz,
-            },
+            inner: SiteParameters { f_max_hz: fmax_hz },
         }
     }
 }
@@ -375,20 +368,25 @@ impl PySimulator {
     ///
     /// Returns acceleration in cm/s^2, shaped `(3, n_station, n_time)` with components
     /// ordered 090/000/vertical.
-    #[pyo3(signature = (*, latitude_deg, longitude_deg, station_seed))]
+    #[pyo3(signature = (*, latitude_deg, longitude_deg, station_seed, kappa_s,
+                        q_frequency_exponent))]
     fn run_stations<'py>(
         &self,
         py: Python<'py>,
         latitude_deg: PyReadonlyArray1<f32>,
         longitude_deg: PyReadonlyArray1<f32>,
         station_seed: PyReadonlyArray1<u64>,
+        kappa_s: PyReadonlyArray1<f32>,
+        q_frequency_exponent: PyReadonlyArray1<f32>,
     ) -> PyResult<Bound<'py, PyArray3<f32>>> {
         // `as_slice` is the one check Rust must own: it fails for a non-contiguous array,
         // which Python cannot see from the outside.
-        let (latitude, longitude, seeds) = (
+        let (latitude, longitude, seeds, kappa, q_exponent) = (
             latitude_deg.as_slice()?,
             longitude_deg.as_slice()?,
             station_seed.as_slice()?,
+            kappa_s.as_slice()?,
+            q_frequency_exponent.as_slice()?,
         );
 
         let station_count = latitude.len();
@@ -396,14 +394,21 @@ impl PySimulator {
             let ndata = self.inner.ndata();
             let mut waveform = Array3::zeros((COMPONENT_COUNT, station_count, ndata));
 
-            for (index, ((&stlat, &stlon), &seed)) in
-                latitude.iter().zip(longitude).zip(seeds).enumerate()
+            for (index, ((((&stlat, &stlon), &seed), &kappa_s), &q_exponent)) in latitude
+                .iter()
+                .zip(longitude)
+                .zip(seeds)
+                .zip(kappa)
+                .zip(q_exponent)
+                .enumerate()
             {
                 let sim = self.inner.run(
                     Station {
                         latitude: stlat,
                         longitude: stlon,
                         name: format!("station-{index}"),
+                        kappa_s,
+                        q_exponent,
                     },
                     seed,
                 );

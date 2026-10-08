@@ -331,12 +331,10 @@ impl Simulator {
 
         let czero = config.source.czero;
         let calpha = config.source.calpha;
-        let (duration_s, dt, f_max_hz, kappa_s, q_exponent) = (
+        let (duration_s, dt, f_max_hz) = (
             config.record.duration_s,
             config.record.dt_s,
             config.site.f_max_hz,
-            config.site.kappa_s,
-            config.path.q_exponent,
         );
 
         // The slip model is normalised in place and the velocity model gains an air
@@ -429,8 +427,6 @@ impl Simulator {
         let run = RunScalars {
             dt,
             fmax_hz: f_max_hz,
-            kappa_s,
-            q_exponent,
             window_peak_fraction,
             window_end_fraction,
             corner_const: czero,
@@ -488,7 +484,7 @@ impl Simulator {
         // segments as well as within one. See `PlanCache` for why it is per station.
         let mut plans = PlanCache::new(
             self.run.dt,
-            self.run.q_exponent,
+            station.q_exponent,
             self.run.window_peak_fraction,
             self.run.window_end_fraction,
         );
@@ -551,6 +547,7 @@ impl Simulator {
                     rayset: &self.rayset,
                     deviates: &deviates,
                     siteamp_log_freq: &self.siteamp_log_freq,
+                    kappa_s: station.kappa_s,
                     station_seed: seed,
                 },
             );
@@ -581,8 +578,6 @@ impl Simulator {
 struct RunScalars {
     dt: f32,
     fmax_hz: f32,
-    kappa_s: f32,
-    q_exponent: f32,
     /// The Saragoni-Hart window shape: where the envelope peaks, as a fraction of the
     /// duration, and what fraction of the peak it has decayed to by the end.
     window_peak_fraction: f32,
@@ -780,6 +775,8 @@ struct RunContext<'a> {
     rayset: &'a [RayType],
     deviates: &'a Deviates,
     siteamp_log_freq: &'a Array1<f32>,
+    /// The station's `κ`, s.
+    kappa_s: f32,
     /// The station's seed, from which every sub-stream below is derived.
     station_seed: u64,
 }
@@ -1052,6 +1049,7 @@ fn subfault_pass(
         rayset,
         deviates,
         siteamp_log_freq,
+        kappa_s,
         station_seed,
         ..
     } = ctx;
@@ -1062,7 +1060,7 @@ fn subfault_pass(
         window_eps: run.window_peak_fraction,
         window_eta: run.window_end_fraction,
         subevent_moment: run.subevent_moment,
-        kappa_s: run.kappa_s,
+        kappa_s,
         moment_scale: run.moment_scale,
     };
     // Sized for the longest window in the segment, then used a prefix at a time: each
@@ -1685,8 +1683,6 @@ mod tests {
         let run = RunScalars {
             dt: 0.1,
             fmax_hz: 0.0,
-            kappa_s: 0.0,
-            q_exponent: 0.0,
             window_peak_fraction: 0.2,
             window_end_fraction: 0.05,
             corner_const: 0.0,
@@ -1741,6 +1737,7 @@ mod tests {
             rayset: &rayset,
             deviates: &deviates,
             siteamp_log_freq: &siteamp_log_freq,
+            kappa_s: 0.0,
             station_seed: 0,
         };
         let segment = SegmentAngles {
