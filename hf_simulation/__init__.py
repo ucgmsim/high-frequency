@@ -38,6 +38,8 @@ Examples
 ...     latitude_deg=np.array([-43.4], np.float32),
 ...     longitude_deg=np.array([172.6], np.float32),
 ...     station_seed=station_seeds(1234, ["CHCH"]),
+...     kappa_s=np.array([0.045], np.float32),
+...     q_frequency_exponent=np.array([0.6], np.float32),
 ... )
 >>> waveform.shape[0]
 3
@@ -78,8 +80,6 @@ from hf_simulation._hf_simulation import (
 
 __all__ = [
     "COMPONENTS",
-    "DEFAULT_KAPPA_S",
-    "DEFAULT_Q_FREQUENCY_EXPONENT",
     "FaultSegment",
     "HfConfig",
     "PathDurationModel",
@@ -132,12 +132,6 @@ class PathDurationModel(enum.IntEnum):
 # Component order of the returned array's first axis. It matches the production Fortran's
 # output files and the order `hf_sim.py` labels its xarray dimension with.
 COMPONENTS = ("090", "000", "ver")
-
-# Production values of the per-station parameters, used when a caller passes none.
-DEFAULT_KAPPA_S = 0.045
-"""Near-surface attenuation, seconds. Anderson and Hough (1984)."""
-DEFAULT_Q_FREQUENCY_EXPONENT = 0.6
-"""The x in Q(f) = Q0 * f^x."""
 
 # Bytes of BLAKE2b digest used for a station-name hash. Eight gives a 64-bit value with no
 # collisions across the largest station lists in use (5000 names measured clean).
@@ -402,10 +396,8 @@ class Simulator:
         latitude_deg: npt.NDArray[np.float32],
         longitude_deg: npt.NDArray[np.float32],
         station_seed: npt.NDArray[np.uint64],
-        kappa_s: float | npt.NDArray[np.float32] = DEFAULT_KAPPA_S,
-        q_frequency_exponent: float | npt.NDArray[np.float32] = (
-            DEFAULT_Q_FREQUENCY_EXPONENT
-        ),
+        kappa_s: npt.NDArray[np.float32],
+        q_frequency_exponent: npt.NDArray[np.float32],
     ) -> npt.NDArray[np.float32]:
         """Simulate a batch of stations.
 
@@ -417,12 +409,11 @@ class Simulator:
             Station longitudes, one per station.
         station_seed : npt.NDArray[np.uint64]
             Per-station seeds, one per station. See :func:`station_seeds`.
-        kappa_s : float or npt.NDArray[np.float32], optional
-            Near-surface attenuation, seconds, one per station. A scalar applies to every
-            station. Default :data:`DEFAULT_KAPPA_S`.
-        q_frequency_exponent : float or npt.NDArray[np.float32], optional
-            The x in Q(f) = Q0 * f^x, one per station. A scalar applies to every station.
-            Default :data:`DEFAULT_Q_FREQUENCY_EXPONENT`.
+        kappa_s : npt.NDArray[np.float32]
+            Near-surface attenuation, seconds, one per station. Anderson and Hough
+            (1984); production uses 0.045.
+        q_frequency_exponent : npt.NDArray[np.float32]
+            The x in Q(f) = Q0 * f^x, one per station. Production uses 0.6.
 
         Returns
         -------
@@ -438,20 +429,8 @@ class Simulator:
         latitude = np.ascontiguousarray(latitude_deg, dtype=np.float32)
         longitude = np.ascontiguousarray(longitude_deg, dtype=np.float32)
         seeds = np.ascontiguousarray(station_seed, dtype=np.uint64)
-        # A scalar means every station; `broadcast_to` gives a read-only view, so it is
-        # copied to a contiguous array the Rust side can take as a slice.
-        kappa = np.ascontiguousarray(
-            np.broadcast_to(np.asarray(kappa_s, np.float32), latitude.shape)
-            if np.ndim(kappa_s) == 0
-            else np.asarray(kappa_s, np.float32)
-        )
-        q_exponent = np.ascontiguousarray(
-            np.broadcast_to(
-                np.asarray(q_frequency_exponent, np.float32), latitude.shape
-            )
-            if np.ndim(q_frequency_exponent) == 0
-            else np.asarray(q_frequency_exponent, np.float32)
-        )
+        kappa = np.ascontiguousarray(kappa_s, dtype=np.float32)
+        q_exponent = np.ascontiguousarray(q_frequency_exponent, dtype=np.float32)
 
         lengths = {
             "latitude_deg": latitude.shape,

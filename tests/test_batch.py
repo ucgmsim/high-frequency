@@ -217,8 +217,8 @@ def test_different_stations_get_different_waveforms(
 def run_batch(
     slip_model: SlipModel,
     velocity_model: VelocityModel1D,
-    kappa_s: float | np.ndarray,
-    q_frequency_exponent: float | np.ndarray,
+    kappa_s: np.ndarray,
+    q_frequency_exponent: np.ndarray,
 ) -> np.ndarray:
     """Simulate all four stations with the given per-station parameters.
 
@@ -228,10 +228,10 @@ def run_batch(
         The fault.
     velocity_model : VelocityModel1D
         The velocity structure.
-    kappa_s : float or np.ndarray
-        Kappa, a scalar or one per station.
-    q_frequency_exponent : float or np.ndarray
-        Q exponent, a scalar or one per station.
+    kappa_s : np.ndarray
+        Kappa, one per station.
+    q_frequency_exponent : np.ndarray
+        Q exponent, one per station.
 
     Returns
     -------
@@ -278,21 +278,6 @@ def test_per_station_parameters_change_only_their_station(
         np.testing.assert_array_equal(waveform[:, others, :], reference[:, others, :])
 
 
-def test_a_scalar_parameter_applies_to_every_station(
-    slip_model: SlipModel, velocity_model: VelocityModel1D
-) -> None:
-    """A scalar kappa or Q exponent is the same as an array of it."""
-    scalar = run_batch(slip_model, velocity_model, 0.05, 0.65)
-    assert_not_silent(scalar)
-    array = run_batch(
-        slip_model,
-        velocity_model,
-        np.full(4, 0.05, np.float32),
-        np.full(4, 0.65, np.float32),
-    )
-    np.testing.assert_array_equal(scalar, array)
-
-
 def test_an_empty_batch_is_an_error(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
@@ -308,6 +293,8 @@ def test_an_empty_batch_is_an_error(
             latitude_deg=empty32,
             longitude_deg=empty32,
             station_seed=np.array([], np.uint64),
+            kappa_s=empty32,
+            q_frequency_exponent=empty32,
         )
 
 
@@ -325,6 +312,8 @@ def test_mismatched_station_arrays_are_rejected(
             latitude_deg=STATION_LATITUDE,
             longitude_deg=STATION_LONGITUDE[:2],
             station_seed=station_seeds(1234, STATION_NAMES),
+            kappa_s=STATION_KAPPA_S,
+            q_frequency_exponent=STATION_Q_EXPONENT,
         )
     with pytest.raises(ValueError, match="one entry per station"):
         simulator.run_stations(
@@ -332,6 +321,7 @@ def test_mismatched_station_arrays_are_rejected(
             longitude_deg=STATION_LONGITUDE,
             station_seed=station_seeds(1234, STATION_NAMES),
             kappa_s=STATION_KAPPA_S[:2],
+            q_frequency_exponent=STATION_Q_EXPONENT,
         )
 
 

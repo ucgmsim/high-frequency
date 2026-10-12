@@ -27,7 +27,7 @@ waveform = simulator.run_stations(  # (3, n_station, n_time), cm/s²
     latitude_deg=latitudes,
     longitude_deg=longitudes,
     station_seed=station_seeds(1234, station_names),
-    kappa_s=kappas,  # one per station, or a scalar for all
+    kappa_s=kappas,  # one per station
     q_frequency_exponent=q_exponents,
 )
 ```
