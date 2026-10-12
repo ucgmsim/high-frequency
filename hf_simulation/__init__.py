@@ -20,6 +20,7 @@ Examples
 ...     slip=np.full((3, 4), 50.0, np.float32),
 ...     rise_time_s=np.full((3, 4), 0.5, np.float32),
 ...     rupture_time_s=np.zeros((3, 4), np.float32),
+...     stress_drop_bars=np.full((3, 4), 50.0, np.float32),
 ... )
 >>> simulator = Simulator(
 ...     SlipModel([segment]),
@@ -242,15 +243,12 @@ class RuptureVelocity:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SourceParameters:
-    """The earthquake source: radiation strength and how fast the rupture travels."""
+    """The earthquake source: corner frequency and how fast the rupture travels.
 
-    stress_drop_bars: float = 50.0
-    """Brune stress parameter. Graves and Pitarka use 50 bars.
-
-    Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
-    parameter controlling the strength of the high-frequency radiation, not as a measured
-    static stress drop".
+    The radiation strength, the stress parameter, is per subfault and lives on
+    :class:`FaultSegment` as ``stress_drop_bars``.
     """
+
     corner_frequency_constant: float = 2.0
     """The c0 coefficient of Graves and Pitarka (2010) eq. 13 / (2015) eq. 1.
 
@@ -330,7 +328,6 @@ class HfConfig:
         """
         return _RustHfConfig(
             source=_RustSourceParameters(
-                stress_drop_bars=self.source.stress_drop_bars,
                 corner_frequency_constant=self.source.corner_frequency_constant,
                 corner_frequency_alpha=self.source.corner_frequency_alpha,
                 rupture_velocity_fraction=self.source.rupture_velocity.fraction,

@@ -18,7 +18,7 @@ type DoubleArray1D = np.ndarray[tuple[int], np.dtype[np.float64]]
 type SeedArray = np.ndarray[tuple[int], np.dtype[np.uint64]]
 
 class FaultSegment:
-    """One fault segment: geometry plus the three subfault grids."""
+    """One fault segment: geometry plus the four subfault grids."""
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class FaultSegment:
         slip: FloatArray2D,
         rise_time_s: FloatArray2D,
         rupture_time_s: FloatArray2D,
+        stress_drop_bars: FloatArray2D,
     ) -> None: ...
 
 class SlipModel:
@@ -68,7 +69,6 @@ class SourceParameters:
     def __init__(
         self,
         *,
-        stress_drop_bars: float,
         corner_frequency_constant: float,
         corner_frequency_alpha: float,
         rupture_velocity_fraction: float,

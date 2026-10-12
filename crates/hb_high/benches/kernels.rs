@@ -391,9 +391,7 @@ fn bench_spectrum(c: &mut Criterion) {
                     dt: DT,
                     window_eps: 0.2,
                     window_eta: 0.05,
-                    subevent_moment: 3.0e22,
                     kappa_s: 0.045,
-                    moment_scale: 2.1,
                 };
                 let path = RayPath {
                     distance_km: 60.0,
@@ -401,6 +399,8 @@ fn bench_spectrum(c: &mut Criterion) {
                     shear_velocity_km_s: 3.2,
                     density_g_cm3: 2.7,
                     corner_frequency_hz: 1.5,
+                    subevent_moment: 3.0e22,
+                    moment_scale: 2.1,
                     fmax_hz: 10.0,
                     qbar: 0.02,
                 };

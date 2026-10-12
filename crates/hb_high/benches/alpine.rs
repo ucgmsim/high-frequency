@@ -51,7 +51,6 @@ const VS_MOHO_KM_S: f64 = 999.9;
 fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
-            stress_drop_bars: 50.0,
             czero: 2.1,
             calpha: 0.1,
             rupture_velocity: RuptureVelocity {
@@ -348,6 +347,7 @@ fn slip_model(path: &Path) -> StochModel {
                             slip: Slip(slip[k]),
                             rise_time_s: rise[k],
                             rupture_time_s: rupture[k],
+                            stress_drop_bars: 50.0,
                         })
                         .collect(),
                 )

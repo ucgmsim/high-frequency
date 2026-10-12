@@ -250,12 +250,6 @@ impl RuptureVelocityTaper {
 /// travels.
 #[derive(Clone, Debug)]
 pub struct SourceParameters {
-    /// `Δσ` — the Brune stress parameter, bars. Graves & Pitarka use 50 bars.
-    ///
-    /// Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
-    /// parameter controlling the strength of the high-frequency radiation, not as a measured
-    /// static stress drop".
-    pub stress_drop_bars: f32,
     /// `c₀`, the corner-frequency constant of Graves & Pitarka (2010) eq. 13 / (2015) eq. 1.
     pub czero: f32,
     /// `c_α`, the coefficient of the `α_τ` dip-and-rake adjustment.

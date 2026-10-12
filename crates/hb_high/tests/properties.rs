@@ -815,7 +815,8 @@ fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
                     Subfault {
                         slip: Slip(1.0),
                         rise_time_s: 1.0,
-                        rupture_time_s: 1.0
+                        rupture_time_s: 1.0,
+                        stress_drop_bars: 50.0
                     };
                     along * down
                 ])
@@ -905,7 +906,6 @@ fn velocity_model(layers: usize) -> hb_high::state::VelocityModelInput {
 fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
-            stress_drop_bars: 50.0,
             czero: 2.1,
             calpha: 0.1,
             rupture_velocity: RuptureVelocity {

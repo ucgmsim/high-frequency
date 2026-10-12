@@ -37,34 +37,51 @@ STATION_Q_EXPONENT = np.array([0.5, 0.6, 0.7, 0.55], np.float32)
 RECORD_DURATION_S = 40.0
 
 
+def fault_segment(stress_drop_bars: np.ndarray | None = None) -> FaultSegment:
+    """A 4-by-3 subfault segment with uniform slip.
+
+    Parameters
+    ----------
+    stress_drop_bars : np.ndarray, optional
+        Per-subfault stress parameter, shaped ``(3, 4)``. Defaults to 50 bars everywhere.
+
+    Returns
+    -------
+    FaultSegment
+        The segment.
+    """
+    return FaultSegment(
+        longitude_deg=173.0,
+        latitude_deg=-43.0,
+        strike_deg=220.0,
+        dip_deg=70.0,
+        rake_deg=160.0,
+        top_depth_km=0.0,
+        subfault_length_km=1.5,
+        subfault_width_km=1.5,
+        hypocentre_along_strike_km=0.0,
+        hypocentre_down_dip_km=1.5,
+        slip=np.full((3, 4), 50.0, np.float32),
+        rise_time_s=np.full((3, 4), 0.5, np.float32),
+        rupture_time_s=np.zeros((3, 4), np.float32),
+        stress_drop_bars=(
+            np.full((3, 4), 50.0, np.float32)
+            if stress_drop_bars is None
+            else stress_drop_bars
+        ),
+    )
+
+
 @pytest.fixture(scope="module")
 def slip_model() -> SlipModel:
-    """A single-segment fault with uniform slip.
+    """A single-segment fault with uniform slip and stress parameter.
 
     Returns
     -------
     SlipModel
         A 4-by-3 subfault grid.
     """
-    return SlipModel(
-        [
-            FaultSegment(
-                longitude_deg=173.0,
-                latitude_deg=-43.0,
-                strike_deg=220.0,
-                dip_deg=70.0,
-                rake_deg=160.0,
-                top_depth_km=0.0,
-                subfault_length_km=1.5,
-                subfault_width_km=1.5,
-                hypocentre_along_strike_km=0.0,
-                hypocentre_down_dip_km=1.5,
-                slip=np.full((3, 4), 50.0, np.float32),
-                rise_time_s=np.full((3, 4), 0.5, np.float32),
-                rupture_time_s=np.zeros((3, 4), np.float32),
-            )
-        ]
-    )
+    return SlipModel([fault_segment()])
 
 
 @pytest.fixture(scope="module")
@@ -276,6 +293,51 @@ def test_per_station_parameters_change_only_their_station(
             f"{name} had no effect on its station"
         )
         np.testing.assert_array_equal(waveform[:, others, :], reference[:, others, :])
+
+
+def test_stress_drop_is_per_subfault(velocity_model: VelocityModel1D) -> None:
+    """One subfault's stress parameter moves the record; raising it everywhere adds energy.
+
+    The stress parameter sets each subfault's high-frequency level linearly, so doubling it
+    everywhere should roughly quadruple the record's energy. The bound is loose because the
+    window durations shorten too, which changes the draws.
+    """
+    uniform = np.full((3, 4), 50.0, np.float32)
+    reference = simulate(SlipModel([fault_segment(uniform)]), velocity_model, range(4))
+    assert_not_silent(reference)
+
+    one_hot = uniform.copy()
+    one_hot[1, 2] = 100.0
+    changed = simulate(SlipModel([fault_segment(one_hot)]), velocity_model, range(4))
+    assert not np.array_equal(changed, reference), (
+        "one subfault's stress parameter had no effect"
+    )
+
+    doubled = simulate(
+        SlipModel([fault_segment(2 * uniform)]), velocity_model, range(4)
+    )
+    energy_ratio = np.sum(doubled.astype(np.float64) ** 2) / np.sum(
+        reference.astype(np.float64) ** 2
+    )
+    assert energy_ratio > 2.0, (
+        f"doubling the stress parameter scaled energy by {energy_ratio}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stress_drop_bars", "message"),
+    [
+        (np.full((2, 4), 50.0, np.float32), "same shape"),
+        (np.zeros((3, 4), np.float32), "positive and finite"),
+        (np.full((3, 4), np.nan, np.float32), "positive and finite"),
+    ],
+)
+def test_a_bad_stress_drop_grid_is_rejected(
+    stress_drop_bars: np.ndarray, message: str
+) -> None:
+    """The grid must match the slip grid, and be positive and finite throughout."""
+    with pytest.raises(ValueError, match=message):
+        fault_segment(stress_drop_bars)
 
 
 def test_an_empty_batch_is_an_error(

@@ -58,7 +58,9 @@ are fixed. Each difference was checked statistically against the production outp
 `Simulator.run_stations` takes arrays of station coordinates and seeds, plus the
 per-station site and path parameters (`kappa_s`, `q_frequency_exponent`), and
 returns every station at once. Everything else in `HfConfig` — including `fmax_hz`,
-the ray set and the path-duration model — is shared by the whole run. A station's seed is a `uint64` derived by
+the ray set and the path-duration model — is shared by the whole run. The stress
+parameter is per subfault: each `FaultSegment` takes a `stress_drop_bars` grid alongside
+`slip`. A station's seed is a `uint64` derived by
 `station_seeds` through `numpy.random.SeedSequence` from a root seed and the
 station name, so stations are independent. Three properties follow, all of them
 tested:

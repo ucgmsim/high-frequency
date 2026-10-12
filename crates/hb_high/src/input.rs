@@ -65,6 +65,14 @@ pub struct Subfault {
     pub rise_time_s: f32,
     /// Rupture time relative to origin, s.
     pub rupture_time_s: f32,
+    /// `Δσ_i` — this subfault's Brune stress parameter, bars. Graves & Pitarka use 50 bars
+    /// everywhere.
+    ///
+    /// Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
+    /// parameter controlling the strength of the high-frequency radiation, not as a measured
+    /// static stress drop". It sets this subfault's high-frequency level and leaves its
+    /// long-period level alone; see `PHYSICS.md` §2. Not part of the `.stoch` format.
+    pub stress_drop_bars: f32,
 }
 
 #[bon::bon]

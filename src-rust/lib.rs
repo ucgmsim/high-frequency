@@ -15,10 +15,10 @@ use pyo3::prelude::*;
 /// Components per station: 090, 000, vertical.
 const COMPONENT_COUNT: usize = 3;
 
-/// One fault segment: geometry plus the three subfault grids.
+/// One fault segment: geometry plus the four subfault grids.
 ///
-/// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup` and the row
-/// order the `.stoch` format itself uses.
+/// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup`/`stress_drop_bars` and the
+/// row order the `.stoch` format itself uses.
 #[pyclass(frozen, name = "FaultSegment")]
 pub struct PyFaultSegment {
     inner: Segment,
@@ -30,7 +30,7 @@ impl PyFaultSegment {
     #[pyo3(signature = (*, longitude_deg, latitude_deg, strike_deg, dip_deg, rake_deg,
                         top_depth_km, subfault_length_km, subfault_width_km,
                         hypocentre_along_strike_km, hypocentre_down_dip_km,
-                        slip, rise_time_s, rupture_time_s))]
+                        slip, rise_time_s, rupture_time_s, stress_drop_bars))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         longitude_deg: f32,
@@ -46,21 +46,34 @@ impl PyFaultSegment {
         slip: PyReadonlyArray2<f32>,
         rise_time_s: PyReadonlyArray2<f32>,
         rupture_time_s: PyReadonlyArray2<f32>,
+        stress_drop_bars: PyReadonlyArray2<f32>,
     ) -> PyResult<Self> {
-        let (slip, rise, rupture) = (
+        let (slip, rise, rupture, stress) = (
             slip.as_array(),
             rise_time_s.as_array(),
             rupture_time_s.as_array(),
+            stress_drop_bars.as_array(),
         );
         // Keyword-only above, so the twelve scalars cannot be transposed positionally. The
         // grids still can be, which is what this checks.
-        if slip.dim() != rise.dim() || slip.dim() != rupture.dim() {
+        if slip.dim() != rise.dim() || slip.dim() != rupture.dim() || slip.dim() != stress.dim() {
             return Err(PyValueError::new_err(format!(
-                "slip {:?}, rise_time_s {:?} and rupture_time_s {:?} must have the same \
-                 shape -- they describe the same subfaults",
+                "slip {:?}, rise_time_s {:?}, rupture_time_s {:?} and stress_drop_bars {:?} \
+                 must have the same shape -- they describe the same subfaults",
                 slip.dim(),
                 rise.dim(),
-                rupture.dim()
+                rupture.dim(),
+                stress.dim()
+            )));
+        }
+        // The stress parameter divides the finite-fault factor `F_i`, so a zero, negative or
+        // non-finite value would put an infinity or a NaN into every sample downstream.
+        if let Some(bad) = stress
+            .iter()
+            .find(|value| !(value.is_finite() && **value > 0.0))
+        {
+            return Err(PyValueError::new_err(format!(
+                "stress_drop_bars must be positive and finite everywhere; got {bad}"
             )));
         }
         let (down_dip_count, along_strike_count) = slip.dim();
@@ -78,6 +91,7 @@ impl PyFaultSegment {
                     slip: Slip(slip[[j, i]]),
                     rise_time_s: rise[[j, i]],
                     rupture_time_s: rupture[[j, i]],
+                    stress_drop_bars: stress[[j, i]],
                 })
             })
             .collect();
@@ -211,12 +225,10 @@ pub struct PySourceParameters {
 #[pymethods]
 impl PySourceParameters {
     #[new]
-    #[pyo3(signature = (*, stress_drop_bars, corner_frequency_constant, corner_frequency_alpha,
+    #[pyo3(signature = (*, corner_frequency_constant, corner_frequency_alpha,
                         rupture_velocity_fraction, rupture_velocity_shallow,
                         rupture_velocity_deep, rupture_velocity_sigma))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        stress_drop_bars: f32,
         corner_frequency_constant: f32,
         corner_frequency_alpha: f32,
         rupture_velocity_fraction: f32,
@@ -226,7 +238,6 @@ impl PySourceParameters {
     ) -> Self {
         Self {
             inner: SourceParameters {
-                stress_drop_bars,
                 czero: corner_frequency_constant,
                 calpha: corner_frequency_alpha,
                 rupture_velocity: RuptureVelocity {

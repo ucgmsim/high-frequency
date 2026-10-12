@@ -296,6 +296,8 @@ pub struct Simulator {
     slip: StochModel,
     /// One entry per segment, each indexed by [`Segment::grid_index`].
     weights: Vec<SegmentWeights>,
+    /// Each subfault's `σ_i·dl³` and `F_i`, laid out like [`Simulator::weights`].
+    strengths: Vec<SegmentStrengths>,
     /// The working model, with the air layer inserted and the `f32` input fields widened.
     vmod: VelocityModel,
     rupture: RuptureVelocityTaper,
@@ -394,27 +396,26 @@ impl Simulator {
             weights,
         ) = normalise_source(&slip_model, &vmod_in);
 
-        // `sigma_p * dl^3` -- the subfault moment scale, the denominator of Graves & Pitarka (2010)
-        // eq. 12's `F`. The 1e21 converts bars*km^3 to dyn*cm.
-        let subevent_moment = config.source.stress_drop_bars
-            * avg_subfault_km
-            * avg_subfault_km
-            * avg_subfault_km
-            * BARS_KM3_TO_DYN_CM;
-
-        // `F` in Graves & Pitarka (2010) eq. 12 -- Frankel's (1995) finite-fault factor. It scales
-        // the subfault corner frequency towards the mainshock's while keeping the summed moment
-        // right; `crate::stoc` is where it does its work, and the note on `frank` there shows the
-        // algebra.
-        //
-        // This deviates from the published method: G&P define `F = M_o / (N * sigma_p * dl^3)`,
-        // linear in subfault count, and this uses `sqrt(N)`. Neither G&P (2010) nor (2015)
-        // licenses the square root. It is kept because production uses it and changing it
-        // would move every waveform.
-        //
-        // The `1.0 *` forces the integer count through a real multiply before the sqrt.
-        let moment_scale =
-            total_moment_dyn_cm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
+        // One `SourceStrength` per subfault, from its own stress parameter. Depth-major, which
+        // is grid-index order, so each vector is indexed like `weights`.
+        let strengths: Vec<SegmentStrengths> = slip_model
+            .segments
+            .iter()
+            .map(|segment| {
+                segment
+                    .depth_rows()
+                    .flatten()
+                    .map(|subfault| {
+                        SourceStrength::new(
+                            subfault.stress_drop_bars,
+                            avg_subfault_km,
+                            total_moment_dyn_cm,
+                            subfault_count,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
 
         // ------------------------------------------------------------ stations ---
         // No ceiling on the record length: buffers are sized from the requested duration.
@@ -433,8 +434,6 @@ impl Simulator {
             calpha,
             rupture_velocity_sigma: config.source.rupture_velocity.rv_sig1,
             avg_subfault_km,
-            subevent_moment,
-            moment_scale,
             conical_sample_count,
             site_table_len: fn_hz.len(),
             ndata,
@@ -455,6 +454,7 @@ impl Simulator {
         Ok(Self {
             slip: slip_model,
             weights,
+            strengths,
             vmod,
             rupture,
             path_duration,
@@ -490,12 +490,13 @@ impl Simulator {
         );
 
         // ------------------------------------------------- the single station ---
-        for (index, ((seg, angles), weights)) in self
+        for (index, (((seg, angles), weights), strengths)) in self
             .slip
             .segments
             .iter()
             .zip(&self.angles)
             .zip(&self.weights)
+            .zip(&self.strengths)
             .enumerate()
         {
             let geom = subfault_geometry(
@@ -519,15 +520,7 @@ impl Simulator {
                 },
             );
 
-            let windows = time_window_pass(
-                seg,
-                &geom,
-                &self.vmod,
-                &self.rupture,
-                &self.path_duration,
-                angles,
-                &self.run,
-            );
+            let windows = self.time_window_pass(seg, &geom, angles, strengths);
             let (segment_clipping, segment_census) = subfault_pass(
                 &rng,
                 &mut plans,
@@ -539,6 +532,7 @@ impl Simulator {
                     windows: &windows,
                     angles,
                     weights,
+                    strengths,
                 },
                 RunContext {
                     vmod: &self.vmod,
@@ -590,8 +584,6 @@ struct RunScalars {
     rupture_velocity_sigma: f32,
     /// Average subfault dimension, km.
     avg_subfault_km: f32,
-    subevent_moment: f32,
-    moment_scale: f32,
     /// Sample count for the conical radiation average, and therefore a draw count.
     conical_sample_count: usize,
     /// Length of the site-amplification frequency table.
@@ -684,69 +676,80 @@ struct WindowPass {
     tmax: f32,
 }
 
-/// Time-window pass: the shaping-window length of every subfault in a segment.
-///
-/// Depth-major (`j` outer, `i` inner). The order does not matter: this pass draws nothing
-/// from the generator and its only reduction is the `tmax` maximum.
-fn time_window_pass(
-    seg: &Segment,
-    geom: &SubfaultGeometry,
-    vmod: &VelocityModel,
-    rupture: &RuptureVelocityTaper,
-    path_duration: &PathDuration,
-    angles: &SegmentAngles,
-    run: &RunScalars,
-) -> WindowPass {
-    let mut tmax = 0.0f32;
-    let mut window_s = vec![0.0f32; seg.subfault_total()];
+impl Simulator {
+    /// Time-window pass: the shaping-window length of every subfault in a segment.
+    ///
+    /// Depth-major (`j` outer, `i` inner). The order does not matter: this pass draws nothing
+    /// from the generator and its only reduction is the `tmax` maximum.
+    fn time_window_pass(
+        &self,
+        seg: &Segment,
+        geom: &SubfaultGeometry,
+        angles: &SegmentAngles,
+        strengths: &[SourceStrength],
+    ) -> WindowPass {
+        let Self {
+            vmod,
+            rupture,
+            path_duration,
+            run,
+            ..
+        } = self;
+        let mut tmax = 0.0f32;
+        let mut window_s = vec![0.0f32; seg.subfault_total()];
 
-    for (i, j) in seg.depth_major() {
-        let ray = geom.at(i, j);
-        // A subfault below the whole model takes the deepest layer; see [`source_layer_for`].
-        let shear_velocity_km_s = vmod[source_layer_for(vmod, ray.depth_km)].vsh_km_s as f32;
+        for (i, j) in seg.depth_major() {
+            let ray = geom.at(i, j);
+            // A subfault below the whole model takes the deepest layer; see [`source_layer_for`].
+            let shear_velocity_km_s = vmod[source_layer_for(vmod, ray.depth_km)].vsh_km_s as f32;
 
-        let rupture_fraction = rupture.factor(ray.depth_km);
+            let rupture_fraction = rupture.factor(ray.depth_km);
 
-        // The last table segment this distance is past (`.last()`: the table ascends).
-        //
-        // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches nothing and
-        // the duration terms stay zero via `unwrap_or`.
-        let bin = path_duration
-            .iter()
-            .take_while(|s| ray.slant_km > s.start_km)
-            .last()
-            .copied()
-            .unwrap_or(DurationSegment {
-                start_km: 0.0,
-                duration_s: 0.0,
-                slope_s_per_km: 0.0,
-            });
+            // The last table segment this distance is past (`.last()`: the table ascends).
+            //
+            // Strict `>`, so a distance of exactly the first breakpoint (0.0) matches nothing and
+            // the duration terms stay zero via `unwrap_or`.
+            let bin = path_duration
+                .iter()
+                .take_while(|s| ray.slant_km > s.start_km)
+                .last()
+                .copied()
+                .unwrap_or(DurationSegment {
+                    start_km: 0.0,
+                    duration_s: 0.0,
+                    slope_s_per_km: 0.0,
+                });
 
-        // Graves & Pitarka (2010) eq. 13: `f_ci = c0 * V_Ri / (alpha_tau * pi * dl)`, with
-        // `corner_coeff` carrying `c0 / alpha_tau` and `rupture_fraction * beta` being the local rupture
-        // speed `V_Ri`.
-        let corner_frequency_hz = angles.corner_coeff * rupture_fraction * shear_velocity_km_s
-            / (run.avg_subfault_km * PI);
-        // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
-        // term. Two details worth stating:
-        //
-        //   * the source term uses `sqrt(F)/f_ci`, which is `1/f_c_effective` for the rescaled
-        //     corner of eq. 12 -- see the `frank` note in `crate::stoc`. So the duration
-        //     follows the mainshock-scaled corner, not the raw subfault corner.
-        //   * the factor of 2.12 is Boore's -- see WINDOW_DURATION_FACTOR.
-        //
-        // No upper cap on the window length.
-        let source_duration_s = run.moment_scale.sqrt() * (1.0 / corner_frequency_hz);
-        let path_duration_s = bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
-        let window = WINDOW_DURATION_FACTOR * (source_duration_s + path_duration_s);
-        window_s[seg.grid_index(i, j)] = window;
+            // Graves & Pitarka (2010) eq. 13: `f_ci = c0 * V_Ri / (alpha_tau * pi * dl)`, with
+            // `corner_coeff` carrying `c0 / alpha_tau` and `rupture_fraction * beta` being the local rupture
+            // speed `V_Ri`.
+            let corner_frequency_hz = angles.corner_coeff * rupture_fraction * shear_velocity_km_s
+                / (run.avg_subfault_km * PI);
+            // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a path
+            // term. Two details worth stating:
+            //
+            //   * the source term uses `sqrt(F_i)/f_ci`, which is `1/f_c_effective` for the
+            //     rescaled corner of eq. 12 -- see the `frank` note in `crate::stoc`. So the
+            //     duration follows the mainshock-scaled corner, not the raw subfault corner, and a
+            //     higher stress parameter shortens it.
+            //   * the factor of 2.12 is Boore's -- see WINDOW_DURATION_FACTOR.
+            //
+            // No upper cap on the window length.
+            let grid = seg.grid_index(i, j);
+            let source_duration_s =
+                strengths[grid].moment_scale.sqrt() * (1.0 / corner_frequency_hz);
+            let path_duration_s =
+                bin.duration_s + bin.slope_s_per_km * (ray.slant_km - bin.start_km);
+            let window = WINDOW_DURATION_FACTOR * (source_duration_s + path_duration_s);
+            window_s[grid] = window;
 
-        if window > tmax {
-            tmax = window;
+            if window > tmax {
+                tmax = window;
+            }
         }
-    }
 
-    WindowPass { window_s, tmax }
+        WindowPass { window_s, tmax }
+    }
 }
 
 /// The per-segment things the subfault pass reads.
@@ -763,6 +766,8 @@ struct SegmentPass<'a> {
     angles: &'a SegmentAngles,
     /// This segment's moment weights, indexed by [`Segment::grid_index`].
     weights: &'a [MomentWeight],
+    /// This segment's source strengths, indexed the same way.
+    strengths: &'a [SourceStrength],
 }
 
 /// Everything the subfault pass reads that does not vary within a station.
@@ -822,6 +827,8 @@ struct SubfaultSource {
     geometry: SubfaultRay,
     /// This subfault's share of the total moment.
     weight: MomentWeight,
+    /// `σ_i·dl³` and `F_i`, from this subfault's stress parameter.
+    strength: SourceStrength,
     /// Rupture arrival at the subfault, s after origin.
     rupture_time_s: f32,
     /// Shaping-window length, Boore (1983) `T_w`.
@@ -871,6 +878,7 @@ impl SubfaultSource {
         Some(Self {
             geometry,
             weight,
+            strength: segment.strengths[grid],
             rupture_time_s: segment.seg.at(along_strike, down_dip).rupture_time_s,
             window_s: segment.windows.window_s[grid],
             layer,
@@ -1059,9 +1067,7 @@ fn subfault_pass(
         dt: run.dt,
         window_eps: run.window_peak_fraction,
         window_eta: run.window_end_fraction,
-        subevent_moment: run.subevent_moment,
         kappa_s,
-        moment_scale: run.moment_scale,
     };
     // Sized for the longest window in the segment, then used a prefix at a time: each
     // subfault works in `spectrum[.., ..np2]` for its own `np2`, so there is one allocation
@@ -1165,6 +1171,8 @@ fn subfault_pass(
                             shear_velocity_km_s: source.shear_velocity_km_s,
                             density_g_cm3: source.density_g_cm3,
                             corner_frequency_hz: source.corner_frequency_hz,
+                            subevent_moment: source.strength.subevent_moment,
+                            moment_scale: source.strength.moment_scale,
                             fmax_hz,
                             qbar: ray.qbar,
                         },
@@ -1437,6 +1445,55 @@ pub struct MomentWeight(pub f32);
 /// One segment's moment weights, indexed by [`Segment::grid_index`].
 type SegmentWeights = Vec<MomentWeight>;
 
+/// The two source-strength factors of one subfault's spectrum, Graves & Pitarka (2010) eq. 12.
+///
+/// Both come from the subfault's stress parameter `Δσ_i`, and they come as a pair because
+/// they only make sense together: their product `F_i · σ_i·dl³ = M_o / √N` has no `Δσ_i` in
+/// it, so the long-period level, and with it the summed moment, is the same whatever the
+/// stress field. What `Δσ_i` moves is the high-frequency plateau (linearly), the effective
+/// corner `f_ci/√F_i` and the window duration. Varying one factor without the other would
+/// break the moment balance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceStrength {
+    /// `σ_i·dl³` -- the subfault moment scale, dyn·cm, the denominator of eq. 12's `F`.
+    pub subevent_moment: f32,
+    /// `F_i` -- Frankel's (1995) finite-fault factor. It scales the subfault corner frequency
+    /// towards the mainshock's while keeping the summed moment right; `crate::stoc` is where
+    /// it does its work, and the note on `frank` there shows the algebra.
+    pub moment_scale: f32,
+}
+
+impl SourceStrength {
+    fn new(
+        stress_drop_bars: f32,
+        avg_subfault_km: f32,
+        total_moment_dyn_cm: f32,
+        subfault_count: usize,
+    ) -> Self {
+        // The 1e21 converts bars*km^3 to dyn*cm.
+        let subevent_moment = stress_drop_bars
+            * avg_subfault_km
+            * avg_subfault_km
+            * avg_subfault_km
+            * BARS_KM3_TO_DYN_CM;
+        // This deviates from the published method: G&P define `F = M_o / (N * sigma_p * dl^3)`,
+        // linear in subfault count, and this uses `sqrt(N)`. Neither G&P (2010) nor (2015)
+        // licenses the square root. It is kept because production uses it and changing it
+        // would move every waveform.
+        //
+        // The `1.0 *` forces the integer count through a real multiply before the sqrt.
+        let moment_scale =
+            total_moment_dyn_cm / (subevent_moment * (1.0 * subfault_count as f32).sqrt());
+        Self {
+            subevent_moment,
+            moment_scale,
+        }
+    }
+}
+
+/// One segment's source strengths, indexed by [`Segment::grid_index`].
+type SegmentStrengths = Vec<SourceStrength>;
+
 /// Convert slip to relative moment, then normalise to unit average weight.
 ///
 /// The slip model is not modified: the weights come back in their own storage, parallel to
@@ -1579,6 +1636,27 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
 mod tests {
     use super::*;
 
+    /// `F_i · σ_i·dl³ = M_o / √N` whatever the stress parameter, so a heterogeneous stress
+    /// field leaves every subfault's long-period level, and the summed moment, unchanged.
+    #[test]
+    fn the_stress_parameter_leaves_the_long_period_level_alone() {
+        let (avg_subfault_km, total_moment_dyn_cm, subfault_count) = (1.5f32, 3.0e25f32, 96);
+        let expected = total_moment_dyn_cm / (subfault_count as f32).sqrt();
+        for stress_drop_bars in [1.0f32, 10.0, 50.0, 137.5, 400.0] {
+            let strength = SourceStrength::new(
+                stress_drop_bars,
+                avg_subfault_km,
+                total_moment_dyn_cm,
+                subfault_count,
+            );
+            let level = strength.moment_scale * strength.subevent_moment;
+            assert!(
+                ((level - expected) / expected).abs() < 1e-6,
+                "{stress_drop_bars} bars: F*sigma*dl^3 = {level}, expected {expected}"
+            );
+        }
+    }
+
     /// `alpha_t`'s `rem_euclid` wrap agrees, to the bit, with stepping by 360 in a loop.
     ///
     /// The two differ at the boundary (`-180` wraps to `+180`), but the wrapped rake is only
@@ -1689,8 +1767,6 @@ mod tests {
             calpha: 0.0,
             rupture_velocity_sigma: 0.0,
             avg_subfault_km: 1.0,
-            subevent_moment: 0.0,
-            moment_scale: 1.0,
             conical_sample_count: 0,
             site_table_len: 0,
             ndata: 10_000,
@@ -1706,6 +1782,10 @@ mod tests {
                 depth_km: 0.0,
             },
             weight: MomentWeight(1.0),
+            strength: SourceStrength {
+                subevent_moment: 0.0,
+                moment_scale: 1.0,
+            },
             rupture_time_s: 0.0,
             window_s: 60.0,
             layer: 0,
