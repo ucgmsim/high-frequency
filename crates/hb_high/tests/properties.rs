@@ -815,7 +815,8 @@ fn slip_model(segments: &[(usize, usize, f32, f32)]) -> StochModel {
                     Subfault {
                         slip: Slip(1.0),
                         rise_time_s: 1.0,
-                        rupture_time_s: 1.0
+                        rupture_time_s: 1.0,
+                        stress_drop_bars: 50.0
                     };
                     along * down
                 ])
@@ -905,7 +906,6 @@ fn velocity_model(layers: usize) -> hb_high::state::VelocityModelInput {
 fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
-            stress_drop_bars: 50.0,
             czero: 2.1,
             calpha: 0.1,
             rupture_velocity: RuptureVelocity {
@@ -917,13 +917,9 @@ fn config() -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![RayType(1)],
-            q_exponent: 0.6,
             path_duration: PathDurationModel::Bt2014Wus,
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            f_max_hz: 10.0,
-        },
+        site: SiteParameters { f_max_hz: 10.0 },
         record: RecordParameters {
             duration_s: 20.0,
             dt_s: 0.005,
@@ -956,6 +952,8 @@ fn run(seed: u64) -> hb_high::sim::Simulation {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
     let vmod = velocity_model(20);
     let station = Station {
+        kappa_s: 0.045,
+        q_exponent: 0.6,
         longitude: 173.4,
         latitude: -43.1,
         name: "TEST".to_string(),
@@ -1068,6 +1066,8 @@ fn a_record_too_short_for_the_arrivals_reports_clipping() {
     let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
     let vmod = velocity_model(20);
     let station = Station {
+        kappa_s: 0.045,
+        q_exponent: 0.6,
         // Far enough that the S arrival is tens of seconds in.
         longitude: 176.0,
         latitude: -40.0,

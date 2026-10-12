@@ -137,9 +137,9 @@ def test_the_config_builds_its_rust_counterpart() -> None:
 
 
 def test_simulator_run_stations_is_keyword_only() -> None:
-    """The three per-station arrays stay keyword-only.
+    """The per-station arrays stay keyword-only.
 
-    They are three same-typed arrays in a row, so positional order would be silent to swap.
+    Several are same-typed arrays in a row, so positional order would be silent to swap.
     """
     arguments = stub_init_arguments("Simulator")
     assert arguments == {"config", "slip_model", "velocity_model"}
@@ -156,6 +156,8 @@ def test_simulator_run_stations_is_keyword_only() -> None:
                         "latitude_deg",
                         "longitude_deg",
                         "station_seed",
+                        "kappa_s",
+                        "q_frequency_exponent",
                     }
                     return
     pytest.fail("Simulator.run_stations is not declared in the stub")

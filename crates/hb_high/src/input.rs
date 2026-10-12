@@ -65,6 +65,14 @@ pub struct Subfault {
     pub rise_time_s: f32,
     /// Rupture time relative to origin, s.
     pub rupture_time_s: f32,
+    /// `Δσ_i` — this subfault's Brune stress parameter, bars. Graves & Pitarka use 50 bars
+    /// everywhere.
+    ///
+    /// Boore (1983) is worth quoting on what this is: it "is best thought of here as simply a
+    /// parameter controlling the strength of the high-frequency radiation, not as a measured
+    /// static stress drop". It sets this subfault's high-frequency level and leaves its
+    /// long-period level alone; see `PHYSICS.md` §2. Not part of the `.stoch` format.
+    pub stress_drop_bars: f32,
 }
 
 #[bon::bon]
@@ -289,13 +297,18 @@ pub fn insert_air_layer(mut vmod_in: VelocityModelInput) -> VelocityModelInput {
     vmod_in
 }
 
-/// One station.
+/// One station, with the site and path parameters that vary from station to station.
 #[derive(Clone, Debug)]
 pub struct Station {
     pub longitude: f32,
     pub latitude: f32,
     /// Station name.
     pub name: String,
+    /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
+    pub kappa_s: f32,
+    /// `x` in `Q(f) = Q₀·f^x`, the frequency exponent of the quality factor along this
+    /// station's paths.
+    pub q_exponent: f32,
 }
 
 #[cfg(test)]
