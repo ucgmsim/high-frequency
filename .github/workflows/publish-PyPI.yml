@@ -41,7 +41,7 @@ jobs:
           rustup target add aarch64-apple-darwin
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.1.0
+        uses: pypa/cibuildwheel@v4.3.1
         env:
           CIBW_SKIP: "pp* *-musllinux_*"  # Skip PyPy and musl builds
           CIBW_ARCHS_MACOS: "x86_64 arm64"  # Build for Intel and Apple Silicon
