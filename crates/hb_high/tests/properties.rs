@@ -259,6 +259,105 @@ proptest! {
             }
         }
     }
+
+    /// The take-off angle is the straight ray's angle from the downward vertical, measured
+    /// so an up-going ray lies in `(pi/2, pi]`: `pi` straight up to a station overhead,
+    /// approaching `pi/2` as the station recedes. Its tangent from the upward vertical is
+    /// the horizontal distance over the depth, the same right triangle as the slant
+    /// distance.
+    #[test]
+    fn takeoff_angle_is_the_straight_ray_angle_from_vertical(
+        dip_deg in 5.0f32..85.0,
+        top_depth_km in 0.5f32..25.0,
+        station_offset_deg in 0.0f32..2.0,
+    ) {
+        let (along, down) = (4usize, 3usize);
+        let g = subfault_geometry(
+            &FaultPlane {
+                origin: GeoPoint { lat_deg: -43.0, lon_deg: 173.0 },
+                strike_deg: 220.0,
+                dip_deg,
+                top_depth_km,
+                along_strike_offset_km: 0.5 * along as f32 * 1.5,
+                subfault_length_km: 1.5,
+                subfault_width_km: 1.5,
+                along_strike_count: along,
+                down_dip_count: down,
+            },
+            GeoPoint { lat_deg: -43.0, lon_deg: 173.0 + station_offset_deg },
+        );
+        let pi = std::f32::consts::PI;
+        for i in 1..=along {
+            for j in 1..=down {
+                let ray = g.at(i, j);
+                let takeoff = ray.takeoff_rad;
+                prop_assert!(
+                    takeoff > pi / 2.0 && takeoff <= pi,
+                    "({i},{j}) take-off {takeoff} is not an up-going angle"
+                );
+                let from_up = pi - takeoff;
+                let want = ray.horiz_km.atan2(ray.depth_km);
+                prop_assert!(
+                    (from_up - want).abs() < 1e-5,
+                    "({i},{j}) take-off {takeoff} is {from_up} from vertical, want {want} \
+                     for horizontal {} km at depth {} km",
+                    ray.horiz_km,
+                    ray.depth_km
+                );
+            }
+        }
+    }
+}
+
+/// Exact take-off angles at the two ends of the range: a station directly above the
+/// subfault sees a vertical ray, and one at a horizontal distance equal to the depth sees
+/// a ray 45 degrees from vertical.
+#[test]
+fn takeoff_angle_is_vertical_overhead_and_diagonal_at_one_depth_away() {
+    let origin = GeoPoint {
+        lat_deg: -43.0,
+        lon_deg: 173.0,
+    };
+    let plane = |top_depth_km: f32| FaultPlane {
+        origin,
+        strike_deg: 0.0,
+        dip_deg: 90.0,
+        top_depth_km,
+        // Centres the single subfault on the origin along strike.
+        along_strike_offset_km: 0.5,
+        subfault_length_km: 1.0,
+        // Vanishing width: the subfault centre sits at the top depth.
+        subfault_width_km: 0.0,
+        along_strike_count: 1,
+        down_dip_count: 1,
+    };
+    let pi = std::f32::consts::PI;
+
+    let overhead = subfault_geometry(&plane(10.0), origin).at(1, 1);
+    assert!(
+        overhead.horiz_km < 1e-3,
+        "station not overhead: {} km",
+        overhead.horiz_km
+    );
+    assert!(
+        (overhead.takeoff_rad - pi).abs() < 1e-4,
+        "overhead take-off {}, want pi",
+        overhead.takeoff_rad
+    );
+
+    // A station a short way east; set the depth equal to its horizontal distance.
+    let station = GeoPoint {
+        lat_deg: -43.0,
+        lon_deg: 173.1,
+    };
+    let horiz_km = subfault_geometry(&plane(1.0), station).at(1, 1).horiz_km;
+    let diagonal = subfault_geometry(&plane(horiz_km), station).at(1, 1);
+    assert!((diagonal.depth_km - horiz_km).abs() < 1e-4);
+    assert!(
+        (diagonal.takeoff_rad - 0.75 * pi).abs() < 1e-4,
+        "take-off at one depth away {}, want 3pi/4",
+        diagonal.takeoff_rad
+    );
 }
 
 // ---------------------------------------------------------------------------
