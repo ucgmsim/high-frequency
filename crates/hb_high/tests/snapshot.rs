@@ -165,6 +165,7 @@ fn production_config(duration: f32) -> HfConfig {
         record: RecordParameters {
             duration_s: duration,
             dt_s: 0.005,
+            start_s: 0.0,
         },
     }
 }

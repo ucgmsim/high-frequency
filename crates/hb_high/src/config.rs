@@ -286,6 +286,18 @@ pub struct RecordParameters {
     pub duration_s: f32,
     /// Sample interval, seconds.
     pub dt_s: f32,
+    /// Time of the first sample relative to the origin time, seconds, rounded to a whole
+    /// number of samples ([`crate::sim::Simulation::start_s`] is the value used).
+    ///
+    /// `0` starts the record at the origin time. That cuts off every contribution whose
+    /// window opens before it: the Saragoni–Hart envelope rises from `window_peak_fraction`
+    /// of the window ahead of its peak, so at stations close to the hypocentre, where the
+    /// first arrivals are only a second or two in, those windows open at negative times. The
+    /// record then starts mid-shaking, and a zero-phase high-pass downstream turns that start
+    /// into a velocity offset that integrates into metres of drift. A negative value gives
+    /// the record a pre-event lead that keeps them; [`crate::sim::Clipping::heads_cut`] says
+    /// whether it was long enough.
+    pub start_s: f32,
 }
 
 /// Everything needed to simulate, with nothing about where the inputs came from or where the

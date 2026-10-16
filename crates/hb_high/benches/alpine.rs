@@ -69,6 +69,7 @@ fn config() -> HfConfig {
         record: RecordParameters {
             duration_s: DURATION_S,
             dt_s: DT_S,
+            start_s: 0.0,
         },
     }
 }
