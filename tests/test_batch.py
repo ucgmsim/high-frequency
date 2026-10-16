@@ -156,6 +156,46 @@ def assert_not_silent(waveform: np.ndarray) -> None:
     assert (peak > 0).all(), f"station(s) produced silence: peak amplitudes {peak}"
 
 
+def test_a_pre_event_lead_keeps_the_start_of_the_shaking(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
+    """Starting before the origin adds what came first, and changes nothing after it.
+
+    Right above a surface-breaking fault that ruptures at the origin time, the first
+    arrivals' envelopes open before it: a record starting at the origin begins mid-shaking.
+    A record starting earlier, and longer by the same lead, must hold those samples and be
+    identical from the origin on.
+    """
+    dt, lead_s = 1.0 / 256.0, 4.0
+
+    def run(start_s: float, duration_s: float) -> tuple[Simulator, np.ndarray]:
+        simulator = Simulator(
+            slip_model,
+            velocity_model,
+            HfConfig(
+                record=RecordParameters(duration_s=duration_s, dt=dt, start_s=start_s)
+            ),
+        )
+        waveform = simulator.run_stations(
+            latitude_deg=np.array([-43.0], np.float32),
+            longitude_deg=np.array([173.0], np.float32),
+            station_seed=station_seeds(1234, ["ABOVE"]),
+            kappa_s=np.array([0.045], np.float32),
+            q_frequency_exponent=np.array([0.6], np.float32),
+        )
+        return simulator, waveform
+
+    at_origin, cut = run(0.0, 20.0)
+    early, kept = run(-lead_s, 20.0 + lead_s)
+    lead = round(lead_s / dt)
+
+    assert (at_origin.start_s, early.start_s) == (0.0, -lead_s)
+    assert_not_silent(cut)
+    assert np.abs(cut[:, 0, 0]).max() > 0, "the record at the origin starts at rest"
+    assert np.abs(kept[:, 0, 0]).max() == 0, "the earlier record starts mid-shaking"
+    np.testing.assert_array_equal(kept[:, :, lead:], cut)
+
+
 def test_shape_and_components(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:

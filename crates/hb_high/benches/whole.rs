@@ -92,6 +92,7 @@ fn production_config() -> HfConfig {
         record: RecordParameters {
             duration_s: 40.0,
             dt_s: 0.005,
+            start_s: 0.0,
         },
     }
 }
