@@ -35,6 +35,7 @@ use hb_high::config::{
 use hb_high::geom::GeoPoint;
 use hb_high::path_duration::PathDurationModel;
 use hb_high::ray::RayType;
+use hb_high::sim::Station;
 use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
 use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 
@@ -53,7 +54,6 @@ const VS_MOHO_KM_S: f64 = 999.9;
 fn config() -> HfConfig {
     HfConfig {
         source: SourceParameters {
-            stress_drop_bars: 50.0,
             corner_frequency_constant: 2.1,
             corner_frequency_alpha: 0.1,
             rupture_velocity: RuptureVelocity {
@@ -65,18 +65,23 @@ fn config() -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![RayType::from_code(1).expect("1 is the direct upgoing ray")],
-            q_frequency_exponent: 0.6,
             path_duration: PathDurationModel::from_code(11)
                 .expect("11 is Boore & Thompson (2014) WUS"),
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            fmax_hz: 10.0,
-        },
+        site: SiteParameters { fmax_hz: 10.0 },
         record: RecordParameters {
             duration_s: DURATION_S,
             dt_s: DT_S,
         },
+    }
+}
+
+/// A station at `(lat_deg, lon_deg)` with the production `κ` and `Q` exponent.
+fn station(lat_deg: f32, lon_deg: f32) -> Station {
+    Station {
+        location: GeoPoint { lat_deg, lon_deg },
+        kappa_s: 0.045,
+        q_frequency_exponent: 0.6,
     }
 }
 
@@ -121,11 +126,9 @@ fn seed_scan(simulator: &hb_high::sim::Simulator, wanted: &Option<Vec<String>>, 
         let root = HF_SEED.wrapping_add((index as u64) << 32);
         let values: Vec<f64> = (0..count)
             .map(|k| {
-                let station = GeoPoint {
-                    lat_deg: latitude,
-                    lon_deg: longitude,
-                };
-                let acc = simulator.run(station, root.wrapping_add(k)).acc;
+                let acc = simulator
+                    .run(station(latitude, longitude), root.wrapping_add(k))
+                    .acc;
                 // Over all three components together: one number per record.
                 let sum: f64 = acc.iter().map(|&x| x as f64 * x as f64).sum();
                 (sum / acc.len() as f64).sqrt()
@@ -175,12 +178,11 @@ fn scaling(
         let start = Instant::now();
         let (mut pairs, mut computed, mut landed) = (0usize, 0usize, 0usize);
         for (index, (_name, latitude, longitude)) in stations.iter().take(count).enumerate() {
-            let station = GeoPoint {
-                lat_deg: *latitude,
-                lon_deg: *longitude,
-            };
             let census = simulator
-                .run(station, HF_SEED.wrapping_add(index as u64))
+                .run(
+                    station(*latitude, *longitude),
+                    HF_SEED.wrapping_add(index as u64),
+                )
                 .census;
             pairs += census.pairs_attempted;
             computed += census.samples_computed;
@@ -348,6 +350,7 @@ fn slip_model(path: &Path) -> SlipModel {
                             slip: Slip(slip[k]),
                             rise_time_s: rise[k],
                             rupture_time_s: rupture[k],
+                            stress_drop_bars: 50.0,
                         })
                         .collect(),
                 )
@@ -417,13 +420,11 @@ fn main() {
         {
             continue;
         }
-        let station = GeoPoint {
-            lat_deg: latitude,
-            lon_deg: longitude,
-        };
-
         let start = Instant::now();
-        let simulation = simulator.run(station, HF_SEED.wrapping_add(index as u64));
+        let simulation = simulator.run(
+            station(latitude, longitude),
+            HF_SEED.wrapping_add(index as u64),
+        );
         let wall = start.elapsed().as_secs_f64();
 
         let census = simulation.census;

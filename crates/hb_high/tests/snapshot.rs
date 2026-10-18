@@ -33,7 +33,7 @@ use ndarray::Array2;
 
 #[path = "common/fixtures.rs"]
 mod fixtures;
-use fixtures::{crustal_model, production_config, uniform_fault};
+use fixtures::{crustal_model, production_config, production_station, uniform_fault};
 
 const GOLDEN: &str = "../../harness/golden/snapshot.txt";
 const COMPONENT_COUNT: usize = 3;
@@ -102,10 +102,10 @@ fn the_whole_pipeline_matches_the_recorded_snapshot() {
         let origin = &slip.segments[0];
 
         for (seed, duration) in [(12345u64, 40.0f32), (987654321, 60.0)] {
-            let station = GeoPoint {
+            let station = production_station(GeoPoint {
                 lon_deg: origin.fault_lon_deg + 0.3,
                 lat_deg: origin.fault_lat_deg + 0.3,
-            };
+            });
             // The frozen fixture draw source, not the production generator: a snapshot is
             // only a pin if the numbers are reproducible, and `FixtureDraws` exists to never
             // change.

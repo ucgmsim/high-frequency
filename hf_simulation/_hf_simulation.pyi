@@ -18,7 +18,7 @@ type DoubleArray1D = np.ndarray[tuple[int], np.dtype[np.float64]]
 type SeedArray = np.ndarray[tuple[int], np.dtype[np.uint64]]
 
 class FaultSegment:
-    """One fault segment: geometry plus the three subfault grids."""
+    """One fault segment: geometry plus the four subfault grids."""
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class FaultSegment:
         slip: FloatArray2D,
         rise_time_s: FloatArray2D,
         rupture_time_s: FloatArray2D,
+        stress_drop_bars: FloatArray2D,
     ) -> None: ...
 
 class SlipModel:
@@ -68,7 +69,6 @@ class SourceParameters:
     def __init__(
         self,
         *,
-        stress_drop_bars: float,
         corner_frequency_constant: float,
         corner_frequency_alpha: float,
         rupture_velocity_fraction: float,
@@ -78,20 +78,14 @@ class SourceParameters:
     ) -> None: ...
 
 class PathParameters:
-    """The path from source to site."""
+    """The path from source to site shared by every station."""
 
-    def __init__(
-        self,
-        *,
-        rayset: list[int],
-        q_frequency_exponent: float,
-        path_duration_model: int,
-    ) -> None: ...
+    def __init__(self, *, rayset: list[int], path_duration_model: int) -> None: ...
 
 class SiteParameters:
-    """The near-surface."""
+    """The near-surface parameters shared by every station."""
 
-    def __init__(self, *, kappa_s: float, fmax_hz: float) -> None: ...
+    def __init__(self, *, fmax_hz: float) -> None: ...
 
 class RecordParameters:
     """The shape of the record to produce."""
@@ -125,4 +119,6 @@ class Simulator:
         latitude_deg: FloatArray1D,
         longitude_deg: FloatArray1D,
         station_seed: SeedArray,
+        kappa_s: FloatArray1D,
+        q_frequency_exponent: FloatArray1D,
     ) -> FloatArray3D: ...

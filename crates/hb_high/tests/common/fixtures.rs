@@ -10,8 +10,10 @@
 use hb_high::config::{
     HfConfig, PathParameters, RecordParameters, RuptureVelocity, SiteParameters, SourceParameters,
 };
+use hb_high::geom::GeoPoint;
 use hb_high::path_duration::PathDurationModel;
 use hb_high::ray::{RayShape, RayType};
+use hb_high::sim::Station;
 use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
 use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 
@@ -37,7 +39,8 @@ pub fn uniform_fault(along: usize, down: usize) -> SlipModel {
             Subfault {
                 slip: Slip(50.0),
                 rise_time_s: 0.5,
-                rupture_time_s: 0.0
+                rupture_time_s: 0.0,
+                stress_drop_bars: 50.0,
             };
             along * down
         ])
@@ -77,7 +80,6 @@ pub fn crustal_model(layers: usize) -> VelocityModelInput {
 pub fn production_config(duration_s: f32) -> HfConfig {
     HfConfig {
         source: SourceParameters {
-            stress_drop_bars: 50.0,
             corner_frequency_constant: 2.0,
             corner_frequency_alpha: 0.1,
             rupture_velocity: RuptureVelocity {
@@ -89,16 +91,21 @@ pub fn production_config(duration_s: f32) -> HfConfig {
         },
         path: PathParameters {
             rayset: vec![DIRECT_RAY],
-            q_frequency_exponent: 0.6,
             path_duration: PathDurationModel::Gp2010,
         },
-        site: SiteParameters {
-            kappa_s: 0.045,
-            fmax_hz: 10.0,
-        },
+        site: SiteParameters { fmax_hz: 10.0 },
         record: RecordParameters {
             duration_s,
             dt_s: 0.005,
         },
+    }
+}
+
+/// A station at `location` with the production `κ` and `Q` exponent.
+pub fn production_station(location: GeoPoint) -> Station {
+    Station {
+        location,
+        kappa_s: 0.045,
+        q_frequency_exponent: 0.6,
     }
 }

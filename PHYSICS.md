@@ -82,7 +82,7 @@ f_c = 4.9×10⁶ · β · (Δσ / M₀)^(1/3)
 ```
 
 This relation is *not* evaluated in the code — the corner frequency arrives from the rupture
-kinematics instead (§7) — but it is the reason a "stress drop" appears in the configuration at
+kinematics instead (§7) — but it is the reason a "stress drop" appears in the input at
 all. Boore's own caution is worth repeating: Δσ "is best thought of here as simply a parameter
 controlling the strength of the high-frequency radiation", not as a measured static stress drop.
 
@@ -111,6 +111,25 @@ So the product is **again a single-corner Brune spectrum**, with moment `S·M₀
 frequency `f_ci/√S`. The code applies it as two factors, but the model is one spectrum. If you
 went looking for a genuine *two-corner* spectrum — one with a sag between `f_a` and `f_b`, as in
 Boore, Di Alessandro & Abrahamson (2014) eq. 4 — you would not find one here.
+
+### A stress parameter per subfault
+
+G&P use one `σ_p` for the whole fault. Here every subfault carries its own, `Δσ_i`
+(`Subfault::stress_drop_bars`), and `F` becomes `F_i = M₀ / (√N · σ_i dl³)`. That is the only
+way to vary it that keeps the moment right. By the algebra above, the subfault spectrum is a
+single-corner spectrum with moment `F_i · σ_i dl³ = M₀/√N`, and `Δσ_i` cancels out of it.
+Whatever the stress field, every subfault's long-period level and the summed moment stay the
+same. What `Δσ_i` does move:
+
+- the high-frequency plateau, `σ_i dl³ · ω_ci²`: linear in `Δσ_i`, so record energy goes as
+  roughly `Δσ²`. That is not Brune's `Δσ^(2/3)`, because `f_ci` comes from the rupture
+  kinematics rather than from `Δσ`;
+- the effective corner `f_ci/√F_i`, which goes as `√Δσ_i`;
+- the window duration's source term `√F_i / f_ci` (§7), which goes as `1/√Δσ_i`.
+
+Varying `σ_i dl³` alone, with `F` left global, would scale each subfault's long-period level
+with `Δσ_i` and break the moment balance. That is why `source::SourceStrength` carries the two
+factors as a pair.
 
 **A departure from the published method.** G&P define `F` with `N`, linear in subfault count.
 `source.rs` uses `√N`, matching the production Fortran. G&P (2015) does not revise `F`, so this
@@ -311,9 +330,9 @@ Code identifier to symbol.
 
 | code | symbol | meaning | units |
 |---|---|---|---|
-| `subevent_moment` | `σ_p·dl³` | subfault moment scale | dyn·cm |
-| `moment_scale` | `F` | Frankel finite-fault factor (§2) | — |
-| `stress_drop_bars` | `Δσ`, `σ_p` | Brune stress parameter | bars |
+| `subevent_moment` | `σ_i·dl³` | subfault moment scale | dyn·cm |
+| `moment_scale` | `F_i` | Frankel finite-fault factor, per subfault (§2) | — |
+| `stress_drop_bars` | `Δσ_i`, `σ_i` | Brune stress parameter, per subfault | bars |
 | `corner_frequency_hz` | `f_ci` | subfault corner frequency | Hz |
 | `corner_frequency_constant` | `c₀` | corner-frequency constant (= 2.0) | — |
 | `corner_frequency_alpha` | `c_α` | `α_τ` coefficient (= 0.1) | — |

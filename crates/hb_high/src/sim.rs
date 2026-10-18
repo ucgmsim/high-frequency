@@ -40,15 +40,15 @@ use crate::radiation::{
     CONICAL_SAMPLE_COUNT, RadiationAngles, horizontal_radiation_spectrum,
     vertical_radiation_spectrum,
 };
-use crate::ray::{Onset, RayState, RayType, TracedPath, trace};
+use crate::ray::{Onset, RayState, RayType, TracedPath, straight_line_window_start_s, trace};
 use crate::record::SampleGrid;
 pub use crate::record::Simulation;
 use crate::rng::{Draws, Pcg, ray_stream_seed, substream_seed};
 use crate::site::{SiteResponse, apply_site_amplification};
 use crate::slip_model::{Segment, SlipModel};
 use crate::source::{
-    MomentWeight, RuptureVelocityTaper, SUBFAULT_WEIGHT_THRESHOLD, SegmentAngles, SegmentWeights,
-    SourceScale, scale_source,
+    MomentWeight, RuptureVelocityTaper, SUBFAULT_WEIGHT_THRESHOLD, SegmentAngles, SegmentStrengths,
+    SegmentWeights, SourceScale, SourceStrength, scale_source,
 };
 use crate::spectrum::{
     PlanCache, SourceModel, SpectrumInputs, SpectrumPlan, SpectrumShape, WindowShape,
@@ -161,6 +161,18 @@ pub enum SimError {
     },
 }
 
+/// One station: where it is, plus the site and path parameters that vary from station to
+/// station.
+#[derive(Clone, Copy, Debug)]
+pub struct Station {
+    pub location: GeoPoint,
+    /// `κ` — near-surface attenuation, seconds. Anderson & Hough (1984). Production uses 0.045.
+    pub kappa_s: f32,
+    /// `x` in `Q(f) = Q₀·f^x`, the frequency exponent of the quality factor along this
+    /// station's paths.
+    pub q_frequency_exponent: f32,
+}
+
 /// A configured simulation, ready to run stations against.
 ///
 /// # Why this is built once
@@ -185,10 +197,9 @@ pub struct Simulator {
     path_duration: PathDuration,
     /// Which ray paths to sum over.
     rayset: Vec<RayType>,
-    scale: SourceScale,
-    /// The spectral-model constants every subfault's spectrum shares.
-    spectrum: SourceModel,
-    q_frequency_exponent: f32,
+    /// Average subfault dimension `dl`, km.
+    avg_subfault_km: f32,
+    window: WindowShape,
     fmax_hz: f32,
     grid: SampleGrid,
     /// The fastest shear-wave velocity in the model, km/s.
@@ -205,6 +216,8 @@ struct SegmentSource {
     segment: Segment,
     /// This segment's moment weights, indexed by [`Segment::grid_index`].
     weights: SegmentWeights,
+    /// This segment's source strengths, indexed the same way.
+    strengths: SegmentStrengths,
     /// Station-independent: the fault's own orientation plus a corner-frequency coefficient.
     angles: SegmentAngles,
 }
@@ -219,19 +232,25 @@ impl Simulator {
         check_subfault_sizes(slip)?;
 
         let vmod = working_model(vmod_in);
-        let (scale, weights) = scale_source(slip, &vmod, config.source.stress_drop_bars);
+        let SourceScale {
+            avg_subfault_km,
+            weights,
+            strengths,
+        } = scale_source(slip, &vmod);
 
         let segments = slip
             .segments
             .iter()
             .zip(weights)
-            .map(|(segment, weights)| SegmentSource {
+            .zip(strengths)
+            .map(|((segment, weights), strengths)| SegmentSource {
                 angles: SegmentAngles::for_segment(
                     segment,
                     config.source.corner_frequency_alpha,
                     config.source.corner_frequency_constant,
                 ),
                 weights,
+                strengths,
                 segment: segment.clone(),
             })
             .collect();
@@ -254,15 +273,8 @@ impl Simulator {
             ),
             path_duration: PathDuration::new(config.path.path_duration),
             rayset: config.path.rayset.clone(),
-            spectrum: SourceModel {
-                dt,
-                window: WindowShape::BOORE_1983,
-                subevent_moment: scale.subevent_moment,
-                kappa_s: config.site.kappa_s,
-                moment_scale: scale.moment_scale,
-            },
-            scale,
-            q_frequency_exponent: config.path.q_frequency_exponent,
+            avg_subfault_km,
+            window: WindowShape::BOORE_1983,
             fmax_hz: config.site.fmax_hz,
             grid,
             // The air layer is the slowest thing in the model, so the maximum is unaffected by
@@ -281,7 +293,7 @@ impl Simulator {
     }
 
     /// Simulate one station, drawing from the production generator, [`Pcg`].
-    pub fn run(&self, station: GeoPoint, seed: u64) -> Simulation {
+    pub fn run(&self, station: Station, seed: u64) -> Simulation {
         self.run_with::<Pcg>(station, seed)
     }
 
@@ -289,22 +301,23 @@ impl Simulator {
     ///
     /// The choice of generator is part of the answer — see [`crate::rng`] — so it is a type
     /// parameter rather than a setting: the snapshot test runs [`crate::rng::FixtureDraws`].
-    pub fn run_with<D: Draws>(&self, station: GeoPoint, seed: u64) -> Simulation {
+    pub fn run_with<D: Draws>(&self, station: Station, seed: u64) -> Simulation {
         let mut run = StationRun {
             seed,
             vertical: VerticalUniforms::draw::<D>(seed),
+            spectrum: SourceModel {
+                dt: self.grid.dt,
+                window: self.window,
+                kappa_s: station.kappa_s,
+            },
             // Shared across every segment of this station, because the lengths repeat across
             // segments as well as within one. See `PlanCache` for why it is per station.
-            plans: PlanCache::new(
-                self.grid.dt,
-                self.q_frequency_exponent,
-                self.spectrum.window,
-            ),
+            plans: PlanCache::new(self.grid.dt, station.q_frequency_exponent, self.window),
             out: Simulation::silent(self.grid, COMPONENT_COUNT),
         };
 
         for (index, segment) in self.segments.iter().enumerate() {
-            let geometry = subfault_geometry(&segment.segment.fault_plane(), station);
+            let geometry = subfault_geometry(&segment.segment.fault_plane(), station.location);
             self.sum_segment::<D>(&mut run, index, segment, &geometry);
         }
 
@@ -339,20 +352,23 @@ impl Simulator {
             // differently; both are pinned.
             let corner_frequency_hz =
                 segment.angles.corner_coeff * rupture_fraction * shear_velocity_km_s
-                    / (self.scale.avg_subfault_km * PI);
+                    / (self.avg_subfault_km * PI);
             // The window duration, eq. 17: `T_di = f_ci^-1 + c1*R_i`, a source term plus a
             // path term. Two details worth stating:
             //
-            //   * the source term uses `sqrt(F)/f_ci`, which is `1/f_c_effective` for the
+            //   * the source term uses `sqrt(F_i)/f_ci`, which is `1/f_c_effective` for the
             //     rescaled corner of eq. 12 -- see the `frank` note in `crate::spectrum`. So the
-            //     duration follows the mainshock-scaled corner, not the raw subfault corner.
+            //     duration follows the mainshock-scaled corner, not the raw subfault corner, and
+            //     a higher stress parameter shortens it.
             //   * the factor of 2.12 is Boore's -- see WINDOW_DURATION_FACTOR.
             //
             // No upper cap on the window length.
-            let source_duration_s = self.scale.moment_scale.sqrt() * (1.0 / corner_frequency_hz);
+            let grid = segment.segment.grid_index(i, j);
+            let source_duration_s =
+                segment.strengths[grid].moment_scale.sqrt() * (1.0 / corner_frequency_hz);
             let path_duration_s = self.path_duration.at(ray.slant_km);
             let window = WINDOW_DURATION_FACTOR * (source_duration_s + path_duration_s);
-            window_s[segment.segment.grid_index(i, j)] = window;
+            window_s[grid] = window;
 
             if window > longest_s {
                 longest_s = window;
@@ -382,7 +398,7 @@ impl Simulator {
     ) {
         let windows = self.window_lengths(segment, geometry);
         let grid = self.grid;
-        let peak_fraction = self.spectrum.window.peak_fraction;
+        let peak_fraction = self.window.peak_fraction;
         let mut scratch = SegmentScratch::for_plan(
             run.plans
                 .for_length(SpectrumPlan::length_for(windows.longest_s, grid.dt)),
@@ -401,8 +417,14 @@ impl Simulator {
             // Ruled out before a single ray is traced; the bound is exact, see
             // `SubfaultSource::earliest_start_sample`. Every ray of this subfault shares the
             // bound, because it is built from the straight-line distance rather than from any
-            // particular path.
-            let earliest = source.earliest_start_sample(self);
+            // particular path (`rayset` only narrows it further when a straight line is
+            // requested).
+            let earliest = source.earliest_start_sample(
+                grid,
+                self.max_shear_velocity_km_s,
+                self.window,
+                &self.rayset,
+            );
             if grid.starts_after_end(earliest) {
                 run.out.census.pairs_attempted += self.rayset.len();
                 run.out.census.pairs_outside_record += self.rayset.len();
@@ -487,6 +509,7 @@ impl Simulator {
                     &ray,
                     &angles,
                     &run.vertical,
+                    &run.spectrum,
                 );
                 run.out.accumulate(
                     scratch.contribution.slice(s![.., ..plan.np2]),
@@ -526,6 +549,7 @@ impl Simulator {
         Some(SubfaultSource {
             geometry,
             weight,
+            strength: segment.strengths[grid],
             rupture_time_s: segment.segment.at(along_strike, down_dip).rupture_time_s,
             window_s: windows.window_s[grid],
             layer,
@@ -536,7 +560,7 @@ impl Simulator {
             corner_frequency_hz: segment.angles.corner_coeff
                 * rupture_fraction
                 * shear_velocity_km_s
-                / self.scale.avg_subfault_km
+                / self.avg_subfault_km
                 / PI,
         })
     }
@@ -555,6 +579,7 @@ impl Simulator {
         ray: &TracedPath,
         angles: &RadiationAngles,
         vertical: &VerticalUniforms,
+        model: &SourceModel,
     ) {
         let (np2, fold_count) = (plan.np2, plan.fold_count);
 
@@ -571,13 +596,15 @@ impl Simulator {
             if fmax_hz != built_for {
                 scratch.shape.refresh(
                     plan,
-                    &self.spectrum,
+                    model,
                     &SpectrumInputs {
                         distance_km: ray.path_length_km,
                         window_s: source.window_s,
                         shear_velocity_km_s: source.shear_velocity_km_s,
                         density_g_cm3: source.density_g_cm3,
                         corner_frequency_hz: source.corner_frequency_hz,
+                        subevent_moment: source.strength.subevent_moment,
+                        moment_scale: source.strength.moment_scale,
                         fmax_hz,
                         qbar: ray.qbar,
                     },
@@ -691,6 +718,8 @@ struct StationRun {
     /// The station's seed, from which every sub-stream is derived.
     seed: u64,
     vertical: VerticalUniforms,
+    /// The spectral-model constants every subfault's spectrum shares at this station.
+    spectrum: SourceModel,
     plans: PlanCache,
     /// The record being accumulated, and its reports.
     out: Simulation,
@@ -784,10 +813,12 @@ struct SubfaultSource {
     /// `f_ci`, Graves & Pitarka (2010) eq. 13, carrying this subfault's perturbed rupture
     /// speed.
     corner_frequency_hz: f32,
+    /// `σ_i·dl³` and `F_i`, from this subfault's stress parameter.
+    strength: SourceStrength,
 }
 
 impl SubfaultSource {
-    /// The earliest sample any ray from this subfault could start on.
+    /// The earliest sample any ray in `rayset` from this subfault could start on.
     ///
     /// # Why this is exact rather than heuristic
     ///
@@ -799,17 +830,89 @@ impl SubfaultSource {
     /// subtracted identically in both. A contribution ruled out here is ruled out for real:
     /// this prunes, it does not approximate.
     ///
+    /// [`RayType::StraightLine`] is not traced, so it has no travel time and no `ε·window`
+    /// lead-in: its real start is [`straight_line_window_start_s`]. When `rayset` contains
+    /// one, that exact formula is used instead wherever it is earlier, so the bound stays valid
+    /// for every ray type actually requested.
+    ///
     /// # What it saves
     ///
     /// It gates the ray tracing, not just the synthesis. Tracing runs an iterative root-find
     /// for the stationary ray parameter and a per-layer spreading integral, and a contribution
     /// that cannot reach the record needs neither. Two divisions decide it.
-    fn earliest_start_sample(&self, simulator: &Simulator) -> i32 {
-        let travel_time_s = self.geometry.slant_km / simulator.max_shear_velocity_km_s;
-        let window_start_s =
-            travel_time_s - simulator.spectrum.window.peak_fraction * self.window_s;
-        simulator
-            .grid
-            .start_sample(self.rupture_time_s, window_start_s)
+    fn earliest_start_sample(
+        &self,
+        grid: SampleGrid,
+        max_shear_velocity_km_s: f32,
+        window: WindowShape,
+        rayset: &[RayType],
+    ) -> i32 {
+        let travel_time_s = self.geometry.slant_km / max_shear_velocity_km_s;
+        let mut window_start_s = travel_time_s - window.peak_fraction * self.window_s;
+        if rayset.contains(&RayType::StraightLine) {
+            window_start_s =
+                window_start_s.min(straight_line_window_start_s(self.geometry.slant_km));
+        }
+        grid.start_sample(self.rupture_time_s, window_start_s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::SourceStrength;
+
+    /// A slow `max_shear_velocity_km_s` puts the traced-ray bound *after* the real
+    /// straight-line start, so without the straight-line term a subfault whose only ray is the
+    /// straight line would be pruned even though its contribution reaches the record.
+    ///
+    /// `R = 300 km`, `vmax = 4.0 km/s`, `window = 60 s`: traced bound = `300/4.0 - 0.2*60 =
+    /// 63.0 s`, real start = `0.7*300/3.7 = 56.76 s` (issue #7's own numbers).
+    #[test]
+    fn earliest_start_sample_bounds_the_straight_line_start() {
+        let grid = SampleGrid {
+            dt: 0.1,
+            ndata: 10_000,
+        };
+        let source = SubfaultSource {
+            geometry: SubfaultRay {
+                slant_km: 300.0,
+                azimuth_rad: 0.0,
+                takeoff_rad: 0.0,
+                horizontal_km: 300.0,
+                depth_km: 0.0,
+            },
+            weight: MomentWeight(1.0),
+            rupture_time_s: 0.0,
+            window_s: 60.0,
+            layer: 0,
+            shear_velocity_km_s: 4.0,
+            density_g_cm3: 2.7,
+            corner_frequency_hz: 1.0,
+            strength: SourceStrength {
+                subevent_moment: 0.0,
+                moment_scale: 1.0,
+            },
+        };
+
+        let rayset = [RayType::StraightLine];
+        let ray = trace(
+            &mut RayState::default(),
+            &VelocityModel::new(),
+            RayType::StraightLine,
+            &source.geometry,
+            source.shear_velocity_km_s,
+        );
+        let Onset::WindowStart { window_start_s } = ray.onset else {
+            panic!("a straight line has no traced arrival");
+        };
+        let start_sample = grid.start_sample(source.rupture_time_s, window_start_s);
+
+        let earliest = source.earliest_start_sample(grid, 4.0, WindowShape::BOORE_1983, &rayset);
+        assert!(
+            earliest <= start_sample,
+            "earliest_start_sample ({earliest}) must not exceed the real straight-line start \
+             ({start_sample})"
+        );
     }
 }

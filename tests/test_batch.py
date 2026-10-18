@@ -26,6 +26,9 @@ from hf_simulation import (
 STATION_NAMES = ["CHCH", "LINC", "REHS", "SHFC"]
 STATION_LATITUDE = np.array([-43.4, -43.6, -43.5, -43.3], np.float32)
 STATION_LONGITUDE = np.array([172.6, 172.4, 172.7, 172.5], np.float32)
+# Deliberately different per station, so a parameter applied to the wrong station shows.
+STATION_KAPPA_S = np.array([0.03, 0.045, 0.06, 0.02], np.float32)
+STATION_Q_EXPONENT = np.array([0.5, 0.6, 0.7, 0.55], np.float32)
 
 # 40 s, not 20. The stations sit ~55 km out and shear velocity is ~3.5 km/s, so the S
 # arrival lands near 16 s; a 20 s record technically contains it and a 10 s record is
@@ -34,34 +37,51 @@ STATION_LONGITUDE = np.array([172.6, 172.4, 172.7, 172.5], np.float32)
 RECORD_DURATION_S = 40.0
 
 
+def fault_segment(stress_drop_bars: np.ndarray | None = None) -> FaultSegment:
+    """A 4-by-3 subfault segment with uniform slip.
+
+    Parameters
+    ----------
+    stress_drop_bars : np.ndarray, optional
+        Per-subfault stress parameter, shaped ``(3, 4)``. Defaults to 50 bars everywhere.
+
+    Returns
+    -------
+    FaultSegment
+        The segment.
+    """
+    return FaultSegment(
+        longitude_deg=173.0,
+        latitude_deg=-43.0,
+        strike_deg=220.0,
+        dip_deg=70.0,
+        rake_deg=160.0,
+        top_depth_km=0.0,
+        subfault_length_km=1.5,
+        subfault_width_km=1.5,
+        hypocentre_along_strike_km=0.0,
+        hypocentre_down_dip_km=1.5,
+        slip=np.full((3, 4), 50.0, np.float32),
+        rise_time_s=np.full((3, 4), 0.5, np.float32),
+        rupture_time_s=np.zeros((3, 4), np.float32),
+        stress_drop_bars=(
+            np.full((3, 4), 50.0, np.float32)
+            if stress_drop_bars is None
+            else stress_drop_bars
+        ),
+    )
+
+
 @pytest.fixture(scope="module")
 def slip_model() -> SlipModel:
-    """A single-segment fault with uniform slip.
+    """A single-segment fault with uniform slip and stress parameter.
 
     Returns
     -------
     SlipModel
         A 4-by-3 subfault grid.
     """
-    return SlipModel(
-        [
-            FaultSegment(
-                longitude_deg=173.0,
-                latitude_deg=-43.0,
-                strike_deg=220.0,
-                dip_deg=70.0,
-                rake_deg=160.0,
-                top_depth_km=0.0,
-                subfault_length_km=1.5,
-                subfault_width_km=1.5,
-                hypocentre_along_strike_km=0.0,
-                hypocentre_down_dip_km=1.5,
-                slip=np.full((3, 4), 50.0, np.float32),
-                rise_time_s=np.full((3, 4), 0.5, np.float32),
-                rupture_time_s=np.zeros((3, 4), np.float32),
-            )
-        ]
-    )
+    return SlipModel([fault_segment()])
 
 
 @pytest.fixture(scope="module")
@@ -114,6 +134,8 @@ def simulate(
         latitude_deg=STATION_LATITUDE[list(indices)],
         longitude_deg=STATION_LONGITUDE[list(indices)],
         station_seed=station_seeds(1234, [STATION_NAMES[i] for i in indices]),
+        kappa_s=STATION_KAPPA_S[list(indices)],
+        q_frequency_exponent=STATION_Q_EXPONENT[list(indices)],
     )
 
 
@@ -209,6 +231,115 @@ def test_different_stations_get_different_waveforms(
             )
 
 
+def run_batch(
+    slip_model: SlipModel,
+    velocity_model: VelocityModel1D,
+    kappa_s: np.ndarray,
+    q_frequency_exponent: np.ndarray,
+) -> np.ndarray:
+    """Simulate all four stations with the given per-station parameters.
+
+    Parameters
+    ----------
+    slip_model : SlipModel
+        The fault.
+    velocity_model : VelocityModel1D
+        The velocity structure.
+    kappa_s : np.ndarray
+        Kappa, one per station.
+    q_frequency_exponent : np.ndarray
+        Q exponent, one per station.
+
+    Returns
+    -------
+    np.ndarray
+        Waveforms, shaped ``(3, 4, n_time)``.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    return simulator.run_stations(
+        latitude_deg=STATION_LATITUDE,
+        longitude_deg=STATION_LONGITUDE,
+        station_seed=station_seeds(1234, STATION_NAMES),
+        kappa_s=kappa_s,
+        q_frequency_exponent=q_frequency_exponent,
+    )
+
+
+def test_per_station_parameters_change_only_their_station(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
+    """Changing one station's kappa or Q exponent changes that station and no other."""
+    reference = run_batch(
+        slip_model, velocity_model, STATION_KAPPA_S, STATION_Q_EXPONENT
+    )
+    assert_not_silent(reference)
+
+    kappa, q_exponent = STATION_KAPPA_S.copy(), STATION_Q_EXPONENT.copy()
+    kappa[2] *= 1.5
+    q_exponent[2] *= 1.5
+    others = [0, 1, 3]
+    for name, waveform in [
+        ("kappa_s", run_batch(slip_model, velocity_model, kappa, STATION_Q_EXPONENT)),
+        (
+            "q_frequency_exponent",
+            run_batch(slip_model, velocity_model, STATION_KAPPA_S, q_exponent),
+        ),
+    ]:
+        assert not np.array_equal(waveform[:, 2, :], reference[:, 2, :]), (
+            f"{name} had no effect on its station"
+        )
+        np.testing.assert_array_equal(waveform[:, others, :], reference[:, others, :])
+
+
+def test_stress_drop_is_per_subfault(velocity_model: VelocityModel1D) -> None:
+    """One subfault's stress parameter moves the record; raising it everywhere adds energy.
+
+    The stress parameter sets each subfault's high-frequency level linearly, so doubling it
+    everywhere should roughly quadruple the record's energy. The bound is loose because the
+    window durations shorten too, which changes the draws.
+    """
+    uniform = np.full((3, 4), 50.0, np.float32)
+    reference = simulate(SlipModel([fault_segment(uniform)]), velocity_model, range(4))
+    assert_not_silent(reference)
+
+    one_hot = uniform.copy()
+    one_hot[1, 2] = 100.0
+    changed = simulate(SlipModel([fault_segment(one_hot)]), velocity_model, range(4))
+    assert not np.array_equal(changed, reference), (
+        "one subfault's stress parameter had no effect"
+    )
+
+    doubled = simulate(
+        SlipModel([fault_segment(2 * uniform)]), velocity_model, range(4)
+    )
+    energy_ratio = np.sum(doubled.astype(np.float64) ** 2) / np.sum(
+        reference.astype(np.float64) ** 2
+    )
+    assert energy_ratio > 2.0, (
+        f"doubling the stress parameter scaled energy by {energy_ratio}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stress_drop_bars", "message"),
+    [
+        (np.full((2, 4), 50.0, np.float32), "same shape"),
+        (np.zeros((3, 4), np.float32), "positive and finite"),
+        (np.full((3, 4), np.nan, np.float32), "positive and finite"),
+    ],
+)
+def test_a_bad_stress_drop_grid_is_rejected(
+    stress_drop_bars: np.ndarray, message: str
+) -> None:
+    """The grid must match the slip grid, and be positive and finite throughout."""
+    with pytest.raises(ValueError, match=message):
+        fault_segment(stress_drop_bars)
+
+
 def test_an_empty_batch_is_an_error(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
@@ -224,13 +355,15 @@ def test_an_empty_batch_is_an_error(
             latitude_deg=empty32,
             longitude_deg=empty32,
             station_seed=np.array([], np.uint64),
+            kappa_s=empty32,
+            q_frequency_exponent=empty32,
         )
 
 
 def test_mismatched_station_arrays_are_rejected(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
-    """One entry per station, in every array, or an error naming all three lengths."""
+    """One entry per station, in every array, or an error naming every length."""
     simulator = Simulator(
         slip_model,
         velocity_model,
@@ -241,6 +374,16 @@ def test_mismatched_station_arrays_are_rejected(
             latitude_deg=STATION_LATITUDE,
             longitude_deg=STATION_LONGITUDE[:2],
             station_seed=station_seeds(1234, STATION_NAMES),
+            kappa_s=STATION_KAPPA_S,
+            q_frequency_exponent=STATION_Q_EXPONENT,
+        )
+    with pytest.raises(ValueError, match="one entry per station"):
+        simulator.run_stations(
+            latitude_deg=STATION_LATITUDE,
+            longitude_deg=STATION_LONGITUDE,
+            station_seed=station_seeds(1234, STATION_NAMES),
+            kappa_s=STATION_KAPPA_S[:2],
+            q_frequency_exponent=STATION_Q_EXPONENT,
         )
 
 

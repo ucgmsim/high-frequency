@@ -203,8 +203,20 @@ mod tests {
             Some(PathDurationModel::Gp2010)
         );
         assert_eq!(
+            PathDurationModel::from_code(1),
+            Some(PathDurationModel::Wus)
+        );
+        assert_eq!(
+            PathDurationModel::from_code(2),
+            Some(PathDurationModel::Ena)
+        );
+        assert_eq!(
             PathDurationModel::from_code(11),
             Some(PathDurationModel::Bt2014Wus)
+        );
+        assert_eq!(
+            PathDurationModel::from_code(12),
+            Some(PathDurationModel::Bt2015Ena)
         );
         // Values outside the documented set are rejected.
         for bad in [3, 5, 10, 13, 99] {

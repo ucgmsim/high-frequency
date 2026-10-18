@@ -6,7 +6,7 @@ use hb_high::config::{
 use hb_high::geom::GeoPoint;
 use hb_high::path_duration::PathDurationModel;
 use hb_high::ray::RayType;
-use hb_high::sim::{COMPONENT_COUNT, Simulator};
+use hb_high::sim::{COMPONENT_COUNT, Simulator, Station};
 use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
 use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 use numpy::ndarray::{Array3, s};
@@ -14,10 +14,10 @@ use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-/// One fault segment: geometry plus the three subfault grids.
+/// One fault segment: geometry plus the four subfault grids.
 ///
-/// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup` and the row
-/// order the `.stoch` format itself uses.
+/// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup`/`stress_drop_bars` and the
+/// row order the `.stoch` format itself uses.
 #[pyclass(frozen, name = "FaultSegment")]
 pub struct PyFaultSegment {
     inner: Segment,
@@ -29,7 +29,7 @@ impl PyFaultSegment {
     #[pyo3(signature = (*, longitude_deg, latitude_deg, strike_deg, dip_deg, rake_deg,
                         top_depth_km, subfault_length_km, subfault_width_km,
                         hypocentre_along_strike_km, hypocentre_down_dip_km,
-                        slip, rise_time_s, rupture_time_s))]
+                        slip, rise_time_s, rupture_time_s, stress_drop_bars))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         longitude_deg: f32,
@@ -45,21 +45,34 @@ impl PyFaultSegment {
         slip: PyReadonlyArray2<f32>,
         rise_time_s: PyReadonlyArray2<f32>,
         rupture_time_s: PyReadonlyArray2<f32>,
+        stress_drop_bars: PyReadonlyArray2<f32>,
     ) -> PyResult<Self> {
-        let (slip, rise, rupture) = (
+        let (slip, rise, rupture, stress) = (
             slip.as_array(),
             rise_time_s.as_array(),
             rupture_time_s.as_array(),
+            stress_drop_bars.as_array(),
         );
         // Keyword-only above, so the twelve scalars cannot be transposed positionally. The
         // grids still can be, which is what this checks.
-        if slip.dim() != rise.dim() || slip.dim() != rupture.dim() {
+        if slip.dim() != rise.dim() || slip.dim() != rupture.dim() || slip.dim() != stress.dim() {
             return Err(PyValueError::new_err(format!(
-                "slip {:?}, rise_time_s {:?} and rupture_time_s {:?} must have the same \
-                 shape -- they describe the same subfaults",
+                "slip {:?}, rise_time_s {:?}, rupture_time_s {:?} and stress_drop_bars {:?} \
+                 must have the same shape -- they describe the same subfaults",
                 slip.dim(),
                 rise.dim(),
-                rupture.dim()
+                rupture.dim(),
+                stress.dim()
+            )));
+        }
+        // The stress parameter divides the finite-fault factor `F_i`, so a zero, negative or
+        // non-finite value would put an infinity or a NaN into every sample downstream.
+        if let Some(bad) = stress
+            .iter()
+            .find(|value| !(value.is_finite() && **value > 0.0))
+        {
+            return Err(PyValueError::new_err(format!(
+                "stress_drop_bars must be positive and finite everywhere; got {bad}"
             )));
         }
         let (down_dip_count, along_strike_count) = slip.dim();
@@ -77,6 +90,7 @@ impl PyFaultSegment {
                     slip: Slip(slip[[j, i]]),
                     rise_time_s: rise[[j, i]],
                     rupture_time_s: rupture[[j, i]],
+                    stress_drop_bars: stress[[j, i]],
                 })
             })
             .collect();
@@ -210,12 +224,10 @@ pub struct PySourceParameters {
 #[pymethods]
 impl PySourceParameters {
     #[new]
-    #[pyo3(signature = (*, stress_drop_bars, corner_frequency_constant, corner_frequency_alpha,
+    #[pyo3(signature = (*, corner_frequency_constant, corner_frequency_alpha,
                         rupture_velocity_fraction, rupture_velocity_shallow,
                         rupture_velocity_deep, rupture_velocity_sigma))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        stress_drop_bars: f32,
         corner_frequency_constant: f32,
         corner_frequency_alpha: f32,
         rupture_velocity_fraction: f32,
@@ -225,7 +237,6 @@ impl PySourceParameters {
     ) -> Self {
         Self {
             inner: SourceParameters {
-                stress_drop_bars,
                 corner_frequency_constant,
                 corner_frequency_alpha,
                 rupture_velocity: RuptureVelocity {
@@ -239,7 +250,8 @@ impl PySourceParameters {
     }
 }
 
-/// The path from source to site: which rays, and how the medium attenuates along them.
+/// The path from source to site shared by every station: which rays, and how duration grows
+/// with distance.
 #[pyclass(frozen, name = "PathParameters")]
 pub struct PyPathParameters {
     inner: PathParameters,
@@ -248,12 +260,8 @@ pub struct PyPathParameters {
 #[pymethods]
 impl PyPathParameters {
     #[new]
-    #[pyo3(signature = (*, rayset, q_frequency_exponent, path_duration_model))]
-    fn new(
-        rayset: Vec<i32>,
-        q_frequency_exponent: f32,
-        path_duration_model: i32,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (*, rayset, path_duration_model))]
+    fn new(rayset: Vec<i32>, path_duration_model: i32) -> PyResult<Self> {
         // Only the checks Python cannot make for itself: these decode integer codes whose
         // meaning the Rust enums own.
         let path_duration = PathDurationModel::from_code(path_duration_model).ok_or_else(|| {
@@ -275,14 +283,13 @@ impl PyPathParameters {
         Ok(Self {
             inner: PathParameters {
                 rayset,
-                q_frequency_exponent,
                 path_duration,
             },
         })
     }
 }
 
-/// The near-surface: what happens in the last few hundred metres.
+/// The near-surface parameters shared by every station.
 ///
 /// Quarter-wavelength site amplification is always applied and is not a field here.
 #[pyclass(frozen, name = "SiteParameters")]
@@ -293,10 +300,10 @@ pub struct PySiteParameters {
 #[pymethods]
 impl PySiteParameters {
     #[new]
-    #[pyo3(signature = (*, kappa_s, fmax_hz))]
-    fn new(kappa_s: f32, fmax_hz: f32) -> Self {
+    #[pyo3(signature = (*, fmax_hz))]
+    fn new(fmax_hz: f32) -> Self {
         Self {
-            inner: SiteParameters { kappa_s, fmax_hz },
+            inner: SiteParameters { fmax_hz },
         }
     }
 }
@@ -382,20 +389,25 @@ impl PySimulator {
     ///
     /// Returns acceleration in cm/s^2, shaped `(3, n_station, n_time)` with components
     /// ordered 090/000/vertical.
-    #[pyo3(signature = (*, latitude_deg, longitude_deg, station_seed))]
+    #[pyo3(signature = (*, latitude_deg, longitude_deg, station_seed, kappa_s,
+                        q_frequency_exponent))]
     fn run_stations<'py>(
         &self,
         py: Python<'py>,
         latitude_deg: PyReadonlyArray1<f32>,
         longitude_deg: PyReadonlyArray1<f32>,
         station_seed: PyReadonlyArray1<u64>,
+        kappa_s: PyReadonlyArray1<f32>,
+        q_frequency_exponent: PyReadonlyArray1<f32>,
     ) -> PyResult<Bound<'py, PyArray3<f32>>> {
         // `as_slice` is the one check Rust must own: it fails for a non-contiguous array,
         // which Python cannot see from the outside.
-        let (latitude, longitude, seeds) = (
+        let (latitude, longitude, seeds, kappa, q_exponent) = (
             latitude_deg.as_slice()?,
             longitude_deg.as_slice()?,
             station_seed.as_slice()?,
+            kappa_s.as_slice()?,
+            q_frequency_exponent.as_slice()?,
         );
 
         let station_count = latitude.len();
@@ -403,10 +415,23 @@ impl PySimulator {
             let ndata = self.inner.ndata();
             let mut waveform = Array3::zeros((COMPONENT_COUNT, station_count, ndata));
 
-            for (index, ((&lat_deg, &lon_deg), &seed)) in
-                latitude.iter().zip(longitude).zip(seeds).enumerate()
+            for (index, ((((&lat_deg, &lon_deg), &seed), &kappa_s), &q_frequency_exponent)) in
+                latitude
+                    .iter()
+                    .zip(longitude)
+                    .zip(seeds)
+                    .zip(kappa)
+                    .zip(q_exponent)
+                    .enumerate()
             {
-                let sim = self.inner.run(GeoPoint { lat_deg, lon_deg }, seed);
+                let sim = self.inner.run(
+                    Station {
+                        location: GeoPoint { lat_deg, lon_deg },
+                        kappa_s,
+                        q_frequency_exponent,
+                    },
+                    seed,
+                );
                 // `sim.acc` is already (n_components, n_time), so this is a row copy per
                 // component into the batch's station slot.
                 for (component, trace) in sim.acc.rows().into_iter().enumerate() {

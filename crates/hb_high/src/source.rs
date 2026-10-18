@@ -40,19 +40,62 @@ pub struct MomentWeight(pub f32);
 /// One segment's moment weights, indexed by [`Segment::grid_index`].
 pub type SegmentWeights = Vec<MomentWeight>;
 
+/// The two source-strength factors of one subfault's spectrum, Graves & Pitarka (2010) eq. 12.
+///
+/// Both come from the subfault's stress parameter `Δσ_i`, and they come as a pair because
+/// they only make sense together: their product `F_i · σ_i·dl³ = M_o / √N` has no `Δσ_i` in
+/// it, so the long-period level, and with it the summed moment, is the same whatever the
+/// stress field. What `Δσ_i` moves is the high-frequency plateau (linearly), the effective
+/// corner `f_ci/√F_i` and the window duration. Varying one factor without the other would
+/// break the moment balance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceStrength {
+    /// `σ_i·dl³` — the subfault moment scale, dyn·cm, the denominator of eq. 12's `F`.
+    pub subevent_moment: f32,
+    /// `F_i` — Frankel's (1995) finite-fault factor. It scales the subfault corner frequency
+    /// towards the mainshock's while keeping the summed moment right; `crate::spectrum` is
+    /// where it does its work, and the note on `frank` there shows the algebra.
+    pub moment_scale: f32,
+}
+
+impl SourceStrength {
+    fn new(
+        stress_drop_bars: f32,
+        avg_subfault_km: f32,
+        total_moment_dyn_cm: f32,
+        radiating_subfault_count: usize,
+    ) -> Self {
+        let subevent_moment = stress_drop_bars
+            * avg_subfault_km
+            * avg_subfault_km
+            * avg_subfault_km
+            * BARS_KM3_TO_DYN_CM;
+        // This deviates from the published method: G&P define `F = M_o / (N * sigma_p * dl^3)`,
+        // linear in subfault count, and this uses `sqrt(N)`. Neither G&P (2010) nor (2015)
+        // licenses the square root. It is kept because production uses it and changing it
+        // would move every waveform.
+        //
+        // The `1.0 *` forces the integer count through a real multiply before the sqrt.
+        let moment_scale = total_moment_dyn_cm
+            / (subevent_moment * (1.0 * radiating_subfault_count as f32).sqrt());
+        Self {
+            subevent_moment,
+            moment_scale,
+        }
+    }
+}
+
+/// One segment's source strengths, indexed by [`Segment::grid_index`].
+pub type SegmentStrengths = Vec<SourceStrength>;
+
 /// The source's scale, derived from the slip model before any station is simulated.
-#[derive(Clone, Copy, Debug)]
 pub struct SourceScale {
     /// Average subfault dimension `dl = sqrt(length * width)`, averaged over segments, km.
     pub avg_subfault_km: f32,
-    /// `σ_p · dl³` — the subfault moment scale, the denominator of Graves & Pitarka (2010)
-    /// eq. 12's `F`, in dyn·cm.
-    pub subevent_moment: f32,
-    /// `F` in Graves & Pitarka (2010) eq. 12 — Frankel's (1995) finite-fault factor. It scales
-    /// the subfault corner frequency towards the mainshock's while keeping the summed moment
-    /// right; `crate::spectrum` is where it does its work, and the note on `frank` there shows
-    /// the algebra.
-    pub moment_scale: f32,
+    /// One [`SegmentWeights`] per segment.
+    pub weights: Vec<SegmentWeights>,
+    /// One [`SegmentStrengths`] per segment, from each subfault's own stress parameter.
+    pub strengths: Vec<SegmentStrengths>,
 }
 
 /// Convert slip to moment weights, and derive the source's scale from them.
@@ -67,12 +110,9 @@ pub struct SourceScale {
 /// 3. count the subfaults above [`SUBFAULT_WEIGHT_THRESHOLD`] and rescale so their mean
 ///    weight is 1
 ///
-/// Pass 3's count is the `N` of Graves & Pitarka (2010) eq. 12 that reaches `moment_scale`.
-pub fn scale_source(
-    slip: &SlipModel,
-    vmod: &VelocityModel,
-    stress_drop_bars: f32,
-) -> (SourceScale, Vec<SegmentWeights>) {
+/// Pass 3's count is the `N` of Graves & Pitarka (2010) eq. 12 that reaches every
+/// [`SourceStrength::moment_scale`].
+pub fn scale_source(slip: &SlipModel, vmod: &VelocityModel) -> SourceScale {
     let segment_count = slip.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
@@ -136,26 +176,32 @@ pub fn scale_source(
         weight.0 *= scale;
     }
 
-    let subevent_moment =
-        stress_drop_bars * avg_subfault_km * avg_subfault_km * avg_subfault_km * BARS_KM3_TO_DYN_CM;
+    // One `SourceStrength` per subfault, from its own stress parameter. Depth-major, which is
+    // grid-index order, so each vector is indexed like `weights`.
+    let strengths = slip
+        .segments
+        .iter()
+        .map(|segment| {
+            segment
+                .depth_rows()
+                .flatten()
+                .map(|subfault| {
+                    SourceStrength::new(
+                        subfault.stress_drop_bars,
+                        avg_subfault_km,
+                        total_moment_dyn_cm,
+                        radiating_subfault_count,
+                    )
+                })
+                .collect()
+        })
+        .collect();
 
-    // This deviates from the published method: G&P define `F = M_o / (N * sigma_p * dl^3)`,
-    // linear in subfault count, and this uses `sqrt(N)`. Neither G&P (2010) nor (2015)
-    // licenses the square root. It is kept because production uses it and changing it
-    // would move every waveform.
-    //
-    // The `1.0 *` forces the integer count through a real multiply before the sqrt.
-    let moment_scale =
-        total_moment_dyn_cm / (subevent_moment * (1.0 * radiating_subfault_count as f32).sqrt());
-
-    (
-        SourceScale {
-            avg_subfault_km,
-            subevent_moment,
-            moment_scale,
-        },
+    SourceScale {
+        avg_subfault_km,
         weights,
-    )
+        strengths,
+    }
 }
 
 /// Top of the shallow weak zone, km. Graves & Pitarka (2010).
@@ -340,6 +386,27 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, corner_frequency_alpha: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `F_i · σ_i·dl³ = M_o / √N` whatever the stress parameter, so a heterogeneous stress
+    /// field leaves every subfault's long-period level, and the summed moment, unchanged.
+    #[test]
+    fn the_stress_parameter_leaves_the_long_period_level_alone() {
+        let (avg_subfault_km, total_moment_dyn_cm, subfault_count) = (1.5f32, 3.0e25f32, 96);
+        let expected = total_moment_dyn_cm / (subfault_count as f32).sqrt();
+        for stress_drop_bars in [1.0f32, 10.0, 50.0, 137.5, 400.0] {
+            let strength = SourceStrength::new(
+                stress_drop_bars,
+                avg_subfault_km,
+                total_moment_dyn_cm,
+                subfault_count,
+            );
+            let level = strength.moment_scale * strength.subevent_moment;
+            assert!(
+                ((level - expected) / expected).abs() < 1e-6,
+                "{stress_drop_bars} bars: F*sigma*dl^3 = {level}, expected {expected}"
+            );
+        }
+    }
 
     /// `alpha_t`'s `rem_euclid` wrap agrees, to the bit, with stepping by 360 in a loop.
     ///

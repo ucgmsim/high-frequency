@@ -66,9 +66,7 @@ fn stoc_f_matches_fortran() {
             &SourceModel {
                 dt,
                 window,
-                subevent_moment: smt,
                 kappa_s: akapp,
-                moment_scale: bigc,
             },
             &SpectrumInputs {
                 distance_km: rr,
@@ -76,6 +74,8 @@ fn stoc_f_matches_fortran() {
                 shear_velocity_km_s: betvs,
                 density_g_cm3: row,
                 corner_frequency_hz: fc,
+                subevent_moment: smt,
+                moment_scale: bigc,
                 fmax_hz: fmx,
                 qbar: qb,
             },

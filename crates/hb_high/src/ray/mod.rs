@@ -676,6 +676,12 @@ const STRAIGHT_LINE_VELOCITY_KM_S: f32 = 3.7;
 /// Where the window starts, as a fraction of the straight-line travel time.
 const STRAIGHT_LINE_WINDOW_START_FRACTION: f32 = 0.7;
 
+/// Where the straight-line model starts the window for a path this long, s after the subfault
+/// ruptures. There is no lead-in: this is the window start, not an arrival.
+pub fn straight_line_window_start_s(path_length_km: f32) -> f32 {
+    STRAIGHT_LINE_WINDOW_START_FRACTION * path_length_km / STRAIGHT_LINE_VELOCITY_KM_S
+}
+
 /// One ray path from a subfault to the station, after tracing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TracedPath {
@@ -717,8 +723,7 @@ pub fn trace(
                 qbar: path_length_km / (shear_velocity_km_s * STRAIGHT_LINE_Q),
                 takeoff_rad: geometry.takeoff_rad,
                 onset: Onset::WindowStart {
-                    window_start_s: STRAIGHT_LINE_WINDOW_START_FRACTION * path_length_km
-                        / STRAIGHT_LINE_VELOCITY_KM_S,
+                    window_start_s: straight_line_window_start_s(path_length_km),
                 },
             }
         }

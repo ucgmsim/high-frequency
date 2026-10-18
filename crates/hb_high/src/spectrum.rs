@@ -243,24 +243,20 @@ impl PlanCache {
     }
 }
 
-/// Spectral-model constants that are fixed for the whole run.
+/// Spectral-model constants that are fixed for one station's run.
 ///
-/// The cut between this and [`SpectrumInputs`] is the useful one: everything here is the same on every
-/// one of the hundreds of thousands of calls in a run, and everything there changes on each.
+/// The cut between this and [`SpectrumInputs`] is the useful one: everything here is the same on
+/// every one of the thousands of calls for a station, and everything there changes on each.
 pub struct SourceModel {
     pub dt: f32,
     pub window: WindowShape,
-    /// `σ_p · dl³` — the subfault moment scale, in dyn·cm.
-    pub subevent_moment: f32,
-    /// `κ`, the near-surface attenuation operator's decay constant, in seconds. Production
-    /// uses 0.045. Anderson & Hough (1984).
+    /// `κ`, the station's near-surface attenuation operator's decay constant, in seconds.
+    /// Production uses 0.045. Anderson & Hough (1984).
     pub kappa_s: f32,
-    /// `F` in Graves & Pitarka (2010) eq. 12 — Frankel's finite-fault factor. See the note on
-    /// `frank` in [`stochastic_spectrum`], which is where it does its work.
-    pub moment_scale: f32,
 }
 
-/// One `(subfault, ray, component)`'s own path, and the medium at its source.
+/// One `(subfault, ray, component)`'s own path, plus the subfault at its source: its strength
+/// and the medium it sits in.
 pub struct SpectrumInputs {
     /// Ray path length, not epicentral distance.
     pub distance_km: f32,
@@ -271,6 +267,13 @@ pub struct SpectrumInputs {
     pub density_g_cm3: f32,
     /// `f_ci`, Graves & Pitarka (2010) eq. 13.
     pub corner_frequency_hz: f32,
+    /// `σ_i · dl³` — the subfault moment scale, in dyn·cm, from the subfault's own stress
+    /// parameter.
+    pub subevent_moment: f32,
+    /// `F_i` in Graves & Pitarka (2010) eq. 12 — Frankel's finite-fault factor, paired with
+    /// `subevent_moment`. See the note on `frank` in [`SpectrumShape::refresh`], which is
+    /// where it does its work.
+    pub moment_scale: f32,
     /// Capped at 15 Hz for the vertical component, which is why this is per-call rather
     /// than a [`SourceModel`] constant.
     pub fmax_hz: f32,
@@ -346,9 +349,7 @@ impl SpectrumShape {
         let &SourceModel {
             dt,
             window,
-            subevent_moment,
             kappa_s,
-            moment_scale,
         } = model;
         let &SpectrumInputs {
             distance_km,
@@ -356,6 +357,8 @@ impl SpectrumShape {
             shear_velocity_km_s,
             density_g_cm3,
             corner_frequency_hz,
+            subevent_moment,
+            moment_scale,
             fmax_hz,
             qbar,
         } = path;

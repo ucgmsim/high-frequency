@@ -11,10 +11,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use hb_high::geom::GeoPoint;
+use hb_high::sim::Station;
 
 #[path = "../tests/common/fixtures.rs"]
 mod fixtures;
-use fixtures::{crustal_model, production_config, uniform_fault};
+use fixtures::{crustal_model, production_config, production_station, uniform_fault};
 
 /// Grid shapes spanning three orders of magnitude in subfault count. The alpine-scale case is
 /// seconds per iteration, so it stays opt-in via `HB_BENCH_SLOW=1`.
@@ -36,10 +37,10 @@ fn bench_whole(c: &mut Criterion) {
             continue;
         }
         let slip = uniform_fault(along, down);
-        let station = GeoPoint {
+        let station = production_station(GeoPoint {
             lon_deg: 173.3,
             lat_deg: -42.7,
-        };
+        });
         group.bench_with_input(
             BenchmarkId::new(name, slip.subfault_count),
             &slip,
@@ -78,11 +79,13 @@ fn bench_batch(c: &mut Criterion) {
     let config = production_config(40.0);
     let slow = std::env::var("HB_BENCH_SLOW").is_ok_and(|v| v == "1");
 
-    let stations: Vec<GeoPoint> = (0..BATCH_STATIONS)
-        .map(|i| GeoPoint {
-            // Spread over about a degree, so the batch is not one geometry repeated.
-            lon_deg: 173.3 + 0.05 * i as f32,
-            lat_deg: -42.7 - 0.05 * i as f32,
+    let stations: Vec<Station> = (0..BATCH_STATIONS)
+        .map(|i| {
+            production_station(GeoPoint {
+                // Spread over about a degree, so the batch is not one geometry repeated.
+                lon_deg: 173.3 + 0.05 * i as f32,
+                lat_deg: -42.7 - 0.05 * i as f32,
+            })
         })
         .collect();
 

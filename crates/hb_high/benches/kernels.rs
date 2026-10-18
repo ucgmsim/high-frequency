@@ -365,10 +365,7 @@ fn bench_spectrum(c: &mut Criterion) {
         let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
         let src = spectrum(np2);
         let (fn_, an) = site_table();
-        let mut rdna = vec![0.0; np2];
-        for slot in rdna.iter_mut().take(nf) {
-            *slot = 0.7;
-        }
+        let rdna = vec![0.7; nf];
 
         group.throughput(Throughput::Elements(np2 as u64));
 
@@ -384,9 +381,7 @@ fn bench_spectrum(c: &mut Criterion) {
                 let model = SourceModel {
                     dt: DT,
                     window: WindowShape::BOORE_1983,
-                    subevent_moment: 3.0e22,
                     kappa_s: 0.045,
-                    moment_scale: 2.1,
                 };
                 let path = SpectrumInputs {
                     distance_km: 60.0,
@@ -394,6 +389,8 @@ fn bench_spectrum(c: &mut Criterion) {
                     shear_velocity_km_s: 3.2,
                     density_g_cm3: 2.7,
                     corner_frequency_hz: 1.5,
+                    subevent_moment: 3.0e22,
+                    moment_scale: 2.1,
                     fmax_hz: 10.0,
                     qbar: 0.02,
                 };
