@@ -18,4 +18,3 @@ pre-push:
     yaml:
       run: uvx yamllint {push_files}
       glob: "*.{yaml,yml}"
-
