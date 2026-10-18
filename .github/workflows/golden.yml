@@ -1,0 +1,38 @@
+name: Golden comparison
+
+# Runs the same suite of simulations through this PR and through its merge base, and fails
+# if any sample of any record differs. The table of what moved, and by how much, is the
+# job summary and the `golden-report` artifact. See harness/golden_compare.py.
+
+on:
+  pull_request:
+
+jobs:
+  golden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge base must be reachable.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - uses: Swatinem/rust-cache@v2
+      - name: Compare against the merge base
+        run: >
+          uv run --frozen --with h5py python -I harness/golden_compare.py ab
+          --base origin/${{ github.base_ref }}
+          --work-dir "$RUNNER_TEMP/golden"
+          --markdown "$RUNNER_TEMP/golden-report.md"
+      - name: Publish the report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/golden-report.md" ]; then
+            cat "$RUNNER_TEMP/golden-report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-report
+          path: ${{ runner.temp }}/golden-report.md
+          if-no-files-found: ignore
