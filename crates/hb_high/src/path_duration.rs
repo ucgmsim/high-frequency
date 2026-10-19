@@ -17,24 +17,21 @@
 ///   stochastic-method simulations of ground motion. *BSSA* **105**(2A), 1029–1041.
 ///   doi:10.1785/0120140281 — Table 3, "The Path Duration Model for Stable Continental
 ///   Regions".
-///
-/// The wire encoding is the non-contiguous integer set `0`/`1`/`2`/`11`/`12`; see
-/// [`PathDurationModel::from_code`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathDurationModel {
-    /// `<= 0` — Graves & Pitarka (2010) eq. 17, single segment, slope `c₁ = 0.063` s/km.
+    /// Graves & Pitarka (2010) eq. 17, single segment, slope `c₁ = 0.063` s/km.
     ///
     /// Verified exact against the paper.
     Gp2010,
-    /// `1` — western US, slope 0.070 s/km.
+    /// Western US, slope 0.070 s/km.
     ///
-    /// No published source: models 1 and 2 are the Graves & Pitarka slope adjusted by hand
+    /// No published source: this and [`Self::Ena`] are the Graves & Pitarka slope adjusted by hand
     /// ("WUS/ENA modification trial/error"), not a model from the literature.
     Wus,
-    /// `2` — eastern North America, slope 0.100 s/km. Hand-adjusted like [`Self::Wus`], with
+    /// Eastern North America, slope 0.100 s/km. Hand-adjusted like [`Self::Wus`], with
     /// no published source.
     Ena,
-    /// `11` — Boore & Thompson (2014) Table 1, active crustal regions.
+    /// Boore & Thompson (2014) Table 1, active crustal regions.
     ///
     /// Breakpoints at 0, 7, 45, 125, 175 and 270 km, with durations 0, 2.4, 8.4, 10.9, 17.4
     /// and 34.2 s, linearly interpolated between, as Table 1 specifies.
@@ -47,30 +44,15 @@ pub enum PathDurationModel {
     ///
     /// This is the model production runs.
     Bt2014Wus,
-    /// `12` — Boore & Thompson (2015) Table 3, stable continental regions.
+    /// Boore & Thompson (2015) Table 3, stable continental regions.
     ///
     /// Breakpoints at 0, 15, 35, 50, 125, 200, 392 and 600 km, with durations 0, 2.6, 17.5,
     /// 25.1, 25.1, 28.5, 46.0 and 69.1 s, linearly interpolated, with the `D_P(R) =
     /// D_P(R_last) + 0.111(R − R_last)` tail of Table 3.
     ///
-    /// Unlike model 11 the tail matches the paper, because its 0.111 s/km equals the final
+    /// Unlike [`Self::Bt2014Wus`] the tail matches the paper, because its 0.111 s/km equals the final
     /// tabulated segment's slope, which is what the table builder repeats.
     Bt2015Ena,
-}
-
-impl PathDurationModel {
-    /// Decode the wire integer. Everything `<= 0` maps to `Gp2010`; any other value outside
-    /// the set is rejected.
-    pub fn from_code(v: i32) -> Option<Self> {
-        Some(match v {
-            i32::MIN..=0 => Self::Gp2010,
-            1 => Self::Wus,
-            2 => Self::Ena,
-            11 => Self::Bt2014Wus,
-            12 => Self::Bt2015Ena,
-            _ => return None,
-        })
-    }
 }
 
 /// One segment of the piecewise-linear duration-versus-distance table.
@@ -186,45 +168,4 @@ fn from_breakpoints<const N: usize>(
         slope_s_per_km: last_slope,
     });
     table
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn path_duration_accepts_only_the_five_documented_values() {
-        assert_eq!(
-            PathDurationModel::from_code(0),
-            Some(PathDurationModel::Gp2010)
-        );
-        assert_eq!(
-            PathDurationModel::from_code(-7),
-            Some(PathDurationModel::Gp2010)
-        );
-        assert_eq!(
-            PathDurationModel::from_code(1),
-            Some(PathDurationModel::Wus)
-        );
-        assert_eq!(
-            PathDurationModel::from_code(2),
-            Some(PathDurationModel::Ena)
-        );
-        assert_eq!(
-            PathDurationModel::from_code(11),
-            Some(PathDurationModel::Bt2014Wus)
-        );
-        assert_eq!(
-            PathDurationModel::from_code(12),
-            Some(PathDurationModel::Bt2015Ena)
-        );
-        // Values outside the documented set are rejected.
-        for bad in [3, 5, 10, 13, 99] {
-            assert_eq!(
-                PathDurationModel::from_code(bad),
-                None,
-                "{bad} should be rejected"
-            );
-        }
-    }
 }

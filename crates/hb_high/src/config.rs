@@ -1,4 +1,4 @@
-//! The simulation configuration, as a typed value rather than a positional deck.
+//! The simulation configuration, as a typed value.
 //!
 //! Every field here is supplied by the caller. There are no defaults and no `Option`s to
 //! resolve: the Python dataclasses in `hf_simulation` are the single source of truth for

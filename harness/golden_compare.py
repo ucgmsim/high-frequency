@@ -423,10 +423,10 @@ def cases() -> list[Case]:
         ),
         Case(
             "ray_all",
-            "rays 0-4 summed, truncated Moho",
+            "rays 0, 1 and 2 summed, truncated Moho",
             medium,
             lambda: harness_vmod() | {"vs_moho_km_s": 4.0},
-            config(rayset=(0, 1, 2, 3, 4), duration_s=60.0),
+            config(rayset=(0, 1, 2), duration_s=60.0),
             stations(NEAR),
         ),
         Case(

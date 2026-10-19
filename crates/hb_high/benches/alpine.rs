@@ -24,7 +24,7 @@
 //! `HB_STOCH` defaults to the committed `alpine_base_r1.stoch`, which is a single 257x11
 //! segment — enough to exercise the path, an order of magnitude short of the real thing.
 //! `HB_STATIONS` takes a comma-separated subset of the names below; a full five-station run
-//! on the real deck is minutes, not seconds.
+//! on the real slip model is minutes, not seconds.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -34,7 +34,7 @@ use hb_high::config::{
 };
 use hb_high::geom::GeoPoint;
 use hb_high::path_duration::PathDurationModel;
-use hb_high::ray::RayType;
+use hb_high::ray::{RayShape, RayType};
 use hb_high::sim::Station;
 use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
 use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
@@ -64,9 +64,8 @@ fn config() -> HfConfig {
             },
         },
         path: PathParameters {
-            rayset: vec![RayType::from_code(1).expect("1 is the direct upgoing ray")],
-            path_duration: PathDurationModel::from_code(11)
-                .expect("11 is Boore & Thompson (2014) WUS"),
+            rayset: vec![RayType::Traced(RayShape::Upgoing { multiples: 0 })],
+            path_duration: PathDurationModel::Bt2014Wus,
         },
         site: SiteParameters { fmax_hz: 10.0 },
         record: RecordParameters {
@@ -379,7 +378,7 @@ fn main() {
         .expect("every segment of a stoch file is diced the same way");
     let setup_ms = build.elapsed().as_secs_f64() * 1e3;
 
-    println!("deck      {}", stoch.display());
+    println!("slip      {}", stoch.display());
     println!(
         "          {} segments, {subfaults} subfaults, {} rays, {:.0} s record at dt {}",
         slip.segments.len(),

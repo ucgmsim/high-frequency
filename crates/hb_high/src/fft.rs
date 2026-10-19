@@ -164,7 +164,7 @@ mod tests {
 
     /// The three things a caller relies on, over every length this program can form.
     ///
-    /// `at_least` runs to well past the largest transform a production deck reaches
+    /// `at_least` runs to well past the largest transform a production run reaches
     /// (131,072 for an Alpine Fault subfault at 600 km), stepping so that both small and
     /// large regimes are covered.
     #[test]

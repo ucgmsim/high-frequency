@@ -100,8 +100,7 @@ __all__ = [
 class Ray(enum.IntEnum):
     """A ray path to sum over.
 
-    Only the paths that are meaningful are listed: the Rust tracer decodes any integer by
-    parity, but a value outside this set names a Moho multiple nothing has ever run.
+    These are the only rays a simulation accepts; any other value is a ``ValueError``.
     """
 
     STRAIGHT = 0
@@ -115,7 +114,7 @@ class Ray(enum.IntEnum):
 class PathDurationModel(enum.IntEnum):
     """How record duration grows with distance.
 
-    The integer values are non-contiguous; only these codes name a duration model.
+    These are the only models a simulation accepts; any other value is a ``ValueError``.
     """
 
     GRAVES_PITARKA_2010 = 0

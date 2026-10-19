@@ -5,7 +5,7 @@ use hb_high::config::{
 };
 use hb_high::geom::GeoPoint;
 use hb_high::path_duration::PathDurationModel;
-use hb_high::ray::RayType;
+use hb_high::ray::{RayShape, RayType};
 use hb_high::sim::{COMPONENT_COUNT, Simulator, Station};
 use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
 use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
@@ -262,30 +262,42 @@ impl PyPathParameters {
     #[new]
     #[pyo3(signature = (*, rayset, path_duration_model))]
     fn new(rayset: Vec<i32>, path_duration_model: i32) -> PyResult<Self> {
-        // Only the checks Python cannot make for itself: these decode integer codes whose
-        // meaning the Rust enums own.
-        let path_duration = PathDurationModel::from_code(path_duration_model).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "path_duration_model {path_duration_model} is not one of 0, 1, 2, 11, 12"
-            ))
-        })?;
-        let rayset = rayset
-            .into_iter()
-            .map(|code| {
-                RayType::from_code(code).ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "ray type {code} is negative; 0 is the straight line and a positive \
-                         code a traced ray"
-                    ))
-                })
-            })
-            .collect::<PyResult<_>>()?;
         Ok(Self {
             inner: PathParameters {
-                rayset,
-                path_duration,
+                rayset: rayset.into_iter().map(ray_type).collect::<PyResult<_>>()?,
+                path_duration: path_duration_model_from_value(path_duration_model)?,
             },
         })
+    }
+}
+
+/// The ray a `hf_simulation.Ray` value names.
+///
+/// The values are Python's to choose, so they are decoded here, at the boundary, and the
+/// core sees only [`RayType`].
+fn ray_type(value: i32) -> PyResult<RayType> {
+    match value {
+        0 => Ok(RayType::StraightLine),
+        1 => Ok(RayType::Traced(RayShape::Upgoing { multiples: 0 })),
+        2 => Ok(RayType::Traced(RayShape::DownToMoho { multiples: 0 })),
+        _ => Err(PyValueError::new_err(format!(
+            "ray {value} is not a hf_simulation.Ray (0, 1 or 2)"
+        ))),
+    }
+}
+
+/// The model a `hf_simulation.PathDurationModel` value names.
+fn path_duration_model_from_value(value: i32) -> PyResult<PathDurationModel> {
+    match value {
+        0 => Ok(PathDurationModel::Gp2010),
+        1 => Ok(PathDurationModel::Wus),
+        2 => Ok(PathDurationModel::Ena),
+        11 => Ok(PathDurationModel::Bt2014Wus),
+        12 => Ok(PathDurationModel::Bt2015Ena),
+        _ => Err(PyValueError::new_err(format!(
+            "path_duration_model {value} is not a hf_simulation.PathDurationModel \
+             (0, 1, 2, 11 or 12)"
+        ))),
     }
 }
 

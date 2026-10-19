@@ -26,7 +26,7 @@ pub struct FixtureDraws {
 }
 
 impl FixtureDraws {
-    /// The deck's seed is folded in so different seeds still give different runs — the
+    /// The seed is folded in so different seeds still give different runs — the
     /// gate compares two builds at matched seeds, not one build against a constant.
     pub fn seed(irand: i32) -> Self {
         Self {

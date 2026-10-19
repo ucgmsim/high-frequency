@@ -48,35 +48,7 @@ pub enum RayShape {
     DownToMoho { multiples: u32 },
 }
 
-impl RayType {
-    /// Decode the integer ray code the configuration carries: `0` is the straight line, and a
-    /// positive code is a traced ray, decoded by [`RayShape::from_code`]. Negative codes name
-    /// nothing and give `None`.
-    pub fn from_code(code: i32) -> Option<Self> {
-        match code {
-            0 => Some(Self::StraightLine),
-            _ => RayShape::from_code(code).map(Self::Traced),
-        }
-    }
-}
-
 impl RayShape {
-    /// Decode a positive ray code. The **parity** picks the take-off direction — odd leaves
-    /// upward, even downward — and each further pair adds one Moho multiple: `1` is the direct
-    /// ray, `2` the Moho reflection, `3` the direct ray plus one multiple, and so on.
-    pub fn from_code(code: i32) -> Option<Self> {
-        let code = u32::try_from(code).ok().filter(|&code| code > 0)?;
-        Some(if code % 2 == 1 {
-            Self::Upgoing {
-                multiples: (code - 1) / 2,
-            }
-        } else {
-            Self::DownToMoho {
-                multiples: (code - 2) / 2,
-            }
-        })
-    }
-
     /// Which way the ray leaves the source.
     pub fn takeoff(self) -> Takeoff {
         match self {
@@ -752,25 +724,5 @@ pub fn trace(
                 },
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ray_codes_split_on_zero_then_parity() {
-        assert_eq!(RayType::from_code(0), Some(RayType::StraightLine));
-        for (code, shape) in [
-            (1, RayShape::Upgoing { multiples: 0 }),
-            (2, RayShape::DownToMoho { multiples: 0 }),
-            (3, RayShape::Upgoing { multiples: 1 }),
-            (4, RayShape::DownToMoho { multiples: 1 }),
-        ] {
-            assert_eq!(RayType::from_code(code), Some(RayType::Traced(shape)));
-        }
-        assert_eq!(RayShape::from_code(0), None, "0 is not a traced ray");
-        assert_eq!(RayType::from_code(-1), None, "negative codes name nothing");
     }
 }

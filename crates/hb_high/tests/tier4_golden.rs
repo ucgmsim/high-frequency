@@ -3,7 +3,7 @@
 //! `gf_amp_tt.bin`).
 
 use hb_high::fft::Complex32;
-use hb_high::ray::{RayShape, RayState, WaveMode, green_function};
+use hb_high::ray::{RayState, WaveMode, green_function};
 use hb_high::rng::{Draws, LegacyPcg};
 use hb_high::spectrum::{
     SourceModel, SpectrumInputs, SpectrumPlan, SpectrumShape, WindowShape, stochastic_spectrum,
@@ -156,7 +156,7 @@ fn gf_amp_tt_matches_fortran() {
             &vmod,
             src_depth,
             range,
-            RayShape::from_code(itype).expect("the corpus holds only traced ray types"),
+            ray_shape_from_code(itype),
             wave_mode_from_code(md),
         );
 
