@@ -17,7 +17,9 @@ from hf_simulation import (
 
 # The four groups mirror the simulation core's own decomposition, so a
 # configuration written down elsewhere deserialises straight into this.
-config = HfConfig(record=RecordParameters(duration_s=40.0))
+# start_s < 0 gives the record a pre-event lead: with the default 0 it starts at
+# the origin time and cuts off the start of the shaking near the hypocentre.
+config = HfConfig(record=RecordParameters(duration_s=40.0, start_s=-10.0))
 
 # Built once per source: the air layer, the slip-model normalisation and the
 # moment scaling do not depend on where the receiver is.
