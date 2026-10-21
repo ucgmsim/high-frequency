@@ -6,7 +6,7 @@ name: AI
 on:
   schedule:
     - cron: "17 13 * * 6"  # Sundays: issue generator
-    - cron: "17 13 * * 2"  # Wednesdays: issue solver and test improver
+    - cron: "17 13 * * *"  # Daily: issue solver and test improver
   workflow_dispatch:
     inputs:
       run:
@@ -32,17 +32,18 @@ jobs:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   issue-solver:
-    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'issue-solver'
+    if: github.event.schedule == '17 13 * * *' || inputs.run == 'issue-solver'
     uses: ucgmsim/meta-ci-action/.github/workflows/ai-issue-solver.yml@v2
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     with:
-      issue: ${{ inputs.issue || 0 }}
+      # A dispatch passes the number as a string, which a number input rejects.
+      issue: ${{ fromJSON(inputs.issue || '0') }}
       # [tool.pytest.ini_options] testpaths, as ci.yml runs them.
       test-command: "uv run --no-sync pytest -q -x"
 
   test-improver:
-    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'test-improver'
+    if: github.event.schedule == '17 13 * * *' || inputs.run == 'test-improver'
     uses: ucgmsim/meta-ci-action/.github/workflows/ai-test-improver.yml@v2
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
