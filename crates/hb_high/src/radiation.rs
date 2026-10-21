@@ -25,6 +25,12 @@ const FULL_TURN_RAD: f32 = 360.0 * (std::f32::consts::PI / 180.0);
 /// is already taken around the theoretical ray, little purely theoretical pattern is allowed.
 pub const CONICAL_FLOOR: f32 = 1.0;
 
+/// How many perturbed orientations the conical average is taken over, for either component.
+///
+/// This is a draw count as well as a sample count: a horizontal average draws five uniforms
+/// per sample, and the vertical average reads this many from each of its two pre-drawn tables.
+pub const CONICAL_SAMPLE_COUNT: usize = 1000;
+
 /// Fault orientation and the ray's arrival direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RadiationAngles {
@@ -328,7 +334,7 @@ mod tests {
     use super::*;
     use std::f32::consts::PI;
 
-    /// `sim::trace_ray` sets `takeoff_rad = PI - incidence` for the production `Upgoing` ray,
+    /// `ray::trace` sets `takeoff_rad = PI - incidence` for the production upgoing ray,
     /// with `incidence` in `[0, PI/2]`, landing in `[PI/2, PI]`. That is the range the vertical
     /// average's take-off clamp accepts, so the clamp keeps *upgoing* directions, not
     /// "downgoing" ones.

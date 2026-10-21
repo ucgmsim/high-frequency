@@ -11,11 +11,11 @@ pub struct GeoPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DistanceAzimuth {
     /// Great-circle distance, km.
-    pub deltkm: f32,
+    pub distance_km: f32,
     /// Azimuth event to station, radians, in `[0, 2pi)`.
-    pub azes: f32,
+    pub azimuth_rad: f32,
     /// Azimuth event to station, degrees, in `[0, 360)`.
-    pub azesdg: f32,
+    pub azimuth_deg: f32,
 }
 
 /// The WGS84 ellipsoid, built once.
@@ -27,8 +27,8 @@ pub fn distance_azimuth(event: GeoPoint, station: GeoPoint) -> DistanceAzimuth {
 
     let geodesic = WGS84.get_or_init(geographiclib_rs::Geodesic::wgs84);
 
-    let (metres, azimuth_deg, _back_azimuth_deg, _arc_deg): (f64, f64, f64, f64) = geodesic
-        .inverse(
+    let (metres, geodesic_azimuth_deg, _back_azimuth_deg, _arc_deg): (f64, f64, f64, f64) =
+        geodesic.inverse(
             event.lat_deg as f64,
             event.lon_deg as f64,
             station.lat_deg as f64,
@@ -38,24 +38,24 @@ pub fn distance_azimuth(event: GeoPoint, station: GeoPoint) -> DistanceAzimuth {
     // geographiclib reports azimuth in (-180, 180]; the callers want [0, 360). Wrapping
     // 360.0 exactly to 0.0 keeps the range half-open after the f32 narrowing, which a
     // bare `+ 360.0` does not for azimuths within an f32 ulp of zero from below.
-    let shifted = if azimuth_deg < 0.0 {
-        azimuth_deg + 360.0
+    let shifted = if geodesic_azimuth_deg < 0.0 {
+        geodesic_azimuth_deg + 360.0
     } else {
-        azimuth_deg
+        geodesic_azimuth_deg
     } as f32;
-    let azesdg = if shifted >= 360.0 { 0.0 } else { shifted };
+    let azimuth_deg = if shifted >= 360.0 { 0.0 } else { shifted };
 
-    let radians = azesdg.to_radians();
-    let azes = if radians >= std::f32::consts::TAU {
+    let radians = azimuth_deg.to_radians();
+    let azimuth_rad = if radians >= std::f32::consts::TAU {
         0.0
     } else {
         radians
     };
 
     DistanceAzimuth {
-        deltkm: (metres / 1000.0) as f32,
-        azes,
-        azesdg,
+        distance_km: (metres / 1000.0) as f32,
+        azimuth_rad,
+        azimuth_deg,
     }
 }
 
@@ -71,7 +71,7 @@ pub struct SubfaultRay {
     /// parameter under the straight-ray approximation.
     pub takeoff_rad: f32,
     /// Horizontal distance from subfault to station, km.
-    pub horiz_km: f32,
+    pub horizontal_km: f32,
     /// Subfault depth below the surface, km.
     pub depth_km: f32,
 }
@@ -143,36 +143,32 @@ pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeome
     let mut rays = vec![SubfaultRay::default(); along_strike_count * down_dip_count];
 
     let pi = std::f32::consts::PI;
-    let thei = fault.lat_deg;
 
-    // Degrees-to-km scale factors, obtained empirically: one geodesic solve a degree east,
-    // one a degree north.
-    let origin = GeoPoint {
-        lat_deg: thei,
+    // Degrees-to-km scale factors at the fault's latitude, obtained empirically: one geodesic
+    // solve a degree east, one a degree north.
+    let reference = GeoPoint {
+        lat_deg: fault.lat_deg,
         lon_deg: 0.0,
     };
     let east = distance_azimuth(
-        origin,
+        reference,
         GeoPoint {
-            lat_deg: thei,
+            lat_deg: fault.lat_deg,
             lon_deg: 1.0,
         },
     );
     let north = distance_azimuth(
-        origin,
+        reference,
         GeoPoint {
-            lat_deg: thei + 1.0,
+            lat_deg: fault.lat_deg + 1.0,
             lon_deg: 0.0,
         },
     );
-    let ddx = east.deltkm * (pi * east.azesdg / 180.0).sin();
-    let ddy = north.deltkm * (pi * north.azesdg / 180.0).cos();
+    let km_per_degree_lon = east.distance_km * (pi * east.azimuth_deg / 180.0).sin();
+    let km_per_degree_lat = north.distance_km * (pi * north.azimuth_deg / 180.0).cos();
 
-    let az = strike_deg * pi / 180.0;
-    let dip = dip_deg * pi / 180.0;
-
-    let ylat = fault.lat_deg;
-    let xlon = fault.lon_deg;
+    let strike_rad = strike_deg * pi / 180.0;
+    let dip_rad = dip_deg * pi / 180.0;
 
     // Unlike the subfault pass in `sim`, the iteration order here is free: every entry is a
     // pure function of `(i, j)` with no accumulation and no RNG draw. Walking depth rows
@@ -182,35 +178,30 @@ pub fn subfault_geometry(plane: &FaultPlane, station: GeoPoint) -> SubfaultGeome
     // coordinate of subfault `i` is `(i - 0.5) * length`, half a cell from the edge.
     for (row, down_dip_row) in rays.chunks_mut(along_strike_count).enumerate() {
         let j = row + 1;
-        let down_dip = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
-        let a1 = down_dip * dip.cos();
-        let b1 = down_dip * dip.sin();
-        let zm1 = top_depth_km + b1;
+        let down_dip_km = (j - 1) as f32 * subfault_width_km + subfault_width_km / 2.0;
+        // The subfault centre's horizontal offset perpendicular to strike, and its depth.
+        let across_strike_km = down_dip_km * dip_rad.cos();
+        let depth_km = top_depth_km + down_dip_km * dip_rad.sin();
 
         for (col, ray) in down_dip_row.iter_mut().enumerate() {
             let i = col + 1;
-            let along = (i as f32 - 0.5) * subfault_length_km - along_strike_offset_km;
-            let dlon = along * az.sin() + a1 * az.cos();
-            let dlat = along * az.cos() - a1 * az.sin();
+            let along_strike_km = (i as f32 - 0.5) * subfault_length_km - along_strike_offset_km;
+            let east_km = along_strike_km * strike_rad.sin() + across_strike_km * strike_rad.cos();
+            let north_km = along_strike_km * strike_rad.cos() - across_strike_km * strike_rad.sin();
 
-            let stlon = xlon + dlon / ddx;
-            let stlat = ylat + dlat / ddy;
-
-            let g = distance_azimuth(
-                GeoPoint {
-                    lat_deg: stlat,
-                    lon_deg: stlon,
-                },
-                station,
-            );
-            let dis = g.deltkm;
+            let centre = GeoPoint {
+                lat_deg: fault.lat_deg + north_km / km_per_degree_lat,
+                lon_deg: fault.lon_deg + east_km / km_per_degree_lon,
+            };
+            let to_station = distance_azimuth(centre, station);
+            let horizontal_km = to_station.distance_km;
 
             *ray = SubfaultRay {
-                horiz_km: dis,
-                slant_km: (dis * dis + zm1 * zm1).sqrt(),
-                takeoff_rad: pi - dis.atan2(zm1),
-                azimuth_rad: g.azes,
-                depth_km: zm1,
+                horizontal_km,
+                slant_km: (horizontal_km * horizontal_km + depth_km * depth_km).sqrt(),
+                takeoff_rad: pi - horizontal_km.atan2(depth_km),
+                azimuth_rad: to_station.azimuth_rad,
+                depth_km,
             };
         }
     }

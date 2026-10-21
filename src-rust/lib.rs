@@ -1,19 +1,18 @@
 //! Python bindings for the `hb_high` stochastic high-frequency generator.
 
 use hb_high::config::{
-    HfConfig, PathDurationModel, PathParameters, RayType, RecordParameters, RuptureVelocity,
-    SiteParameters, SourceParameters,
+    HfConfig, PathParameters, RecordParameters, RuptureVelocity, SiteParameters, SourceParameters,
 };
-use hb_high::input::{Segment, Slip, Station, StochModel, Subfault, build_velocity_model};
-use hb_high::sim::Simulator;
-use hb_high::state::{InputLayer, VelocityModelInput};
+use hb_high::geom::GeoPoint;
+use hb_high::path_duration::PathDurationModel;
+use hb_high::ray::{RayShape, RayType};
+use hb_high::sim::{COMPONENT_COUNT, Simulator, Station};
+use hb_high::slip_model::{Segment, Slip, SlipModel, Subfault};
+use hb_high::velocity::{InputLayer, VelocityModelInput, build_velocity_model};
 use numpy::ndarray::{Array3, s};
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-
-/// Components per station: 090, 000, vertical.
-const COMPONENT_COUNT: usize = 3;
 
 /// One fault segment: geometry plus the four subfault grids.
 ///
@@ -119,7 +118,7 @@ impl PyFaultSegment {
 /// A whole slip model: one or more [`PyFaultSegment`].
 #[pyclass(frozen, name = "SlipModel")]
 pub struct PySlipModel {
-    inner: StochModel,
+    inner: SlipModel,
 }
 
 #[pymethods]
@@ -133,7 +132,7 @@ impl PySlipModel {
         }
         let segments = segments.iter().map(|s| s.inner.clone()).collect();
         Ok(Self {
-            inner: StochModel::new(segments),
+            inner: SlipModel::new(segments),
         })
     }
 
@@ -238,13 +237,13 @@ impl PySourceParameters {
     ) -> Self {
         Self {
             inner: SourceParameters {
-                czero: corner_frequency_constant,
-                calpha: corner_frequency_alpha,
+                corner_frequency_constant,
+                corner_frequency_alpha,
                 rupture_velocity: RuptureVelocity {
-                    frac: rupture_velocity_fraction,
-                    shallow: rupture_velocity_shallow,
-                    deep: rupture_velocity_deep,
-                    rv_sig1: rupture_velocity_sigma,
+                    fraction: rupture_velocity_fraction,
+                    shallow_factor: rupture_velocity_shallow,
+                    deep_factor: rupture_velocity_deep,
+                    sigma: rupture_velocity_sigma,
                 },
             },
         }
@@ -263,19 +262,42 @@ impl PyPathParameters {
     #[new]
     #[pyo3(signature = (*, rayset, path_duration_model))]
     fn new(rayset: Vec<i32>, path_duration_model: i32) -> PyResult<Self> {
-        // Only the checks Python cannot make for itself: this one decodes a non-contiguous
-        // integer set that the Rust enum owns.
-        let path_duration = PathDurationModel::from_deck(path_duration_model).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "path_duration_model {path_duration_model} is not one of 0, 1, 2, 11, 12"
-            ))
-        })?;
         Ok(Self {
             inner: PathParameters {
-                rayset: rayset.into_iter().map(RayType).collect(),
-                path_duration,
+                rayset: rayset.into_iter().map(ray_type).collect::<PyResult<_>>()?,
+                path_duration: path_duration_model_from_value(path_duration_model)?,
             },
         })
+    }
+}
+
+/// The ray a `hf_simulation.Ray` value names.
+///
+/// The values are Python's to choose, so they are decoded here, at the boundary, and the
+/// core sees only [`RayType`].
+fn ray_type(value: i32) -> PyResult<RayType> {
+    match value {
+        0 => Ok(RayType::StraightLine),
+        1 => Ok(RayType::Traced(RayShape::Upgoing { multiples: 0 })),
+        2 => Ok(RayType::Traced(RayShape::DownToMoho { multiples: 0 })),
+        _ => Err(PyValueError::new_err(format!(
+            "ray {value} is not a hf_simulation.Ray (0, 1 or 2)"
+        ))),
+    }
+}
+
+/// The model a `hf_simulation.PathDurationModel` value names.
+fn path_duration_model_from_value(value: i32) -> PyResult<PathDurationModel> {
+    match value {
+        0 => Ok(PathDurationModel::Gp2010),
+        1 => Ok(PathDurationModel::Wus),
+        2 => Ok(PathDurationModel::Ena),
+        11 => Ok(PathDurationModel::Bt2014Wus),
+        12 => Ok(PathDurationModel::Bt2015Ena),
+        _ => Err(PyValueError::new_err(format!(
+            "path_duration_model {value} is not a hf_simulation.PathDurationModel \
+             (0, 1, 2, 11 or 12)"
+        ))),
     }
 }
 
@@ -293,7 +315,7 @@ impl PySiteParameters {
     #[pyo3(signature = (*, fmax_hz))]
     fn new(fmax_hz: f32) -> Self {
         Self {
-            inner: SiteParameters { f_max_hz: fmax_hz },
+            inner: SiteParameters { fmax_hz },
         }
     }
 }
@@ -405,21 +427,20 @@ impl PySimulator {
             let ndata = self.inner.ndata();
             let mut waveform = Array3::zeros((COMPONENT_COUNT, station_count, ndata));
 
-            for (index, ((((&stlat, &stlon), &seed), &kappa_s), &q_exponent)) in latitude
-                .iter()
-                .zip(longitude)
-                .zip(seeds)
-                .zip(kappa)
-                .zip(q_exponent)
-                .enumerate()
+            for (index, ((((&lat_deg, &lon_deg), &seed), &kappa_s), &q_frequency_exponent)) in
+                latitude
+                    .iter()
+                    .zip(longitude)
+                    .zip(seeds)
+                    .zip(kappa)
+                    .zip(q_exponent)
+                    .enumerate()
             {
                 let sim = self.inner.run(
                     Station {
-                        latitude: stlat,
-                        longitude: stlon,
-                        name: format!("station-{index}"),
+                        location: GeoPoint { lat_deg, lon_deg },
                         kappa_s,
-                        q_exponent,
+                        q_frequency_exponent,
                     },
                     seed,
                 );

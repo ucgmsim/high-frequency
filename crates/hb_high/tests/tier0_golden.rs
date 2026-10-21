@@ -93,13 +93,13 @@ fn distance_azimuth_stays_close_to_fortran() {
         // At zero separation the azimuth is arbitrary in both formulations.
         if want_km > 1.0 {
             let where_ = || format!("case {n} ({thei},{alei})->({thsi},{alsi}) {want_km} km");
-            let rel = ((g.deltkm - want_km) / want_km).abs() as f64;
+            let rel = ((g.distance_km - want_km) / want_km).abs() as f64;
             if rel > worst_km_rel {
                 worst_km_rel = rel;
                 worst_km_at = where_();
             }
             let gap = {
-                let d = (g.azesdg - want_azdg).abs() as f64;
+                let d = (g.azimuth_deg - want_azdg).abs() as f64;
                 d.min(360.0 - d)
             };
             if gap > worst_az_global {

@@ -5,7 +5,7 @@
 
 use hb_high::fft::Complex32;
 use hb_high::rng::{Draws, LegacyPcg};
-use hb_high::stoc::radiate_and_invert;
+use hb_high::spectrum::{SpectrumPlan, WindowShape, radiate_and_invert};
 use ndarray::Array1;
 
 /// Complex spectrum of plausible magnitude, deterministic so runs are comparable.
@@ -22,9 +22,15 @@ fn spectrum(np2: usize) -> Vec<Complex32> {
 fn radiation_sized_to_the_fold_does_not_run_off_the_spectrum() {
     let np2 = 4096usize;
     let nf = np2 / 2 + 1;
+    let plan = SpectrumPlan::new(np2, 0.01, 0.6, WindowShape::BOORE_1983);
     let radiation = Array1::from(vec![0.7f32; nf]);
     let mut spec = Array1::from(spectrum(np2));
     let mut time_series: Array1<f32> = Array1::zeros(np2);
-    radiate_and_invert(spec.view_mut(), radiation.view(), time_series.view_mut());
+    radiate_and_invert(
+        spec.view_mut(),
+        radiation.view(),
+        plan.taper.view(),
+        time_series.view_mut(),
+    );
     assert!(time_series.iter().all(|v| v.is_finite()));
 }

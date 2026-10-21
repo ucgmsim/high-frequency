@@ -20,14 +20,14 @@ fn a_degree_north_is_exactly_due_north() {
             },
         );
         assert_eq!(
-            g.azesdg, 0.0,
+            g.azimuth_deg, 0.0,
             "a degree north of {lat} has azimuth {}",
-            g.azesdg
+            g.azimuth_deg
         );
         assert!(
-            (100.0..125.0).contains(&g.deltkm),
+            (100.0..125.0).contains(&g.distance_km),
             "a degree north of {lat} is {} km",
-            g.deltkm
+            g.distance_km
         );
     }
 }

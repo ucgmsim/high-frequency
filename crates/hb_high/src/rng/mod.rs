@@ -42,17 +42,13 @@ pub use pcg::Pcg;
 /// Consumers are generic over this rather than taking an enum, so each is monomorphised
 /// and the normal-draw loop, the largest consumer of RNG traffic, keeps a direct call.
 pub trait Draws {
-    /// A fresh source of the same kind, started at `seed`.
+    /// A source of this kind, started at `seed`.
     ///
-    /// Each `(subfault, ray)` gets its own sub-stream, so its draws are a function of its own
-    /// identity alone and a subfault that contributes nothing can be skipped without moving
-    /// the others. See [`sim::substream_seed`] for how the identity is formed.
-    ///
-    /// [`sim::substream_seed`]: crate::sim
-    ///
-    /// It takes `&self` so that [`DrawSource`]'s once-per-run environment choice carries into
-    /// every sub-stream without repeating the lookup.
-    fn respawn(&self, seed: u64) -> Self
+    /// A station's stream and each `(subfault, ray)`'s sub-stream are all built this way, so
+    /// a sub-stream's draws are a function of its own identity alone and a subfault that
+    /// contributes nothing can be skipped without moving the others. See `substream_seed`
+    /// for how the identity is formed.
+    fn from_seed(seed: u64) -> Self
     where
         Self: Sized;
 
@@ -87,73 +83,39 @@ pub trait Draws {
     }
 }
 
-/// Which draw source a run uses.
+/// SplitMix64's increment: the golden-ratio odd constant (Steele et al. 2014).
+pub(crate) const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// SplitMix64's finalising mix (Steele et al. 2014).
 ///
-/// Chosen once per run from the environment.
-pub enum DrawSource {
-    /// The default. See [`Pcg`].
-    Modern(Pcg),
-    /// Validation only — see [`FixtureDraws`]. Opt-in via `HB_FIXTURE_RNG`.
-    Fixture(FixtureDraws),
+/// A bijection on `u64`, which is the property the seeding below needs: distinct inputs
+/// stay distinct, so two subfaults cannot be handed the same stream by an unlucky collision.
+#[inline]
+pub(crate) fn splitmix_finalise(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
-impl DrawSource {
-    /// Build the run's draw source.
-    ///
-    /// `HB_FIXTURE_RNG` set selects [`FixtureDraws`]; otherwise [`Pcg`].
-    ///
-    /// The seed is a `u64` because that is the space `numpy.random.SeedSequence` draws
-    /// station seeds from on the Python side.
-    pub fn for_station(seed: u64) -> Self {
-        if std::env::var_os("HB_FIXTURE_RNG").is_some() {
-            Self::Fixture(FixtureDraws::seed(seed as i32))
-        } else {
-            Self::Modern(Pcg::seed(seed))
-        }
-    }
+/// The seed for one subfault's own stream.
+///
+/// A subfault's identity is `(station, segment, grid position)` and nothing about the *order*
+/// it was walked in; see [`Draws::from_seed`] for what that decouples. The gamma multiply
+/// keeps small indices from mapping to small perturbations of the seed.
+pub(crate) fn substream_seed(station_seed: u64, segment: usize, subfault: usize) -> u64 {
+    splitmix_finalise(
+        splitmix_finalise(station_seed ^ (segment as u64).wrapping_mul(SPLITMIX_GAMMA))
+            ^ subfault as u64,
+    )
 }
 
-impl Draws for DrawSource {
-    /// The same variant, reseeded — which is what carries `for_station`'s environment
-    /// decision into every sub-stream without repeating the lookup.
-    fn respawn(&self, seed: u64) -> Self {
-        match self {
-            Self::Modern(g) => Self::Modern(g.respawn(seed)),
-            Self::Fixture(g) => Self::Fixture(g.respawn(seed)),
-        }
-    }
-
-    #[inline]
-    fn uniform(&mut self) -> f32 {
-        match self {
-            Self::Modern(g) => g.uniform(),
-            Self::Fixture(g) => g.uniform(),
-        }
-    }
-
-    #[inline]
-    fn normal(&mut self) -> f32 {
-        match self {
-            Self::Modern(g) => g.normal(),
-            Self::Fixture(g) => g.normal(),
-        }
-    }
-
-    #[inline]
-    fn fill_normal(&mut self, out: &mut [f32]) {
-        match self {
-            Self::Modern(g) => g.fill_normal(out),
-            Self::Fixture(g) => g.fill_normal(out),
-        }
-    }
-
-    #[inline]
-    fn fill_uniform(&mut self, out: &mut [f32]) {
-        match self {
-            Self::Modern(g) => g.fill_uniform(out),
-            Self::Fixture(g) => g.fill_uniform(out),
-        }
-    }
+/// The seed for one ray path's stream within a subfault.
+///
+/// Derived from the subfault's seed rather than from the station's, so a ray path is
+/// identified relative to the subfault it leaves — and so that adding a ray type to the
+/// rayset cannot renumber another subfault's streams.
+pub(crate) fn ray_stream_seed(subfault_seed: u64, ray: usize) -> u64 {
+    splitmix_finalise(subfault_seed ^ (ray as u64).wrapping_add(1).wrapping_mul(SPLITMIX_GAMMA))
 }
 
 /// The `[0, 1)` conversion every source in this module uses.

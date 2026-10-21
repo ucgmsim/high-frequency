@@ -16,6 +16,8 @@ from hf_simulation import (
     COMPONENTS,
     FaultSegment,
     HfConfig,
+    PathParameters,
+    Ray,
     RecordParameters,
     Simulator,
     SlipModel,
@@ -385,6 +387,32 @@ def test_mismatched_station_arrays_are_rejected(
             kappa_s=STATION_KAPPA_S[:2],
             q_frequency_exponent=STATION_Q_EXPONENT,
         )
+
+
+@pytest.mark.parametrize("ray", [3, 4, -1])
+def test_a_ray_outside_the_enum_is_rejected(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, ray: int
+) -> None:
+    """Only ``Ray``'s values name a ray; anything else is refused, not decoded."""
+    config = HfConfig(
+        record=RecordParameters(duration_s=RECORD_DURATION_S),
+        path=PathParameters(rayset=(Ray.DIRECT, ray)),  # ty: ignore[invalid-argument-type]
+    )
+    with pytest.raises(ValueError, match="is not a hf_simulation.Ray"):
+        Simulator(slip_model, velocity_model, config)
+
+
+@pytest.mark.parametrize("model", [-7, 3, 13])
+def test_a_path_duration_model_outside_the_enum_is_rejected(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, model: int
+) -> None:
+    """Only ``PathDurationModel``'s values name a model; anything else is refused."""
+    config = HfConfig(
+        record=RecordParameters(duration_s=RECORD_DURATION_S),
+        path=PathParameters(path_duration_model=model),  # ty: ignore[invalid-argument-type]
+    )
+    with pytest.raises(ValueError, match="is not a hf_simulation.PathDurationModel"):
+        Simulator(slip_model, velocity_model, config)
 
 
 # ---------------------------------------------------------------------------

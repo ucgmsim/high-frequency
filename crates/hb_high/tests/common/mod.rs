@@ -10,6 +10,42 @@
 
 use std::path::PathBuf;
 
+use hb_high::ray::{RayShape, WaveMode};
+
+/// Decode a golden fixture's stored wave mode: `3` SV, `4` SH, `5` P.
+pub fn wave_mode_from_code(code: i32) -> WaveMode {
+    match code {
+        3 => WaveMode::Sv,
+        4 => WaveMode::Sh,
+        5 => WaveMode::P,
+        _ => panic!("wave mode {code} is not one of 3 (SV), 4 (SH) or 5 (P)"),
+    }
+}
+
+/// Decode a golden fixture's stored ray type. The fixtures were recorded from the original
+/// program, which encoded the shape in a positive integer: odd leaves upward, even down to
+/// the Moho, and each further pair adds one Moho multiple.
+pub fn ray_shape_from_code(code: i32) -> RayShape {
+    match code {
+        1.. if code % 2 == 1 => RayShape::Upgoing {
+            multiples: (code as u32 - 1) / 2,
+        },
+        2.. => RayShape::DownToMoho {
+            multiples: (code as u32 - 2) / 2,
+        },
+        _ => panic!("ray type {code} is not a traced ray"),
+    }
+}
+
+/// Re-encode a wave mode for comparison against a golden fixture.
+pub fn wave_mode_code(mode: WaveMode) -> i32 {
+    match mode {
+        WaveMode::Sv => 3,
+        WaveMode::Sh => 4,
+        WaveMode::P => 5,
+    }
+}
+
 /// Sequential reader over a Fortran `access='stream'` file.
 pub struct Golden {
     buf: Vec<u8>,

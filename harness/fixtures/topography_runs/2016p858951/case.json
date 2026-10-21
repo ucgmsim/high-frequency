@@ -1,0 +1,368 @@
+{
+ "event": "2016p858951",
+ "defaults_version": "26.7.0.5Hz",
+ "magnitude": 5.765433697082259,
+ "hf": {
+  "source": {
+   "stress_drop_bars": 50.0,
+   "corner_frequency_constant": 2.1,
+   "corner_frequency_alpha": 0.1,
+   "rupture_velocity": {
+    "sigma": 0.1
+   }
+  },
+  "path": {
+   "rayset": [
+    1
+   ],
+   "path_duration_model": 11
+  },
+  "site": {
+   "fmax_hz": 10.0
+  },
+  "record": {
+   "dt": 0.01
+  }
+ },
+ "rupture_velocity": {
+  "rvfrac": 0.8,
+  "rvfrac_shal": 0.6,
+  "rvfrac_slip_sig": null,
+  "rvfrac_deep": 0.6,
+  "shallow_depth": 6.5,
+  "shallow_transition_range": 1.5,
+  "deep_depth": 17.5,
+  "deep_transition_range": 2.5
+ },
+ "hf_velocity_model_1d": {
+  "model": [
+   {
+    "thickness": 0.05,
+    "Vp": 1.8,
+    "Vs": 0.5,
+    "rho": 1.81,
+    "Qp": 116.0,
+    "Qs": 58.0
+   },
+   {
+    "thickness": 0.05,
+    "Vp": 1.8,
+    "Vs": 0.5,
+    "rho": 1.81,
+    "Qp": 116.0,
+    "Qs": 58.0
+   },
+   {
+    "thickness": 0.05,
+    "Vp": 1.8,
+    "Vs": 0.58,
+    "rho": 1.81,
+    "Qp": 121.44,
+    "Qs": 60.72
+   },
+   {
+    "thickness": 0.05,
+    "Vp": 1.8,
+    "Vs": 0.68,
+    "rho": 1.81,
+    "Qp": 128.24,
+    "Qs": 64.12
+   },
+   {
+    "thickness": 0.1,
+    "Vp": 1.8,
+    "Vs": 0.75,
+    "rho": 1.81,
+    "Qp": 133.0,
+    "Qs": 66.5
+   },
+   {
+    "thickness": 0.1,
+    "Vp": 1.8,
+    "Vs": 0.83,
+    "rho": 1.81,
+    "Qp": 138.44,
+    "Qs": 69.22
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 1.9,
+    "Vs": 0.9,
+    "rho": 1.86,
+    "Qp": 143.2,
+    "Qs": 71.6
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 2.03,
+    "Vs": 1.0,
+    "rho": 1.92,
+    "Qp": 150.0,
+    "Qs": 75.0
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 2.14,
+    "Vs": 1.05,
+    "rho": 1.97,
+    "Qp": 153.4,
+    "Qs": 76.7
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 2.2,
+    "Vs": 1.1,
+    "rho": 1.99,
+    "Qp": 156.8,
+    "Qs": 78.4
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 2.4,
+    "Vs": 1.15,
+    "rho": 2.06,
+    "Qp": 160.2,
+    "Qs": 80.1
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 2.7,
+    "Vs": 1.2,
+    "rho": 2.15,
+    "Qp": 163.6,
+    "Qs": 81.8
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 3.0,
+    "Vs": 1.43,
+    "rho": 2.22,
+    "Qp": 179.24,
+    "Qs": 89.62
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 3.27,
+    "Vs": 1.64,
+    "rho": 2.28,
+    "Qp": 193.52,
+    "Qs": 96.76
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 3.53,
+    "Vs": 1.86,
+    "rho": 2.32,
+    "Qp": 208.48,
+    "Qs": 104.24
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 3.8,
+    "Vs": 2.07,
+    "rho": 2.36,
+    "Qp": 222.76,
+    "Qs": 111.38
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.07,
+    "Vs": 2.28,
+    "rho": 2.4,
+    "Qp": 237.04,
+    "Qs": 118.52
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.33,
+    "Vs": 2.49,
+    "rho": 2.44,
+    "Qp": 251.32,
+    "Qs": 125.66
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.6,
+    "Vs": 2.7,
+    "rho": 2.48,
+    "Qp": 265.6,
+    "Qs": 132.8
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.71,
+    "Vs": 2.77,
+    "rho": 2.49,
+    "Qp": 270.36,
+    "Qs": 135.18
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.82,
+    "Vs": 2.84,
+    "rho": 2.51,
+    "Qp": 275.12,
+    "Qs": 137.56
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 4.93,
+    "Vs": 2.91,
+    "rho": 2.52,
+    "Qp": 279.88,
+    "Qs": 139.94
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.04,
+    "Vs": 2.98,
+    "rho": 2.54,
+    "Qp": 284.64,
+    "Qs": 142.32
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.15,
+    "Vs": 3.05,
+    "rho": 2.56,
+    "Qp": 289.4,
+    "Qs": 144.7
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.26,
+    "Vs": 3.12,
+    "rho": 2.58,
+    "Qp": 294.16,
+    "Qs": 147.08
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.37,
+    "Vs": 3.19,
+    "rho": 2.6,
+    "Qp": 298.92,
+    "Qs": 149.46
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.48,
+    "Vs": 3.26,
+    "rho": 2.61,
+    "Qp": 303.68,
+    "Qs": 151.84
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.59,
+    "Vs": 3.33,
+    "rho": 2.63,
+    "Qp": 308.44,
+    "Qs": 154.22
+   },
+   {
+    "thickness": 0.2,
+    "Vp": 5.7,
+    "Vs": 3.4,
+    "rho": 2.66,
+    "Qp": 313.2,
+    "Qs": 156.6
+   },
+   {
+    "thickness": 3.0,
+    "Vp": 6.0,
+    "Vs": 3.6,
+    "rho": 2.72,
+    "Qp": 326.8,
+    "Qs": 163.4
+   },
+   {
+    "thickness": 4.0,
+    "Vp": 6.0,
+    "Vs": 3.6,
+    "rho": 2.72,
+    "Qp": 326.8,
+    "Qs": 163.4
+   },
+   {
+    "thickness": 15.0,
+    "Vp": 6.5,
+    "Vs": 3.7,
+    "rho": 2.83,
+    "Qp": 333.6,
+    "Qs": 166.8
+   },
+   {
+    "thickness": 12.0,
+    "Vp": 7.5,
+    "Vs": 4.3,
+    "rho": 3.12,
+    "Qp": 374.4,
+    "Qs": 187.2
+   },
+   {
+    "thickness": 999.999,
+    "Vp": 8.1,
+    "Vs": 4.6,
+    "rho": 3.33,
+    "Qp": 394.8,
+    "Qs": 197.4
+   },
+   {
+    "thickness": 999.999,
+    "Vp": 8.1,
+    "Vs": 4.6,
+    "rho": 3.33,
+    "Qp": 394.8,
+    "Qs": 197.4
+   }
+  ],
+  "vs_moho": 999.9
+ },
+ "duration_s": 158.257006940647,
+ "hf_seed": 1223756140,
+ "stations": [
+  {
+   "name": "KIKS",
+   "latitude": -42.42581201,
+   "longitude": 173.6821252,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  },
+  {
+   "name": "BBCX",
+   "latitude": -41.3312558,
+   "longitude": 174.8289281,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  },
+  {
+   "name": "OHSS",
+   "latitude": -43.4446,
+   "longitude": 172.6605,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  },
+  {
+   "name": "LPCC",
+   "latitude": -43.60785,
+   "longitude": 172.724778,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  },
+  {
+   "name": "HORC",
+   "latitude": -43.53963553,
+   "longitude": 171.9599076,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  },
+  {
+   "name": "INHS",
+   "latitude": -39.15622017,
+   "longitude": 174.1905255,
+   "kappa_s": 0.045,
+   "q_frequency_exponent": 0.6
+  }
+ ]
+}
