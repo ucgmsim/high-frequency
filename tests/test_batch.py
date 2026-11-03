@@ -442,3 +442,106 @@ def test_a_negative_root_seed_is_rejected() -> None:
     """``SeedSequence`` cannot take negative entropy, so say so rather than crash."""
     with pytest.raises(ValueError, match="must be non-negative"):
         station_seeds(-1, ["CHCH"])
+
+
+def test_station_arrays_of_any_numeric_dtype_are_converted(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
+    """float64 coordinates and parameters, and int64 seeds, are cast rather than refused.
+
+    The extension itself only takes float32 and uint64 (it rejects anything else with a
+    TypeError), so it is the wrapper's conversion that makes the natural NumPy defaults
+    usable -- and the cast must not change the result.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    seeds = np.array([11, 22, 33, 44])
+    reference = simulator.run_stations(
+        latitude_deg=STATION_LATITUDE,
+        longitude_deg=STATION_LONGITUDE,
+        station_seed=seeds.astype(np.uint64),
+        kappa_s=STATION_KAPPA_S,
+        q_frequency_exponent=STATION_Q_EXPONENT,
+    )
+    assert_not_silent(reference)
+    # Deliberately not float32 / uint64: these are the dtypes NumPy picks by default.
+    converted = simulator.run_stations(
+        latitude_deg=STATION_LATITUDE.astype(np.float64),  # ty: ignore[invalid-argument-type]
+        longitude_deg=STATION_LONGITUDE.astype(np.float64),  # ty: ignore[invalid-argument-type]
+        station_seed=seeds.astype(np.int64),  # ty: ignore[invalid-argument-type]
+        kappa_s=STATION_KAPPA_S.astype(np.float64),  # ty: ignore[invalid-argument-type]
+        q_frequency_exponent=STATION_Q_EXPONENT.astype(np.float64),  # ty: ignore[invalid-argument-type]
+    )
+    assert converted.dtype == np.float32
+    np.testing.assert_array_equal(converted, reference)
+
+
+@pytest.mark.parametrize(
+    ("short", "expected"),
+    [
+        ("latitude_deg", "'latitude_deg': (2,), 'longitude_deg': (4,)"),
+        ("longitude_deg", "'latitude_deg': (4,), 'longitude_deg': (2,)"),
+    ],
+)
+def test_the_mismatch_error_names_each_array_and_its_shape(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, short: str, expected: str
+) -> None:
+    """The error reports every array by its argument name, so the bad one can be found."""
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    arrays = {
+        "latitude_deg": STATION_LATITUDE,
+        "longitude_deg": STATION_LONGITUDE,
+        "station_seed": station_seeds(1234, STATION_NAMES),
+        "kappa_s": STATION_KAPPA_S,
+        "q_frequency_exponent": STATION_Q_EXPONENT,
+    }
+    arrays[short] = arrays[short][:2]
+    with pytest.raises(ValueError) as raised:
+        simulator.run_stations(**arrays)
+    message = str(raised.value)
+    assert expected in message
+    assert "'station_seed': (4,), 'kappa_s': (4,), 'q_frequency_exponent': (4,)" in (
+        message
+    )
+
+
+def test_station_seeds_are_pinned() -> None:
+    """Seeds are stable across releases, so a past run's waveforms can be reproduced.
+
+    Any change to the name hash (byte order, digest size, encoding) or to how the seed is
+    drawn from the ``SeedSequence`` (word size) would silently re-seed every station of
+    every run. These values were produced by the current implementation.
+    """
+    seeds = station_seeds(1234, ["CHCH", "LINC", "Ōtautahi"])
+    assert seeds.dtype == np.uint64
+    assert seeds.tolist() == [
+        1905741496502012377,
+        13603888227495392929,
+        10769600984917523404,
+    ]
+    # A root seed wider than 32 bits is accepted and mixed in.
+    assert station_seeds(2**40, ["CHCH"]).tolist() == [9577342823655924923]
+
+
+def test_no_station_names_give_an_empty_uint64_array() -> None:
+    """An empty name list still yields seeds of the documented dtype, not float64."""
+    seeds = station_seeds(1234, [])
+    assert seeds.shape == (0,)
+    assert seeds.dtype == np.uint64
+
+
+def test_the_negative_root_seed_error_says_why() -> None:
+    """The message gives the offending value and the reason, verbatim."""
+    with pytest.raises(
+        ValueError,
+        match=r"^root_seed must be non-negative, got -5; SeedSequence rejects "
+        r"negative entropy$",
+    ):
+        station_seeds(-5, ["CHCH"])
