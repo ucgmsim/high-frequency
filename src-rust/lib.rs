@@ -307,12 +307,16 @@ pub struct PyRecordParameters {
 #[pymethods]
 impl PyRecordParameters {
     #[new]
-    #[pyo3(signature = (*, duration_s, dt))]
-    fn new(duration_s: f32, dt: f32) -> Self {
+    /// `start_s` is the time of the first sample relative to the origin time, seconds: give
+    /// stations near the hypocentre a negative one (a pre-event lead), or the start of their
+    /// shaking is cut off. Its default lives on the Python dataclass, like every other one.
+    #[pyo3(signature = (*, duration_s, dt, start_s))]
+    fn new(duration_s: f32, dt: f32, start_s: f32) -> Self {
         Self {
             inner: RecordParameters {
                 duration_s,
                 dt_s: dt,
+                start_s,
             },
         }
     }
@@ -373,6 +377,13 @@ impl PySimulator {
         Simulator::new(&config.inner, &slip_model.inner, &velocity_model.input)
             .map(|inner| Self { inner })
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Time of the first sample relative to the origin time, seconds: the requested
+    /// `start_s` on the sample grid. Pass it to `to_dataset` as `start_s`.
+    #[getter]
+    fn start_s(&self) -> f32 {
+        self.inner.start_s()
     }
 
     /// Simulate a batch of stations.

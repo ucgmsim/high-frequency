@@ -90,7 +90,7 @@ class SiteParameters:
 class RecordParameters:
     """The shape of the record to produce."""
 
-    def __init__(self, *, duration_s: float, dt: float) -> None: ...
+    def __init__(self, *, duration_s: float, dt: float, start_s: float) -> None: ...
 
 class HfConfig:
     """Everything needed to simulate."""
@@ -113,6 +113,8 @@ class Simulator:
         slip_model: SlipModel,
         velocity_model: VelocityModel1D,
     ) -> None: ...
+    @property
+    def start_s(self) -> float: ...
     def run_stations(
         self,
         *,

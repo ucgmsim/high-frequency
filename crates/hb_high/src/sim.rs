@@ -145,6 +145,10 @@ pub struct Simulation {
     /// Samples per component.
     pub ndata: usize,
     pub dt: f32,
+    /// Time of the first sample relative to the origin time, seconds: the requested
+    /// [`RecordParameters::start_s`](crate::config::RecordParameters::start_s) on the sample
+    /// grid.
+    pub start_s: f32,
     /// Ground motion, shaped `(n_components, ndata)`, rows ordered 090, 000, vertical.
     pub acc: Array2<f32>,
     /// What did not fit in the record. See [`Clipping`].
@@ -203,7 +207,7 @@ impl std::ops::AddAssign for Census {
     }
 }
 
-/// Arrivals the record was too short to hold.
+/// Arrivals the record was too short, or started too late, to hold.
 ///
 /// Some clipping is normal and this does not report it. Every subfault's envelope decays
 /// to a fraction of a percent of its peak well before the end of its own buffer, and that tail
@@ -229,12 +233,30 @@ pub struct Clipping {
     /// it could have had, and its real start is at or after that. So the record is short by
     /// at least this much. The count above is exact either way.
     pub worst_overrun_s: f32,
+    /// Subfault-ray contributions whose window opened before the record starts, so that its
+    /// beginning was discarded.
+    ///
+    /// Unlike a tail, a head is not negligible: the envelope rises from the start of the
+    /// window, so a record that starts after it starts mid-shaking. Nothing downstream can
+    /// restore what was cut, and a zero-phase filter turns the step into a velocity offset.
+    /// It happens at stations close to the hypocentre when the record starts at the origin
+    /// time; a negative [`RecordParameters::start_s`](crate::config::RecordParameters::start_s)
+    /// avoids it.
+    pub heads_cut: usize,
+    /// How much earlier than the record's first sample the earliest of those windows opened,
+    /// seconds: the pre-event lead that would have kept all of them. Zero when none were cut.
+    pub worst_head_cut_s: f32,
 }
 
 impl Clipping {
-    /// True when every arrival landed inside the record.
+    /// True when every arrival's envelope peak landed before the end of the record.
     pub fn is_complete(&self) -> bool {
         self.peaks_lost == 0
+    }
+
+    /// True when no contribution's window opened before the record's first sample.
+    pub fn start_is_complete(&self) -> bool {
+        self.heads_cut == 0
     }
 }
 
@@ -242,6 +264,8 @@ impl std::ops::AddAssign for Clipping {
     fn add_assign(&mut self, other: Self) {
         self.peaks_lost += other.peaks_lost;
         self.worst_overrun_s = self.worst_overrun_s.max(other.worst_overrun_s);
+        self.heads_cut += other.heads_cut;
+        self.worst_head_cut_s = self.worst_head_cut_s.max(other.worst_head_cut_s);
     }
 }
 
@@ -420,6 +444,8 @@ impl Simulator {
         // ------------------------------------------------------------ stations ---
         // No ceiling on the record length: buffers are sized from the requested duration.
         let ndata = (duration_s / dt).trunc() as usize;
+        // The record starts on the sample grid, so the lead is a whole number of samples.
+        let lead_samples = (-config.record.start_s / dt).round() as i32;
 
         // The working model widens the `f32` input fields to `f64`.
         let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();
@@ -437,6 +463,7 @@ impl Simulator {
             conical_sample_count,
             site_table_len: fn_hz.len(),
             ndata,
+            lead_samples,
             // The air layer is in `vmod` by now and is the slowest thing in it, so the maximum
             // is unaffected by its presence.
             max_shear_velocity_km_s: vmod
@@ -468,6 +495,12 @@ impl Simulator {
     /// Samples per component in every record this produces.
     pub fn ndata(&self) -> usize {
         self.run.ndata
+    }
+
+    /// Time of the first sample of every record this produces, relative to the origin time,
+    /// seconds. See [`RecordParameters::start_s`](crate::config::RecordParameters::start_s).
+    pub fn start_s(&self) -> f32 {
+        -(self.run.lead_samples as f32) * self.run.dt
     }
 
     /// Simulate one station.
@@ -556,6 +589,7 @@ impl Simulator {
         Simulation {
             ndata: self.run.ndata,
             dt: self.run.dt,
+            start_s: self.start_s(),
             acc,
             clipping,
             census,
@@ -589,6 +623,10 @@ struct RunScalars {
     /// Length of the site-amplification frequency table.
     site_table_len: usize,
     ndata: usize,
+    /// Samples between the record's first sample and the origin time: `-start_s / dt`, so
+    /// positive for a pre-event lead. Every arrival's start sample, which is counted from the
+    /// origin, is shifted by this much to place it in the record.
+    lead_samples: i32,
     /// The fastest shear-wave velocity in the model, km/s.
     ///
     /// Not physics but a bound: no traced ray can travel faster than the quickest medium it
@@ -924,7 +962,9 @@ impl SubfaultSource {
                 / STRAIGHT_RAY_VELOCITY_KM_S;
             bound_s = bound_s.min(straight_ray_window_start_s);
         }
-        (self.rupture_time_s / run.dt).trunc() as i32 + (bound_s / run.dt).trunc() as i32
+        (self.rupture_time_s / run.dt).trunc() as i32
+            + (bound_s / run.dt).trunc() as i32
+            + run.lead_samples
     }
 }
 
@@ -993,9 +1033,10 @@ fn trace_ray(
 
 /// When one subfault's contribution reaches the record, and through what geometry.
 struct Arrival {
-    /// 1-based sample the contribution's first sample lands on. Can be negative: both
-    /// terms below truncate toward zero, so a window starting before the origin time gives a
-    /// negative start. [`Arrival::placement`] is what handles that, and relies on it.
+    /// 1-based sample of the record the contribution's first sample lands on: counted from
+    /// the origin time, then shifted by the record's pre-event lead. Can be negative: both
+    /// time terms truncate toward zero, so a window opening before the record starts gives a
+    /// start below 1. [`Arrival::placement`] is what handles that, and relies on it.
     start_sample: i32,
     /// The double-couple geometry this contribution radiates through.
     angles: RadiationAngles,
@@ -1013,7 +1054,8 @@ fn arrival_time_and_angles(
 ) -> Arrival {
     Arrival {
         start_sample: (source.rupture_time_s / run.dt).trunc() as i32
-            + (ray.window_start_s / run.dt).trunc() as i32,
+            + (ray.window_start_s / run.dt).trunc() as i32
+            + run.lead_samples,
         angles: RadiationAngles {
             strike_rad: segment.strike_rad,
             dip_rad: segment.dip_rad,
@@ -1295,23 +1337,27 @@ impl Placement {
 }
 
 impl Clipping {
-    /// Whether this arrival's envelope peak landed inside the record.
+    /// Whether this arrival's envelope peak landed inside the record, and whether its window
+    /// opened before the record starts.
     ///
     /// The Saragoni–Hart envelope peaks at `window_peak_fraction` of the window after the
     /// trace starts, so the peak sample is `start_sample + ε·window/dt`. Everything past
     /// `ndata` is discarded by [`Placement::clip`]; this is the part of that discard worth
     /// telling the caller about.
     fn for_arrival(start_sample: i32, window_s: f32, run: &RunScalars) -> Self {
+        let mut clipping = Self::default();
         let peak_sample = start_sample as f32 + run.window_peak_fraction * window_s / run.dt;
         let overrun_samples = peak_sample - run.ndata as f32;
         if overrun_samples > 0.0 {
-            Self {
-                peaks_lost: 1,
-                worst_overrun_s: overrun_samples * run.dt,
-            }
-        } else {
-            Self::default()
+            clipping.peaks_lost = 1;
+            clipping.worst_overrun_s = overrun_samples * run.dt;
         }
+        // Samples `start_sample..=0` precede the record's first, sample 1.
+        if start_sample < 1 {
+            clipping.heads_cut = 1;
+            clipping.worst_head_cut_s = (1 - start_sample) as f32 * run.dt;
+        }
+        clipping
     }
 }
 
@@ -1770,6 +1816,7 @@ mod tests {
             conical_sample_count: 0,
             site_table_len: 0,
             ndata: 10_000,
+            lead_samples: 0,
             max_shear_velocity_km_s: 4.0,
         };
 

@@ -298,6 +298,16 @@ class RecordParameters:
     """Record length, seconds. No default: it is a property of the run, not of the physics."""
     dt: float = 0.005
     """Sample interval, seconds."""
+    start_s: float = 0.0
+    """Time of the first sample relative to the origin time, seconds, rounded to a whole
+    number of samples (:attr:`Simulator.start_s` is the value used).
+
+    ``0`` starts the record at the origin time, which cuts off the start of the shaking at
+    stations close to the hypocentre: their arrivals' envelopes open before it. The record
+    then starts mid-shaking, and a zero-phase high-pass downstream turns that into a velocity
+    offset that integrates into metres of displacement drift. A negative value gives the
+    record a pre-event lead that keeps it; pass the same start to :func:`to_dataset`.
+    """
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -341,7 +351,9 @@ class HfConfig:
             ),
             site=_RustSiteParameters(fmax_hz=self.site.fmax_hz),
             record=_RustRecordParameters(
-                duration_s=self.record.duration_s, dt=self.record.dt
+                duration_s=self.record.duration_s,
+                dt=self.record.dt,
+                start_s=self.record.start_s,
             ),
         )
 
@@ -386,6 +398,20 @@ class Simulator:
             If the slip model's segments disagree on subfault size.
         """
         self._inner = _RustSimulator(config._to_rust(), slip_model, velocity_model)
+
+    @property
+    def start_s(self) -> float:
+        """Time of the first sample relative to the origin time, seconds.
+
+        The configured :attr:`RecordParameters.start_s` on the sample grid; the start to pass
+        to :func:`to_dataset`.
+
+        Returns
+        -------
+        float
+            The start time.
+        """
+        return self._inner.start_s
 
     def run_stations(
         self,

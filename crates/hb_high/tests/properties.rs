@@ -1022,6 +1022,7 @@ fn config() -> HfConfig {
         record: RecordParameters {
             duration_s: 20.0,
             dt_s: 0.005,
+            start_s: 0.0,
         },
     }
 }
@@ -1191,5 +1192,78 @@ fn a_record_too_short_for_the_arrivals_reports_clipping() {
         cut.clipping.worst_overrun_s > 0.0,
         "clipping reported without an overrun: {:?}",
         cut.clipping
+    );
+}
+
+/// A record cuts off every contribution whose window opens before its first sample, and the
+/// envelope rises from the start of the window, so the record then starts mid-shaking. Near
+/// the hypocentre the windows open before the origin time, which is what `start_s` is for.
+///
+/// Starting earlier must add only what came before: every contribution lands the same distance
+/// from the end of a record that is longer by the same lead, so it is the same contribution
+/// sample for sample.
+#[test]
+fn a_record_that_starts_earlier_keeps_the_start_of_the_shaking_and_changes_nothing_after_it() {
+    use ndarray::s;
+
+    // Right above the fixture fault, where the first arrivals are a second or two in.
+    let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
+    let vmod = velocity_model(20);
+    let station = Station {
+        kappa_s: 0.045,
+        q_exponent: 0.6,
+        longitude: 173.0,
+        latitude: -43.0,
+        name: "ABOVE".to_string(),
+    };
+    // A sample interval, durations and starts that are exact in `f32`, so both records hold
+    // exactly the samples asked for and the comparison below is sample for sample.
+    let record = |start_s: f32, duration_s: f32| HfConfig {
+        record: RecordParameters {
+            duration_s,
+            dt_s: 1.0 / 256.0,
+            start_s,
+        },
+        ..config()
+    };
+    // Where the shaking starts, from a record that begins well before any of it.
+    let probe = hf_simulator(&record(-10.0, 40.0), &slip, &vmod).run(station.clone(), 42);
+    assert!(probe.clipping.start_is_complete(), "{:?}", probe.clipping);
+    let first = (0..probe.ndata)
+        .find(|&n| probe.acc.column(n).iter().any(|&a| a != 0.0))
+        .expect("the station is shaken");
+    // One record starting a second after the shaking does, which must cut it, and one
+    // starting two seconds before; both end at the same time.
+    let late_start = probe.start_s + (first + 256) as f32 / 256.0;
+    let early_start = late_start - 3.0;
+    let late = hf_simulator(&record(late_start, 20.0), &slip, &vmod).run(station.clone(), 42);
+    let early = hf_simulator(&record(early_start, 23.0), &slip, &vmod).run(station, 42);
+    let lead = 3 * 256;
+
+    assert_eq!((late.start_s, early.start_s), (late_start, early_start));
+    assert_eq!(early.ndata, late.ndata + lead);
+    assert!(
+        !late.clipping.start_is_complete() && late.clipping.worst_head_cut_s > 0.0,
+        "a record starting after the shaking does should report cut arrivals: {:?}",
+        late.clipping
+    );
+    assert!(
+        early.clipping.start_is_complete(),
+        "a record starting before the shaking should hold every arrival: {:?}",
+        early.clipping
+    );
+    assert!(
+        early.acc.slice(s![.., lead..]) == late.acc.view(),
+        "the samples the two records share differ"
+    );
+    let before: f32 = early
+        .acc
+        .slice(s![.., ..lead])
+        .iter()
+        .map(|a| a.abs())
+        .sum();
+    assert!(
+        before > 0.0,
+        "the earlier record holds nothing before the later one starts"
     );
 }
