@@ -1654,7 +1654,11 @@ mod tests {
             assert_eq!(source_layer_for(&vmod, depth_km), 1, "depth {depth_km} km");
         }
         assert_eq!(source_layer_for(&vmod, 0.5), 1);
-        assert_eq!(source_layer_for(&vmod, 5.0), 2, "below the model: the half-space");
+        assert_eq!(
+            source_layer_for(&vmod, 5.0),
+            2,
+            "below the model: the half-space"
+        );
     }
 
     /// `F_i · σ_i·dl³ = M_o / √N` whatever the stress parameter, so a heterogeneous stress
