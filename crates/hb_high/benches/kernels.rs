@@ -93,16 +93,6 @@ fn ray_state_after_trav(ksrc: usize, v: &VelocityModel) -> RayState {
     st
 }
 
-/// The frequency axis the simulation builds: bin `i` at `i * df`, up to Nyquist.
-fn dfr_axis(np2: usize) -> Vec<f32> {
-    let mut dfr = vec![0.0; np2];
-    let df = 1.0 / (np2 as f32 * DT);
-    for (bin, slot) in dfr.iter_mut().enumerate().take(np2 / 2 + 1) {
-        *slot = df * bin as f32;
-    }
-    dfr
-}
-
 /// Complex spectrum of plausible magnitude, deterministic so runs are comparable.
 fn spectrum(np2: usize) -> Vec<Complex32> {
     let mut g = LegacyPcg::seed(20260804);
@@ -219,9 +209,8 @@ fn bench_radiation(c: &mut Criterion) {
     });
 
     let np2 = 4096usize;
-    let nfold = np2 / 2 + 1;
-    let dfr = dfr_axis(np2);
-    let mut rdna = vec![0.0; np2];
+    let plan = SpectrumPlan::new(np2, DT, 0.6, 0.2, 0.05);
+    let mut rdna = vec![0.0; plan.fold_count];
 
     // One arrival geometry shared by both routines.
     const ARRIVAL: RadiationAngles = RadiationAngles {
@@ -243,10 +232,10 @@ fn bench_radiation(c: &mut Criterion) {
                 horizontal_radiation_spectrum(
                     &mut g,
                     &ARRIVAL,
-                    ArrayView1::from(&dfr[..nfold]),
+                    plan.frequency_hz.view(),
                     black_box(-90.0f32.to_radians()),
                     NR,
-                    ArrayViewMut1::from(&mut rdna[..nfold]),
+                    ArrayViewMut1::from(rdna.as_mut_slice()),
                 )
             })
         },
@@ -263,11 +252,11 @@ fn bench_radiation(c: &mut Criterion) {
             b.iter(|| {
                 vertical_radiation_spectrum(
                     &ARRIVAL,
-                    ArrayView1::from(&dfr[..nfold]),
+                    plan.frequency_hz.view(),
                     rna.as_slice(),
                     rnb.as_slice(),
                     NR,
-                    ArrayViewMut1::from(&mut rdna[..nfold]),
+                    ArrayViewMut1::from(rdna.as_mut_slice()),
                 )
             })
         },
@@ -357,13 +346,9 @@ fn bench_spectrum(c: &mut Criterion) {
     group.sample_size(20);
 
     for &np2 in NP2S {
-        let nf = np2 / 2 + 1;
-        let dfr = dfr_axis(np2);
-        // Precomputed per-segment tables, as `SpectrumPlan` supplies in the real program.
-        let path_exp: Vec<f32> = dfr.iter().map(|f| f.powf(1.0 - 0.6)).collect();
-        let b = -0.2f32 * 0.05f32.ln() / (1.0 + 0.2 * (0.2f32.ln() - 1.0));
-        let env_pow: Vec<f32> = (0..np2).map(|i| (i as f32 * DT).powf(b)).collect();
-        let log_dfr: Vec<f32> = dfr.iter().map(|f| f.ln()).collect();
+        // The per-segment tables, built exactly as the real program builds them.
+        let plan = SpectrumPlan::new(np2, DT, 0.6, 0.2, 0.05);
+        let nf = plan.fold_count;
         let src = spectrum(np2);
         let (fn_, an) = site_table();
         let rdna = vec![0.7; nf];
@@ -379,14 +364,6 @@ fn bench_spectrum(c: &mut Criterion) {
             &np2,
             |b, &np2| {
                 let mut g = LegacyPcg::seed(5);
-                let plan = SpectrumPlan {
-                    np2,
-                    fold_count: nf,
-                    log_frequency_hz: log_dfr.clone().into(),
-                    path_exponent: path_exp.clone().into(),
-                    envelope_power: env_pow.clone().into(),
-                    frequency_hz: dfr.clone().into(),
-                };
                 let model = SourceModel {
                     dt: DT,
                     window_eps: 0.2,
@@ -444,10 +421,10 @@ fn bench_spectrum(c: &mut Criterion) {
             BenchmarkId::new("site_gain_curve", np2),
             &np2,
             |b, &_np2| {
-                let mut gain: ndarray::Array1<f32> = ndarray::Array1::zeros(np2 / 2 + 1);
+                let mut gain: ndarray::Array1<f32> = ndarray::Array1::zeros(nf);
                 b.iter(|| {
                     site_gain_curve(
-                        ArrayView1::from(log_dfr.as_slice()),
+                        plan.log_frequency_hz.view(),
                         ArrayView1::from(&fn_[..20]),
                         ArrayView1::from(&an[..20]),
                         gain.view_mut(),
