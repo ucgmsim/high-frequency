@@ -1760,7 +1760,10 @@ mod tests {
         let full = SpectrumPlan::length_for(window_s, dt);
         for start in [-4400i32, -2000, -1, 0, 1, 2000, ndata as i32] {
             let np2 = SpectrumPlan::length_for_arrival(window_s, dt, start, ndata);
-            assert!(np2 < full, "start {start}: the landing length should be the smaller");
+            assert!(
+                np2 < full,
+                "start {start}: the landing length should be the smaller"
+            );
             let at = Placement::clip(start, np2, ndata).expect("the contribution lands");
             assert_eq!(
                 at.offset + at.count,
