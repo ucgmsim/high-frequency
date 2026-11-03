@@ -98,15 +98,16 @@ impl SpectrumPlan {
     /// As with [`Self::length_for`], a shorter transform gives a coarser `df`, so this changes
     /// the retained samples too, not only the discarded ones.
     ///
-    /// `start_sample` is 1-based and may be negative; a contribution starting before the
-    /// origin still only has `ndata` samples of record to reach.
+    /// `start_sample` is 1-based and may be negative. Its own samples are counted from its
+    /// first one, so a contribution starting `k` samples before the origin has
+    /// `ndata + k + 1` samples to cover before it reaches the record end, not `ndata`.
     #[must_use]
     pub fn length_for_arrival(window_s: f32, dt: f32, start_sample: i32, ndata: usize) -> usize {
         // How many of this contribution's own samples could land, at most. Clamped at one so a
         // contribution starting on the last sample still gets a transform rather than a zero
         // length; one that starts past the end is the caller's to reject, and cheaper to
         // reject before asking for a length at all.
-        let landing = (ndata as i64 - start_sample.max(1) as i64 + 1).max(1) as usize;
+        let landing = (ndata as i64 - start_sample as i64 + 1).max(1) as usize;
         Self::length_for(window_s, dt).min(crate::fft::good_length(2 * landing))
     }
 

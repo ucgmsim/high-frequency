@@ -1748,6 +1748,37 @@ mod tests {
         }
     }
 
+    /// A transform clipped by `SpectrumPlan::length_for_arrival` must still reach the end of
+    /// the record, with the last tenth (where `radiate_and_invert` tapers) past it.
+    ///
+    /// A negative start used to get the budget of a start of 1, so a long lead-in ended the
+    /// transform, and faded it out, inside the record (issue #19's worked example:
+    /// `start_sample = -4400`, `ndata = 4000`, `np2 = 8192`, last sample 3791).
+    #[test]
+    fn length_for_arrival_reaches_the_record_end_past_the_taper() {
+        let (window_s, dt, ndata) = (150.0f32, 0.005f32, 4000usize);
+        let full = SpectrumPlan::length_for(window_s, dt);
+        for start in [-4400i32, -2000, -1, 0, 1, 2000, ndata as i32] {
+            let np2 = SpectrumPlan::length_for_arrival(window_s, dt, start, ndata);
+            assert!(
+                np2 < full,
+                "start {start}: the landing length should be the smaller"
+            );
+            let at = Placement::clip(start, np2, ndata).expect("the contribution lands");
+            assert_eq!(
+                at.offset + at.count,
+                ndata,
+                "start {start}, np2 {np2}: the record end is not reached"
+            );
+            let last_transform_sample = start as i64 + np2 as i64 - 1;
+            let spare = last_transform_sample - ndata as i64;
+            assert!(
+                spare >= (np2 / 10) as i64,
+                "start {start}, np2 {np2}: only {spare} samples past the record end"
+            );
+        }
+    }
+
     /// `earliest_start_sample`'s docstring claims the bound is exact for every ray kind, but
     /// its formula uses the traced-ray lead-in (`ε·window`) rather than the straight-ray one
     /// (`0.7·R/3.7`, no lead-in). For a slow `max_shear_velocity_km_s` the traced-ray bound
