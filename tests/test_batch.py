@@ -37,13 +37,21 @@ STATION_Q_EXPONENT = np.array([0.5, 0.6, 0.7, 0.55], np.float32)
 RECORD_DURATION_S = 40.0
 
 
-def fault_segment(stress_drop_bars: np.ndarray | None = None) -> FaultSegment:
+def fault_segment(
+    stress_drop_bars: np.ndarray | None = None,
+    dip_deg: float = 70.0,
+    top_depth_km: float = 0.0,
+) -> FaultSegment:
     """A 4-by-3 subfault segment with uniform slip.
 
     Parameters
     ----------
     stress_drop_bars : np.ndarray, optional
         Per-subfault stress parameter, shaped ``(3, 4)``. Defaults to 50 bars everywhere.
+    dip_deg : float, optional
+        Dip of the segment. Defaults to 70 degrees.
+    top_depth_km : float, optional
+        Depth of the segment's top edge. Defaults to 0 km.
 
     Returns
     -------
@@ -54,9 +62,9 @@ def fault_segment(stress_drop_bars: np.ndarray | None = None) -> FaultSegment:
         longitude_deg=173.0,
         latitude_deg=-43.0,
         strike_deg=220.0,
-        dip_deg=70.0,
+        dip_deg=dip_deg,
         rake_deg=160.0,
-        top_depth_km=0.0,
+        top_depth_km=top_depth_km,
         subfault_length_km=1.5,
         subfault_width_km=1.5,
         hypocentre_along_strike_km=0.0,
@@ -321,6 +329,39 @@ def test_stress_drop_is_per_subfault(velocity_model: VelocityModel1D) -> None:
     )
     assert energy_ratio > 2.0, (
         f"doubling the stress parameter scaled energy by {energy_ratio}"
+    )
+
+
+@pytest.mark.parametrize("dip_deg", [0.0, 0.005])
+def test_a_subfault_in_the_air_layer_is_placed_in_the_first_real_layer(
+    velocity_model: VelocityModel1D, dip_deg: float
+) -> None:
+    """A subfault within 0.1 m of the surface behaves as one just below the air layer.
+
+    The inserted air layer is 0.1 m thick and is not ground. A near-horizontal fault at
+    the surface puts subfault centres inside it, where they used to take the air's shear
+    velocity and density, or panic in the ray tracer. Moving the fault 0.2 m deeper, below
+    the air layer, must make no material difference.
+
+    LINC is left out: it is ~83 km away, and from a source in the 1.5 km/s surface layer
+    its S arrival falls after the end of the record.
+    """
+    stations = [0, 2, 3]
+    surface = simulate(
+        SlipModel([fault_segment(dip_deg=dip_deg, top_depth_km=0.0)]),
+        velocity_model,
+        stations,
+    )
+    assert_not_silent(surface)
+    deeper = simulate(
+        SlipModel([fault_segment(dip_deg=dip_deg, top_depth_km=0.0002)]),
+        velocity_model,
+        stations,
+    )
+    assert_not_silent(deeper)
+    assert surface.shape == deeper.shape
+    np.testing.assert_allclose(
+        np.abs(surface).max(axis=(0, 2)), np.abs(deeper).max(axis=(0, 2)), rtol=1e-3
     )
 
 

@@ -235,8 +235,9 @@ pub fn geometric_spreading(
 ) -> (f64, f32) {
     let nh1 = state.rays.layer_indices[0];
 
-    // Layers above the source layer, skipping the air layer at index 0. `1..nh1` rather than
-    // `1..=nh1 - 1` so a source in layer 0 cannot underflow.
+    // Layers above the source layer, skipping the air layer at index 0. A source is never in
+    // layer 0 (`source_layer` pushes it into layer 1), and `1..0` would panic.
+    debug_assert!(nh1 >= 1, "source in the air layer");
     let dep: f64 = vmod[1..nh1].iter().map(|l| l.thickness_km).sum();
 
     let th1 = match takeoff {
@@ -524,10 +525,17 @@ const INTERFACE_CLEARANCE_KM: f64 = 0.02f32 as f64;
 ///
 /// An `Option` rather than a `layer_count` sentinel, because that sentinel is a valid index
 /// into anything sized with slack and would silently read a zeroed layer.
+///
+/// Never `Some(0)`: layer 0 is the air layer, so a source above its base is moved to just
+/// under it, in layer 1, by the same nudge used at every other interface.
 fn source_layer(vmod: &VelocityModel, mut depth_km: f64) -> (Option<usize>, f64) {
     let mut interface_km = 0.0f64;
     for (layer, entry) in vmod.iter().enumerate() {
         interface_km += entry.thickness_km;
+        // In the air layer: treat it as resting on the air layer's base.
+        if layer == 0 && depth_km < interface_km {
+            depth_km = interface_km;
+        }
         // Resting on the interface from above: push down past it.
         if depth_km >= interface_km && (depth_km - interface_km) < INTERFACE_CLEARANCE_KM {
             depth_km = interface_km + INTERFACE_CLEARANCE_KM;
@@ -649,5 +657,40 @@ pub fn green_function(
         stime: t0 as f32,
         rpath: rpd as f32,
         qbar,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Layer;
+
+    /// An air layer over a 1 km layer over a zero-thickness half-space.
+    fn model_with_air() -> VelocityModel {
+        let layer = |depth_km, thickness_km, vsh_km_s| Layer {
+            depth_km,
+            thickness_km,
+            vsh_km_s,
+            ..Layer::default()
+        };
+        vec![
+            layer(0.0001, 0.0001, 0.0005),
+            layer(1.0001, 1.0, 1.5),
+            layer(1.0001, 0.0, 2.8),
+        ]
+    }
+
+    /// A source inside the 0.1 m air layer goes just under its base, in layer 1, exactly as
+    /// one resting on that base does. It used to return layer 0 at a negative depth.
+    #[test]
+    fn a_source_in_the_air_layer_is_placed_in_layer_one() {
+        let vmod = model_with_air();
+        let (_, on_base_km) = source_layer(&vmod, 0.0001);
+        for depth_km in [0.0, 0.00005, 0.0000999] {
+            let (layer, nudged_km) = source_layer(&vmod, depth_km);
+            assert_eq!(layer, Some(1), "depth {depth_km} km");
+            assert_eq!(nudged_km, on_base_km, "depth {depth_km} km");
+            assert!(nudged_km > vmod[0].thickness_km);
+        }
     }
 }
