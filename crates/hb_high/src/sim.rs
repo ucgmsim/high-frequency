@@ -52,7 +52,8 @@ enum Component {
     E090,
     /// `000` — north.
     N000,
-    /// The vertical. Capped at 15 Hz where the horizontals are not.
+    /// The vertical. Its `f_max` is capped at 15 Hz where the horizontals' is not, though the
+    /// cap only changes the spectrum on the `κ ≤ 0` branch; see [`Component::capped_fmax`].
     Vertical,
 }
 
@@ -88,8 +89,11 @@ impl Component {
     /// `f_max`, capped for the vertical only.
     ///
     /// The cap is empirical: vertical-component spectra fall off from a lower corner than the
-    /// horizontals do. It is the one place the component identity changes the *physics* rather
-    /// than just which radiation routine runs.
+    /// horizontals do. It is the one place the component identity could change the *physics*
+    /// rather than just which radiation routine runs — but only on the `κ ≤ 0` single-pole
+    /// branch of [`crate::stoc::SpectrumShape::refresh`], the only place `f_max` is read. With
+    /// `κ > 0`, as in production, the cap is a no-op and the vertical's spectral shape is
+    /// identical to the horizontals'.
     #[inline]
     fn capped_fmax(self, fmax_hz: f32) -> f32 {
         match self {
@@ -1156,7 +1160,8 @@ fn subfault_pass(
             //
             // The shape behind them is rebuilt only when `f_max` changes it, which means twice
             // at most and — whenever `f_max` is already at or below the vertical's ceiling —
-            // once. `capped_fmax` is the only per-component input to it.
+            // once. `capped_fmax` is the only per-component input to it. With `κ > 0` the rebuild
+            // reproduces the same shape, since `refresh` reads `f_max` only when `κ ≤ 0`.
             let mut built_for = f32::NAN;
             for component in Component::ALL {
                 let fmax_hz = component.capped_fmax(run.fmax_hz);
