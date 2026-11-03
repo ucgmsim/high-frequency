@@ -662,10 +662,14 @@ fn seed_and_predraw(seed: u64, radv_sample_count: usize) -> (DrawSource, Deviate
 /// A source deeper than the whole model takes the deepest layer: it is in the half-space,
 /// and the half-space is the bottom layer. Both subfault passes use this, so they agree.
 /// Reachable when a model is truncated above the fault's base (e.g. at the Moho).
+///
+/// Layer 0, the air layer, is never returned: a source within its 0.1 m of the surface takes
+/// layer 1, the first real layer, as `ray::source_layer` and the receiver (`krec = 1`) do.
 fn source_layer_for(vmod: &VelocityModel, depth_km: f32) -> usize {
     vmod.iter()
+        .skip(1)
         .position(|layer| layer.depth_km >= depth_km as f64)
-        .unwrap_or(vmod.len() - 1)
+        .map_or(vmod.len() - 1, |index| index + 1)
 }
 
 /// What the time-window pass produces for one segment.
@@ -1541,11 +1545,13 @@ fn normalise_source(
         for (row_index, row) in segment.depth_rows().enumerate() {
             let row_depth_km = top_depth_km + (row_index as f32 + 0.5) * row_depth_step_km;
             // A subfault below every layer is in the half-space, which is the bottom
-            // layer -- the same reading as `source_layer_for` and `ray::source_layer`.
+            // layer -- the same reading as `source_layer_for` and `ray::source_layer`. Like
+            // them it skips the air layer at index 0.
             let layer = vmod_in
                 .iter()
+                .skip(1)
                 .position(|layer| row_depth_km <= layer.depth_km)
-                .unwrap_or(vmod_in.len() - 1);
+                .map_or(vmod_in.len() - 1, |index| index + 1);
             // Rigidity times area: `mu = rho * beta^2`, so slip times this is moment.
             let rigidity_area = (vmod_in[layer].vsh_km_s
                 * vmod_in[layer].vsh_km_s
@@ -1635,6 +1641,25 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A subfault inside the 0.1 m air layer takes layer 1, not the air's properties.
+    #[test]
+    fn a_source_in_the_air_layer_takes_the_first_real_layer() {
+        let layer = |depth_km| crate::state::Layer {
+            depth_km,
+            ..Default::default()
+        };
+        let vmod: VelocityModel = vec![layer(0.0001), layer(1.0001), layer(1.0001)];
+        for depth_km in [0.0f32, 0.00005, 0.0001] {
+            assert_eq!(source_layer_for(&vmod, depth_km), 1, "depth {depth_km} km");
+        }
+        assert_eq!(source_layer_for(&vmod, 0.5), 1);
+        assert_eq!(
+            source_layer_for(&vmod, 5.0),
+            2,
+            "below the model: the half-space"
+        );
+    }
 
     /// `F_i · σ_i·dl³ = M_o / √N` whatever the stress parameter, so a heterogeneous stress
     /// field leaves every subfault's long-period level, and the summed moment, unchanged.
