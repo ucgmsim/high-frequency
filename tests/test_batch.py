@@ -381,6 +381,21 @@ def test_a_bad_stress_drop_grid_is_rejected(
         fault_segment(stress_drop_bars)
 
 
+@pytest.mark.parametrize("thickness_km", [0.0, 10.0])
+def test_a_lone_half_space_is_rejected(thickness_km: float) -> None:
+    """A single layer below the Moho is all half-space, with no model above it to trace."""
+    with pytest.raises(ValueError, match="no layer above the half-space"):
+        VelocityModel1D(
+            thickness_km=np.array([thickness_km], np.float32),
+            vp_km_s=np.array([6.0]),
+            vsh_km_s=np.array([3.5]),
+            density_g_cm3=np.array([2.7]),
+            quality_factor_p=np.array([400.0], np.float32),
+            quality_factor_s=np.array([200.0], np.float32),
+            vs_moho_km_s=999.9,
+        )
+
+
 def test_an_empty_batch_is_an_error(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
