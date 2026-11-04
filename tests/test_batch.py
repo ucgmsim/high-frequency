@@ -381,6 +381,35 @@ def test_a_bad_stress_drop_grid_is_rejected(
         fault_segment(stress_drop_bars)
 
 
+@pytest.mark.parametrize(
+    ("duration_s", "dt"),
+    [
+        (RECORD_DURATION_S, 0.0),
+        (RECORD_DURATION_S, -0.005),
+        (RECORD_DURATION_S, float("nan")),
+        (RECORD_DURATION_S, float("inf")),
+        (0.0, 0.005),
+        (-1.0, 0.005),
+        (float("nan"), 0.005),
+        (float("inf"), 0.005),
+        (0.001, 0.005),
+    ],
+)
+def test_a_bad_record_shape_is_rejected(
+    slip_model: SlipModel,
+    velocity_model: VelocityModel1D,
+    duration_s: float,
+    dt: float,
+) -> None:
+    """Duration and `dt` must be positive and finite, with room for at least one sample."""
+    with pytest.raises(ValueError, match="duration_s and dt"):
+        Simulator(
+            slip_model,
+            velocity_model,
+            HfConfig(record=RecordParameters(duration_s=duration_s, dt=dt)),
+        )
+
+
 def test_an_empty_batch_is_an_error(
     slip_model: SlipModel, velocity_model: VelocityModel1D
 ) -> None:
