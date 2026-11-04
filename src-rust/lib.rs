@@ -308,13 +308,22 @@ pub struct PyRecordParameters {
 impl PyRecordParameters {
     #[new]
     #[pyo3(signature = (*, duration_s, dt))]
-    fn new(duration_s: f32, dt: f32) -> Self {
-        Self {
+    fn new(duration_s: f32, dt: f32) -> PyResult<Self> {
+        // The sample count is `trunc(duration_s / dt)`: a zero `dt` makes it overflow, and a
+        // negative, non-finite or too-short value makes it zero -- a silently empty record.
+        let positive_finite = |value: f32| value.is_finite() && value > 0.0;
+        if !(positive_finite(duration_s) && positive_finite(dt) && duration_s >= dt) {
+            return Err(PyValueError::new_err(format!(
+                "duration_s and dt must be positive and finite, with duration_s >= dt; \
+                 got duration_s={duration_s}, dt={dt}"
+            )));
+        }
+        Ok(Self {
             inner: RecordParameters {
                 duration_s,
                 dt_s: dt,
             },
-        }
+        })
     }
 }
 
