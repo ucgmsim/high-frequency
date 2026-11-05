@@ -30,8 +30,9 @@ impl LegacyPcg {
     /// Seed by folding `irand, irand+1, ..., irand+7` into the state, then discard two draws.
     pub fn seed(irand: i32) -> Self {
         let mut state: u64 = 0;
-        for word in irand..irand + SEED_WORDS {
-            // Sign-extend through i64.
+        for k in 0..SEED_WORDS {
+            // Wrapping, so seeds near `i32::MAX` do not overflow. Sign-extend through i64.
+            let word = irand.wrapping_add(k);
             state = state
                 .wrapping_mul(PCG_MULT)
                 .wrapping_add(word as i64 as u64);
@@ -181,6 +182,18 @@ mod tests {
                 by_hand.next_u32(),
                 "count={count}: stream position diverged"
             );
+        }
+    }
+
+    /// Seeds whose eight words run past `i32::MAX` wrap instead of overflowing.
+    #[test]
+    fn seeds_at_the_top_of_the_range_construct_and_draw() {
+        for irand in [i32::MAX - 7, i32::MAX] {
+            let mut generator = LegacyPcg::seed(irand);
+            generator.next_u32();
+            let mut out = vec![0.0f32; 4];
+            generator.fill_normal(&mut out);
+            assert!(out.iter().all(|v| v.is_finite()), "irand={irand}");
         }
     }
 }
