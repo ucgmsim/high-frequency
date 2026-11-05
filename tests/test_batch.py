@@ -615,3 +615,43 @@ def test_the_negative_root_seed_error_says_why() -> None:
         r"negative entropy$",
     ):
         station_seeds(-5, ["CHCH"])
+
+
+def test_the_station_array_errors_are_verbatim(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
+    """Both batch-shape errors read exactly as written, from start to end.
+
+    The mismatch message lists the arguments it checks, then every shape. The empty-batch
+    message says why nothing can be returned.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    with pytest.raises(ValueError) as raised:
+        simulator.run_stations(
+            latitude_deg=STATION_LATITUDE,
+            longitude_deg=STATION_LONGITUDE,
+            station_seed=station_seeds(1234, STATION_NAMES),
+            kappa_s=STATION_KAPPA_S,
+            q_frequency_exponent=STATION_Q_EXPONENT[:1],
+        )
+    assert str(raised.value) == (
+        "latitude_deg, longitude_deg, station_seed, kappa_s and q_frequency_exponent "
+        "must have one entry per station; got shapes {'latitude_deg': (4,), "
+        "'longitude_deg': (4,), 'station_seed': (4,), 'kappa_s': (4,), "
+        "'q_frequency_exponent': (1,)}"
+    )
+
+    empty32 = np.array([], np.float32)
+    with pytest.raises(ValueError) as raised:
+        simulator.run_stations(
+            latitude_deg=empty32,
+            longitude_deg=empty32,
+            station_seed=np.array([], np.uint64),
+            kappa_s=empty32,
+            q_frequency_exponent=empty32,
+        )
+    assert str(raised.value) == "no stations given, so there is nothing to simulate"
