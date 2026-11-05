@@ -100,8 +100,9 @@ __all__ = [
 class Ray(enum.IntEnum):
     """A ray path to sum over.
 
-    Only the paths that are meaningful are listed: the Rust tracer decodes any integer by
-    parity, but a value outside this set names a Moho multiple nothing has ever run.
+    Only the paths that are meaningful are listed: the Rust tracer decodes any non-negative
+    integer by parity, but a value outside this set names a Moho multiple nothing has ever
+    run. A negative value, or an empty rayset, is rejected when the simulator is built.
     """
 
     STRAIGHT = 0
