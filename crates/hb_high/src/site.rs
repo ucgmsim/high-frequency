@@ -187,3 +187,110 @@ pub fn apply_site_amplification(spectrum: &mut [Complex32], gain: ArrayView1<f32
     let (positive, mut negative) = view.view_mut().split_at(Axis(0), np + 1);
     azip!((dest in &mut negative, &src in positive.slice(s![1..np; -1])) *dest = src.conj());
 }
+
+#[cfg(test)]
+mod tests {
+    use ndarray::Array1;
+
+    use super::*;
+    use crate::state::Layer;
+
+    /// The production site table, `fn_hz` in `sim.rs`, as natural logs.
+    fn table_log_frequency() -> Array1<f32> {
+        let fn_hz: Array1<f32> = ndarray::array![
+            0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.20, 0.30, 0.50, 0.70, 1.00, 2.00, 3.00, 5.00,
+            7.00, 10.00, 20.00, 30.00, 50.00, 70.00,
+        ];
+        fn_hz.mapv(f32::ln)
+    }
+
+    fn layer(thickness_km: f64, vsh_km_s: f64, density_g_cm3: f64) -> Layer {
+        Layer {
+            thickness_km,
+            vsh_km_s,
+            density_g_cm3,
+            ..Default::default()
+        }
+    }
+
+    /// A 0.1 m air layer, as `sim.rs` inserts it.
+    fn air() -> Layer {
+        layer(0.0001, 0.0005, 0.001)
+    }
+
+    fn factors(vmod: &VelocityModel, source_layer: usize) -> Array1<f32> {
+        let log_freq = table_log_frequency();
+        let mut out = Array1::<f32>::zeros(log_freq.len());
+        site_amplification_factors(vmod, source_layer, log_freq.view(), out.view_mut());
+        out
+    }
+
+    /// A soft 100 m layer over rock, with the source in the rock (layer 2).
+    fn soft_over_rock() -> VelocityModel {
+        vec![
+            air(),
+            layer(0.1, 0.4, 1.8),
+            layer(2.0, 3.5, 2.7),
+            layer(5.0, 3.5, 2.7),
+            layer(10.0, 3.9, 2.8),
+        ]
+    }
+
+    /// The same `vs` and `rho` from layer 1 to the source layer: the averaged impedance equals
+    /// the source's, so there is no amplification at any frequency.
+    #[test]
+    fn a_uniform_column_does_not_amplify() {
+        let rock = layer(0.5, 3.5, 2.7);
+        let vmod: VelocityModel = vec![air(), rock, rock, rock, rock, layer(10.0, 4.5, 3.0)];
+        for (k, factor) in factors(&vmod, 4).iter().enumerate() {
+            assert!(factor.abs() < 1e-5, "frequency {k}: factor {factor}");
+        }
+    }
+
+    /// The walk starts at index 1, so the air layer's properties never enter the result.
+    #[test]
+    fn the_air_layer_is_ignored() {
+        let vmod = soft_over_rock();
+        let mut changed = vmod.clone();
+        changed[0] = layer(0.5, 1.7, 2.1);
+        assert_eq!(factors(&vmod, 2), factors(&changed, 2));
+    }
+
+    /// At 10 Hz the quarter wavelength (~10 m) sits inside the soft layer, so the factor is
+    /// `0.5 * ln(3.5 * 2.7 / (0.4 * 1.8))`, and it does not fall as frequency rises.
+    #[test]
+    fn a_soft_surface_layer_amplifies_high_frequencies() {
+        let factors = factors(&soft_over_rock(), 2);
+        let fn_hz = table_log_frequency().mapv(f32::exp);
+        let ten_hz = fn_hz.iter().position(|&f| (f - 10.0).abs() < 1e-3).unwrap();
+
+        let expected = 0.5 * ((3.5f32 * 2.7) / (0.4 * 1.8)).ln();
+        assert!(factors[ten_hz] > 0.0);
+        assert!(
+            (factors[ten_hz] - expected).abs() < 1e-5,
+            "10 Hz factor {} against {expected}",
+            factors[ten_hz]
+        );
+        for k in 1..factors.len() {
+            assert!(
+                factors[k] >= factors[k - 1],
+                "factor falls from {} to {} at {} Hz",
+                factors[k - 1],
+                factors[k],
+                fn_hz[k]
+            );
+        }
+        assert!(factors[factors.len() - 1] > factors[0]);
+    }
+
+    /// At 0.01 Hz the quarter period (25 s) reaches far below the source layer, yet layers
+    /// beneath it must not change any factor.
+    #[test]
+    fn the_walk_stops_at_the_source_layer() {
+        let vmod = soft_over_rock();
+        let mut changed = vmod.clone();
+        changed[3] = layer(0.01, 0.2, 1.5);
+        changed[4] = layer(40.0, 7.0, 3.3);
+        assert_eq!(factors(&vmod, 2), factors(&changed, 2));
+    }
+}
