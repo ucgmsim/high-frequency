@@ -61,14 +61,14 @@ pub fn build_ray_path(
     source_depth_km: f64,
     receiver_depth_km: f64,
 ) {
+    let n = state.rays.segment_count();
+    // A zero-segment ray would fail the `wave_modes[0]` read and underflow every `n - 1` below.
+    assert!(n >= 1, "build_ray_path needs at least one ray segment");
     state.love = if state.rays.wave_modes[0] == WaveMode::Sh {
         2
     } else {
         1
     };
-    let n = state.rays.segment_count();
-    // A zero-segment ray would underflow every `n - 1` below.
-    assert!(n >= 1, "build_ray_path needs at least one ray segment");
 
     state.travel.reset_for(vmod.len());
     state.coefficients.reset_for(n);
@@ -692,5 +692,13 @@ mod tests {
             assert_eq!(nudged_km, on_base_km, "depth {depth_km} km");
             assert!(nudged_km > vmod[0].thickness_km);
         }
+    }
+
+    /// A ray with no segments trips the guard's message, not an index-out-of-bounds panic.
+    #[test]
+    #[should_panic(expected = "build_ray_path needs at least one ray segment")]
+    fn a_zero_segment_ray_trips_the_guard() {
+        let vmod = model_with_air();
+        build_ray_path(&mut RayState::default(), &vmod, 0.5, 0.0);
     }
 }

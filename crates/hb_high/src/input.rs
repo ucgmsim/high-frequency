@@ -222,6 +222,11 @@ pub enum ModelError {
          model above the Moho to simulate"
     )]
     MohoAtFirstLayer { vs_moho_km_s: f64 },
+    #[error(
+        "velocity model has no layer above the half-space: a lone layer below vs_moho \
+         becomes the zero-thickness half-space, so at least two layers are needed"
+    )]
+    NoLayerAboveHalfSpace,
 }
 
 /// Build the velocity model from layer records, truncated at the Moho.
@@ -260,7 +265,10 @@ pub fn build_velocity_model(
         model.push(built);
     }
 
-    // Untruncated: the deepest layer is the half-space.
+    // Untruncated: the deepest layer is the half-space, and something must lie above it.
+    if model.len() < 2 {
+        return Err(ModelError::NoLayerAboveHalfSpace);
+    }
     let last = model.len() - 1;
     model[last].thickness_km = 0.0;
     Ok(model)
@@ -395,6 +403,27 @@ mod tests {
             build_velocity_model(&[], 999.9),
             Err(ModelError::NoLayers)
         ));
+    }
+
+    #[test]
+    fn a_lone_half_space_is_an_error_not_a_panic() {
+        // One layer below vs_moho becomes the zero-thickness half-space with nothing above
+        // it, which no ray can be traced through.
+        for thickness_km in [0.0, 10.0] {
+            let layers = [crate::state::InputLayer {
+                depth_km: 0.0,
+                thickness_km,
+                vp_km_s: 6.0,
+                vsh_km_s: 3.5,
+                density_g_cm3: 2.7,
+                attenuation_p: 400.0,
+                attenuation_s: 200.0,
+            }];
+            assert!(matches!(
+                build_velocity_model(&layers, 999.9),
+                Err(ModelError::NoLayerAboveHalfSpace)
+            ));
+        }
     }
 
     #[test]
