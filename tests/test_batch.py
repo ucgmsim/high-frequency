@@ -382,6 +382,47 @@ def test_a_bad_stress_drop_grid_is_rejected(
 
 
 @pytest.mark.parametrize(
+    ("grid", "value", "message"),
+    [
+        ("slip", np.nan, "slip must be non-negative and finite"),
+        ("slip", np.inf, "slip must be non-negative and finite"),
+        ("slip", -1.0, "slip must be non-negative and finite"),
+        ("rupture_time_s", np.nan, "rupture_time_s must be finite"),
+        ("rupture_time_s", np.inf, "rupture_time_s must be finite"),
+    ],
+)
+def test_a_bad_slip_or_rupture_time_cell_is_rejected(
+    grid: str, value: float, message: str
+) -> None:
+    """One non-finite (or, for slip, negative) cell is an error, not a silent record.
+
+    A NaN slip poisons the total moment and so every subfault; a NaN rupture time
+    truncates to zero and silently moves its subfault to origin time.
+    """
+    grids = {
+        "slip": np.full((3, 4), 50.0, np.float32),
+        "rise_time_s": np.full((3, 4), 0.5, np.float32),
+        "rupture_time_s": np.zeros((3, 4), np.float32),
+        "stress_drop_bars": np.full((3, 4), 50.0, np.float32),
+    }
+    grids[grid][1, 2] = value
+    with pytest.raises(ValueError, match=message):
+        FaultSegment(
+            longitude_deg=173.0,
+            latitude_deg=-43.0,
+            strike_deg=220.0,
+            dip_deg=70.0,
+            rake_deg=160.0,
+            top_depth_km=0.0,
+            subfault_length_km=1.5,
+            subfault_width_km=1.5,
+            hypocentre_along_strike_km=0.0,
+            hypocentre_down_dip_km=1.5,
+            **grids,
+        )
+
+
+@pytest.mark.parametrize(
     ("duration_s", "dt"),
     [
         (RECORD_DURATION_S, 0.0),
