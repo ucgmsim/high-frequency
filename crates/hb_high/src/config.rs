@@ -212,8 +212,9 @@ impl RuptureVelocityTaper {
     /// The rupture-velocity factor at a given depth.
     ///
     /// Ramps up through the shallow band, sits at `frac` in between, and ramps down through the
-    /// deep band. Where the bands overlap the deep taper overrides the shallow one rather than
-    /// blending with it. Overlap is possible because the deep band tracks the hypocentre.
+    /// deep band. The bands are disjoint: [`RuptureVelocity::resolve`] puts the deep band's top
+    /// at 15 km or deeper, below the shallow band's 8 km base, so at most one ramp applies at
+    /// any depth.
     pub fn factor(&self, depth_km: f32) -> f32 {
         let Self {
             frac,
