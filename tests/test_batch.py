@@ -422,6 +422,39 @@ def test_a_bad_slip_or_rupture_time_cell_is_rejected(
         )
 
 
+@pytest.mark.parametrize("slip_cm", [0.0, 1e-6])
+def test_a_slip_model_with_no_radiating_subfault_is_rejected(
+    velocity_model: VelocityModel1D, slip_cm: float
+) -> None:
+    """Slip with no subfault above the moment threshold is an error, not a NaN record.
+
+    All-zero slip makes the normalisation `0 / 0`; slip that is non-zero but tiny (here
+    a relative moment of ~1e-5 per subfault) leaves the same empty set of subfaults.
+    """
+    segment = FaultSegment(
+        longitude_deg=173.0,
+        latitude_deg=-43.0,
+        strike_deg=220.0,
+        dip_deg=70.0,
+        rake_deg=160.0,
+        top_depth_km=0.0,
+        subfault_length_km=1.5,
+        subfault_width_km=1.5,
+        hypocentre_along_strike_km=0.0,
+        hypocentre_down_dip_km=1.5,
+        slip=np.full((3, 4), slip_cm, np.float32),
+        rise_time_s=np.full((3, 4), 0.5, np.float32),
+        rupture_time_s=np.zeros((3, 4), np.float32),
+        stress_drop_bars=np.full((3, 4), 50.0, np.float32),
+    )
+    with pytest.raises(ValueError, match="no subfault carries more than"):
+        Simulator(
+            SlipModel([segment]),
+            velocity_model,
+            HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+        )
+
+
 @pytest.mark.parametrize(
     ("duration_s", "dt"),
     [
