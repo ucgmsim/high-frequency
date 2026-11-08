@@ -18,7 +18,12 @@ type DoubleArray1D = np.ndarray[tuple[int], np.dtype[np.float64]]
 type SeedArray = np.ndarray[tuple[int], np.dtype[np.uint64]]
 
 class FaultSegment:
-    """One fault segment: geometry plus the four subfault grids."""
+    """One fault segment: geometry plus the four subfault grids.
+
+    ``slip`` must be non-negative and finite, ``rupture_time_s`` finite and
+    ``stress_drop_bars`` positive and finite everywhere. ``rise_time_s`` is stored
+    but not read by the simulation: it does not shape the source.
+    """
 
     def __init__(
         self,

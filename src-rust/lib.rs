@@ -18,7 +18,8 @@ const COMPONENT_COUNT: usize = 3;
 /// One fault segment: geometry plus the four subfault grids.
 ///
 /// Grids are `(down_dip, along_strike)` for `slip`/`rise`/`trup`/`stress_drop_bars` and the
-/// row order the `.stoch` format itself uses.
+/// row order the `.stoch` format itself uses. `rise` is stored but not read by the
+/// simulation.
 #[pyclass(frozen, name = "FaultSegment")]
 pub struct PyFaultSegment {
     inner: Segment,
@@ -74,6 +75,23 @@ impl PyFaultSegment {
         {
             return Err(PyValueError::new_err(format!(
                 "stress_drop_bars must be positive and finite everywhere; got {bad}"
+            )));
+        }
+        // Slip feeds the segment's total moment, so one NaN or infinity poisons every
+        // subfault's strength; a negative slip silently changes the record.
+        if let Some(bad) = slip
+            .iter()
+            .find(|value| !(value.is_finite() && **value >= 0.0))
+        {
+            return Err(PyValueError::new_err(format!(
+                "slip must be non-negative and finite everywhere; got {bad}"
+            )));
+        }
+        // Rupture time is truncated to a sample index, which saturates a NaN to zero and
+        // would silently move the subfault to origin time.
+        if let Some(bad) = rupture.iter().find(|value| !value.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "rupture_time_s must be finite everywhere; got {bad}"
             )));
         }
         let (down_dip_count, along_strike_count) = slip.dim();

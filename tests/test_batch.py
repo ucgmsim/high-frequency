@@ -383,6 +383,47 @@ def test_a_bad_stress_drop_grid_is_rejected(
 
 
 @pytest.mark.parametrize(
+    ("grid", "value", "message"),
+    [
+        ("slip", np.nan, "slip must be non-negative and finite"),
+        ("slip", np.inf, "slip must be non-negative and finite"),
+        ("slip", -1.0, "slip must be non-negative and finite"),
+        ("rupture_time_s", np.nan, "rupture_time_s must be finite"),
+        ("rupture_time_s", np.inf, "rupture_time_s must be finite"),
+    ],
+)
+def test_a_bad_slip_or_rupture_time_cell_is_rejected(
+    grid: str, value: float, message: str
+) -> None:
+    """One non-finite (or, for slip, negative) cell is an error, not a silent record.
+
+    A NaN slip poisons the total moment and so every subfault; a NaN rupture time
+    truncates to zero and silently moves its subfault to origin time.
+    """
+    grids = {
+        "slip": np.full((3, 4), 50.0, np.float32),
+        "rise_time_s": np.full((3, 4), 0.5, np.float32),
+        "rupture_time_s": np.zeros((3, 4), np.float32),
+        "stress_drop_bars": np.full((3, 4), 50.0, np.float32),
+    }
+    grids[grid][1, 2] = value
+    with pytest.raises(ValueError, match=message):
+        FaultSegment(
+            longitude_deg=173.0,
+            latitude_deg=-43.0,
+            strike_deg=220.0,
+            dip_deg=70.0,
+            rake_deg=160.0,
+            top_depth_km=0.0,
+            subfault_length_km=1.5,
+            subfault_width_km=1.5,
+            hypocentre_along_strike_km=0.0,
+            hypocentre_down_dip_km=1.5,
+            **grids,
+        )
+
+
+@pytest.mark.parametrize(
     ("duration_s", "dt"),
     [
         (RECORD_DURATION_S, 0.0),
@@ -428,10 +469,26 @@ def test_a_bad_rayset_is_rejected(
     """
     config = HfConfig(
         record=RecordParameters(duration_s=RECORD_DURATION_S),
-        path=PathParameters(rayset=rayset),
+        # -1 is not a Ray; it is passed on purpose to reach the Rust-side check.
+        path=PathParameters(rayset=rayset),  # ty: ignore[invalid-argument-type]
     )
     with pytest.raises(ValueError, match=message):
         Simulator(slip_model, velocity_model, config)
+
+
+@pytest.mark.parametrize("thickness_km", [0.0, 10.0])
+def test_a_lone_half_space_is_rejected(thickness_km: float) -> None:
+    """A single layer below the Moho is all half-space, with no model above it to trace."""
+    with pytest.raises(ValueError, match="no layer above the half-space"):
+        VelocityModel1D(
+            thickness_km=np.array([thickness_km], np.float32),
+            vp_km_s=np.array([6.0]),
+            vsh_km_s=np.array([3.5]),
+            density_g_cm3=np.array([2.7]),
+            quality_factor_p=np.array([400.0], np.float32),
+            quality_factor_s=np.array([200.0], np.float32),
+            vs_moho_km_s=999.9,
+        )
 
 
 def test_an_empty_batch_is_an_error(
@@ -639,3 +696,43 @@ def test_the_negative_root_seed_error_says_why() -> None:
         r"negative entropy$",
     ):
         station_seeds(-5, ["CHCH"])
+
+
+def test_the_station_array_errors_are_verbatim(
+    slip_model: SlipModel, velocity_model: VelocityModel1D
+) -> None:
+    """Both batch-shape errors read exactly as written, from start to end.
+
+    The mismatch message lists the arguments it checks, then every shape. The empty-batch
+    message says why nothing can be returned.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    with pytest.raises(ValueError) as raised:
+        simulator.run_stations(
+            latitude_deg=STATION_LATITUDE,
+            longitude_deg=STATION_LONGITUDE,
+            station_seed=station_seeds(1234, STATION_NAMES),
+            kappa_s=STATION_KAPPA_S,
+            q_frequency_exponent=STATION_Q_EXPONENT[:1],
+        )
+    assert str(raised.value) == (
+        "latitude_deg, longitude_deg, station_seed, kappa_s and q_frequency_exponent "
+        "must have one entry per station; got shapes {'latitude_deg': (4,), "
+        "'longitude_deg': (4,), 'station_seed': (4,), 'kappa_s': (4,), "
+        "'q_frequency_exponent': (1,)}"
+    )
+
+    empty32 = np.array([], np.float32)
+    with pytest.raises(ValueError) as raised:
+        simulator.run_stations(
+            latitude_deg=empty32,
+            longitude_deg=empty32,
+            station_seed=np.array([], np.uint64),
+            kappa_s=empty32,
+            q_frequency_exponent=empty32,
+        )
+    assert str(raised.value) == "no stations given, so there is nothing to simulate"
