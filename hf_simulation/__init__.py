@@ -383,7 +383,8 @@ class Simulator:
         Raises
         ------
         ValueError
-            If the slip model's segments disagree on subfault size.
+            If the slip model's segments disagree on subfault size, or no subfault
+            carries enough relative moment to radiate (for example, all-zero slip).
         """
         self._inner = _RustSimulator(config._to_rust(), slip_model, velocity_model)
 
