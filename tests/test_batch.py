@@ -571,6 +571,55 @@ def test_mismatched_station_arrays_are_rejected(
         )
 
 
+@pytest.mark.parametrize(
+    ("argument", "value", "message"),
+    [
+        ("latitude_deg", np.nan, "latitude_deg is not finite at station index 2"),
+        ("longitude_deg", np.inf, "longitude_deg is not finite at station index 2"),
+        ("kappa_s", np.nan, "kappa_s is not finite at station index 2"),
+        (
+            "q_frequency_exponent",
+            np.nan,
+            "q_frequency_exponent is not finite at station index 2",
+        ),
+        (
+            "latitude_deg",
+            91.0,
+            r"latitude_deg is outside \[-90, 90\] at station index 2",
+        ),
+        (
+            "latitude_deg",
+            -90.5,
+            r"latitude_deg is outside \[-90, 90\] at station index 2",
+        ),
+    ],
+)
+def test_a_bad_station_value_is_rejected(
+    slip_model: SlipModel,
+    velocity_model: VelocityModel1D,
+    argument: str,
+    value: float,
+    message: str,
+) -> None:
+    """A non-finite input or impossible latitude names the station, not a NaN record."""
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    arrays = {
+        "latitude_deg": STATION_LATITUDE.copy(),
+        "longitude_deg": STATION_LONGITUDE.copy(),
+        "kappa_s": STATION_KAPPA_S.copy(),
+        "q_frequency_exponent": STATION_Q_EXPONENT.copy(),
+    }
+    arrays[argument][2] = value
+    with pytest.raises(ValueError, match=message):
+        simulator.run_stations(
+            station_seed=station_seeds(1234, STATION_NAMES), **arrays
+        )
+
+
 # ---------------------------------------------------------------------------
 # station_seeds -- the same three invariants, one level down
 # ---------------------------------------------------------------------------

@@ -423,7 +423,9 @@ class Simulator:
         Raises
         ------
         ValueError
-            If the arrays do not have one entry per station, or the batch is empty.
+            If the arrays do not have one entry per station, the batch is empty, a
+            latitude, longitude, kappa or Q exponent is not finite, or a latitude is
+            outside [-90, 90]. The message names the first offending station index.
         """
         latitude = np.ascontiguousarray(latitude_deg, dtype=np.float32)
         longitude = np.ascontiguousarray(longitude_deg, dtype=np.float32)
@@ -446,6 +448,24 @@ class Simulator:
             )
         if latitude.size == 0:
             raise ValueError("no stations given, so there is nothing to simulate")
+        for name, values in (
+            ("latitude_deg", latitude),
+            ("longitude_deg", longitude),
+            ("kappa_s", kappa),
+            ("q_frequency_exponent", q_exponent),
+        ):
+            bad = np.flatnonzero(~np.isfinite(values))
+            if bad.size:
+                raise ValueError(
+                    f"{name} is not finite at station index {int(bad[0])}: "
+                    f"{values.flat[bad[0]]}"
+                )
+        bad = np.flatnonzero(np.abs(latitude) > 90.0)
+        if bad.size:
+            raise ValueError(
+                f"latitude_deg is outside [-90, 90] at station index {int(bad[0])}: "
+                f"{latitude.flat[bad[0]]}"
+            )
 
         return self._inner.run_stations(
             latitude_deg=latitude,
