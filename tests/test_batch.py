@@ -16,6 +16,7 @@ from hf_simulation import (
     COMPONENTS,
     FaultSegment,
     HfConfig,
+    PathParameters,
     RecordParameters,
     Simulator,
     SlipModel,
@@ -482,6 +483,30 @@ def test_a_bad_record_shape_is_rejected(
             velocity_model,
             HfConfig(record=RecordParameters(duration_s=duration_s, dt=dt)),
         )
+
+
+@pytest.mark.parametrize(
+    ("rayset", "message"),
+    [((), "rayset is empty"), ((-1,), "ray type -1 is negative")],
+)
+def test_a_bad_rayset_is_rejected(
+    slip_model: SlipModel,
+    velocity_model: VelocityModel1D,
+    rayset: tuple[int, ...],
+    message: str,
+) -> None:
+    """An empty rayset or a negative ray type is a ValueError when the simulator is built.
+
+    Otherwise an empty rayset silently gives an all-zero record, and a negative ray type
+    panics per station inside `run_stations`.
+    """
+    config = HfConfig(
+        record=RecordParameters(duration_s=RECORD_DURATION_S),
+        # -1 is not a Ray; it is passed on purpose to reach the Rust-side check.
+        path=PathParameters(rayset=rayset),  # ty: ignore[invalid-argument-type]
+    )
+    with pytest.raises(ValueError, match=message):
+        Simulator(slip_model, velocity_model, config)
 
 
 @pytest.mark.parametrize("thickness_km", [0.0, 10.0])

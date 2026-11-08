@@ -274,6 +274,12 @@ pub enum SimError {
         found: f32,
         expected: f32,
     },
+    /// With no rays the subfault loop never runs, so every record would be silently zero.
+    #[error("rayset is empty; it needs at least one ray type, or every record is zero")]
+    EmptyRayset,
+    /// The take-off direction is the ray type's parity, which is undefined below zero.
+    #[error("ray type {ray_type} is negative; every entry of rayset must be >= 0")]
+    NegativeRayType { ray_type: i32 },
     /// No subfault's relative moment exceeds `SUBFAULT_WEIGHT_THRESHOLD`, so there is
     /// nothing to radiate and the normalisation would divide zero by zero.
     #[error(
@@ -322,8 +328,9 @@ pub struct Simulator {
 }
 
 impl Simulator {
-    /// Prepare a simulation. Fails only if the slip model's segments disagree on subfault size,
-    /// or if no subfault carries enough moment to radiate.
+    /// Prepare a simulation. Fails if the slip model's segments disagree on subfault size,
+    /// if the rayset is empty or holds a negative ray type, or if no subfault carries enough
+    /// moment to radiate.
     pub fn new(
         config: &HfConfig,
         slip: &StochModel,
@@ -382,6 +389,14 @@ impl Simulator {
                     }
                 }
             }
+        }
+
+        // Checked here rather than per station, so a bad rayset fails before any run.
+        if config.path.rayset.is_empty() {
+            return Err(SimError::EmptyRayset);
+        }
+        if let Some(&RayType(ray_type)) = config.path.rayset.iter().find(|ray| ray.0 < 0) {
+            return Err(SimError::NegativeRayType { ray_type });
         }
 
         // ------------------------------------------------- path duration model ---
