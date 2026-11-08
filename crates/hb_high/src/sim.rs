@@ -280,6 +280,16 @@ pub enum SimError {
     /// The take-off direction is the ray type's parity, which is undefined below zero.
     #[error("ray type {ray_type} is negative; every entry of rayset must be >= 0")]
     NegativeRayType { ray_type: i32 },
+    /// No subfault's relative moment exceeds `SUBFAULT_WEIGHT_THRESHOLD`, so there is
+    /// nothing to radiate and the normalisation would divide zero by zero.
+    #[error(
+        "no subfault carries more than {threshold} relative moment (slip x rigidity x \
+         area), so there is nothing to radiate; check the slip is non-zero and in cm"
+    )]
+    NoRadiatingSubfault {
+        /// The relative-moment threshold every subfault fell at or below.
+        threshold: f32,
+    },
 }
 
 /// A configured simulation, ready to run stations against.
@@ -318,8 +328,9 @@ pub struct Simulator {
 }
 
 impl Simulator {
-    /// Prepare a simulation. Fails if the slip model's segments disagree on subfault size, or
-    /// if the rayset is empty or holds a negative ray type.
+    /// Prepare a simulation. Fails if the slip model's segments disagree on subfault size,
+    /// if the rayset is empty or holds a negative ray type, or if no subfault carries enough
+    /// moment to radiate.
     pub fn new(
         config: &HfConfig,
         slip: &StochModel,
@@ -409,7 +420,7 @@ impl Simulator {
                 subfault_count,
             },
             weights,
-        ) = normalise_source(&slip_model, &vmod_in);
+        ) = normalise_source(&slip_model, &vmod_in)?;
 
         // One `SourceStrength` per subfault, from its own stress parameter. Depth-major, which
         // is grid-index order, so each vector is indexed like `weights`.
@@ -1526,10 +1537,12 @@ type SegmentStrengths = Vec<SourceStrength>;
 ///    weight is 1
 ///
 /// Pass 3's count is the `N` of Graves & Pitarka (2010) eq. 12 that reaches `moment_scale`.
+///
+/// Fails with [`SimError::NoRadiatingSubfault`] if that count is zero.
 fn normalise_source(
     stoch: &StochModel,
     vmod_in: &VelocityModelInput,
-) -> (SourceScale, Vec<SegmentWeights>) {
+) -> Result<(SourceScale, Vec<SegmentWeights>), SimError> {
     let segment_count = stoch.segments.len();
 
     // --- pass 1: average subfault size ----------------------------------------
@@ -1596,19 +1609,24 @@ fn normalise_source(
             subfault_count += 1;
         }
     }
+    if subfault_count == 0 {
+        return Err(SimError::NoRadiatingSubfault {
+            threshold: SUBFAULT_WEIGHT_THRESHOLD.0,
+        });
+    }
     let scale = subfault_count as f32 / weight_sum;
     for weight in weights.iter_mut().flatten() {
         weight.0 *= scale;
     }
 
-    (
+    Ok((
         SourceScale {
             avg_subfault_km,
             total_moment_dyn_cm,
             subfault_count,
         },
         weights,
-    )
+    ))
 }
 
 /// `α_τ`, the dip-and-rake corner-frequency and rise-time adjustment.

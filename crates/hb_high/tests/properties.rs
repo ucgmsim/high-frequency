@@ -1062,6 +1062,27 @@ fn run(seed: u64) -> hb_high::sim::Simulation {
         .run(station, seed)
 }
 
+/// Slip with no subfault above the moment threshold is an error, not a NaN record.
+///
+/// All-zero slip makes the normalisation `0 / 0`; non-zero but tiny slip leaves the same
+/// empty set of subfaults and used to panic in the FFT length ladder.
+#[test]
+fn a_slip_model_with_no_radiating_subfault_is_rejected() {
+    use hb_high::sim::SimError;
+    let vmod = velocity_model(20);
+    for slip_cm in [0.0f32, 1e-6] {
+        let mut slip = slip_model(&[(4, 3, 1.5, 1.5)]);
+        for subfault in slip.segments[0].depth_rows_mut().flatten() {
+            subfault.slip = Slip(slip_cm);
+        }
+        let result = hb_high::sim::Simulator::new(&config(), &slip, &vmod);
+        assert!(
+            matches!(result, Err(SimError::NoRadiatingSubfault { .. })),
+            "slip {slip_cm} cm was accepted"
+        );
+    }
+}
+
 #[test]
 fn simulate_produces_a_record_of_the_requested_length() {
     let sim = run(123456789);
