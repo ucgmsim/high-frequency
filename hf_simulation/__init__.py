@@ -50,15 +50,14 @@ import dataclasses
 import enum
 import hashlib
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from numpy.random import SeedSequence
 
 from hf_simulation._hf_simulation import (
-    FaultSegment,
-    SlipModel,
-    VelocityModel1D,
+    FaultSegment as _RustFaultSegment,
 )
 from hf_simulation._hf_simulation import (
     HfConfig as _RustHfConfig,
@@ -76,7 +75,13 @@ from hf_simulation._hf_simulation import (
     SiteParameters as _RustSiteParameters,
 )
 from hf_simulation._hf_simulation import (
+    SlipModel,
+)
+from hf_simulation._hf_simulation import (
     SourceParameters as _RustSourceParameters,
+)
+from hf_simulation._hf_simulation import (
+    VelocityModel1D as _RustVelocityModel1D,
 )
 
 __all__ = [
@@ -134,6 +139,158 @@ class PathDurationModel(enum.IntEnum):
 # Component order of the returned array's first axis. It matches the production Fortran's
 # output files and the order `hf_sim.py` labels its xarray dimension with.
 COMPONENTS = ("090", "000", "ver")
+
+
+def _check_array(
+    owner: str,
+    name: str,
+    value: object,
+    dtype: type[np.generic],
+    ndim: int,
+    note: str = "",
+) -> None:
+    """Reject an array the extension would refuse, naming the argument.
+
+    pyo3-numpy only accepts an exact dtype and number of dimensions, and otherwise raises
+    ``TypeError: 'ndarray' object is not an instance of 'ndarray'``, which names neither.
+    Nothing is converted here: the caller is told what to pass instead.
+
+    Parameters
+    ----------
+    owner : str
+        The class or method being called, for the message.
+    name : str
+        The argument's name.
+    value : object
+        What was passed.
+    dtype : type[np.generic]
+        The dtype the extension requires.
+    ndim : int
+        The number of dimensions the extension requires.
+    note : str, optional
+        Extra context appended to the message.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is not a numpy array, or has the wrong dtype.
+    ValueError
+        If ``value`` has the wrong number of dimensions.
+    """
+    expected = np.dtype(dtype)
+    if isinstance(value, np.ndarray):
+        got = f"{value.dtype} with shape {value.shape}"
+    else:
+        got = type(value).__name__
+    message = f"{owner}: {name!r} must be a {ndim}-D {expected} array, got {got}"
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{message}; use np.asarray(..., dtype=np.{expected}){note}")
+    if value.dtype != expected:
+        raise TypeError(f"{message}; use .astype(np.{expected}){note}")
+    if value.ndim != ndim:
+        raise ValueError(f"{message}{note}")
+
+
+class _ValidatedConstructor(type):
+    """Metaclass making a validating front for an extension class behave as that class.
+
+    pyo3 classes cannot be subclassed, so the front's ``__new__`` checks its arguments and
+    returns the extension object itself; these hooks keep ``isinstance`` and
+    ``issubclass`` answering for the extension class.
+    """
+
+    _extension: type
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        """Whether ``instance`` is an object of the wrapped extension class."""
+        return isinstance(instance, cls._extension)
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        """Whether ``subclass`` is the wrapped extension class (or a subclass)."""
+        return issubclass(subclass, cls._extension)
+
+
+_FAULT_SEGMENT_GRIDS = ("slip", "rise_time_s", "rupture_time_s", "stress_drop_bars")
+_VELOCITY_MODEL_DTYPES: dict[str, type[np.generic]] = {
+    "thickness_km": np.float32,
+    "vp_km_s": np.float64,
+    "vsh_km_s": np.float64,
+    "density_g_cm3": np.float64,
+    "quality_factor_p": np.float32,
+    "quality_factor_s": np.float32,
+}
+
+if TYPE_CHECKING:
+    # The stub describes the real call, and what is constructed is the extension object.
+    FaultSegment = _RustFaultSegment
+    VelocityModel1D = _RustVelocityModel1D
+else:
+
+    class FaultSegment(metaclass=_ValidatedConstructor):
+        """One fault segment: geometry plus the four subfault grids.
+
+        Takes the same keyword arguments as the extension class and returns an object of
+        it. The four grids ``slip``, ``rise_time_s``, ``rupture_time_s`` and
+        ``stress_drop_bars`` must be 2-D ``float32`` arrays; anything else is rejected
+        with a message naming the argument rather than pyo3's anonymous ``TypeError``.
+        """
+
+        _extension = _RustFaultSegment
+
+        def __new__(cls, **arguments: Any) -> _RustFaultSegment:
+            """Check the grids, then build the extension segment.
+
+            Parameters
+            ----------
+            **arguments : Any
+                The extension class's keyword arguments.
+
+            Returns
+            -------
+            _RustFaultSegment
+                The segment.
+            """
+            for name in _FAULT_SEGMENT_GRIDS:
+                if name in arguments:
+                    _check_array("FaultSegment", name, arguments[name], np.float32, 2)
+            return _RustFaultSegment(**arguments)
+
+    class VelocityModel1D(metaclass=_ValidatedConstructor):
+        """The 1-D velocity model, truncated at the Moho on construction.
+
+        Takes the same keyword arguments as the extension class and returns an object of
+        it. Every array is 1-D, but the dtypes are split: ``thickness_km``,
+        ``quality_factor_p`` and ``quality_factor_s`` are ``float32``; ``vp_km_s``,
+        ``vsh_km_s`` and ``density_g_cm3`` are ``float64``. Anything else is rejected
+        with a message naming the argument.
+        """
+
+        _extension = _RustVelocityModel1D
+
+        def __new__(cls, **arguments: Any) -> _RustVelocityModel1D:
+            """Check the layer arrays, then build the extension model.
+
+            Parameters
+            ----------
+            **arguments : Any
+                The extension class's keyword arguments.
+
+            Returns
+            -------
+            _RustVelocityModel1D
+                The model.
+            """
+            note = (
+                " (thickness_km, quality_factor_p and quality_factor_s are float32; "
+                "vp_km_s, vsh_km_s and density_g_cm3 are float64)"
+            )
+            for name, dtype in _VELOCITY_MODEL_DTYPES.items():
+                if name in arguments:
+                    _check_array(
+                        "VelocityModel1D", name, arguments[name], dtype, 1, note
+                    )
+            return _RustVelocityModel1D(**arguments)
+
 
 # Bytes of BLAKE2b digest used for a station-name hash. Eight gives a 64-bit value with no
 # collisions across the largest station lists in use (5000 names measured clean).
@@ -433,6 +590,17 @@ class Simulator:
         kappa = np.ascontiguousarray(kappa_s, dtype=np.float32)
         q_exponent = np.ascontiguousarray(q_frequency_exponent, dtype=np.float32)
 
+        for name, values in (
+            ("latitude_deg", latitude),
+            ("longitude_deg", longitude),
+            ("station_seed", seeds),
+            ("kappa_s", kappa),
+            ("q_frequency_exponent", q_exponent),
+        ):
+            if values.ndim != 1:
+                raise ValueError(
+                    f"run_stations: {name!r} must be 1-D, got shape {values.shape}"
+                )
         lengths = {
             "latitude_deg": latitude.shape,
             "longitude_deg": longitude.shape,
