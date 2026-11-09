@@ -1214,3 +1214,32 @@ fn a_record_too_short_for_the_arrivals_reports_clipping() {
         cut.clipping
     );
 }
+
+/// The record holds `round(duration / dt)` samples, even where `f32` division lands just
+/// below the integer: `0.004` and `0.002` are inexact in `f32`, and truncating the quotient
+/// dropped the last sample (30 s at 0.004 s gave 7499, not 7500).
+#[test]
+fn the_sample_count_rounds_duration_over_dt() {
+    let slip = slip_model(&[(4, 3, 1.5, 1.5)]);
+    let vmod = velocity_model(20);
+    for dt in [0.002f32, 0.004, 0.005, 0.01] {
+        for duration_s in [1.0f32, 10.0, 30.0, 50.0, 60.0, 100.0, 200.0, 400.0] {
+            let want = (f64::from(duration_s) / f64::from(dt)).round() as usize;
+            let config = HfConfig {
+                record: RecordParameters {
+                    duration_s,
+                    dt_s: dt,
+                },
+                ..config()
+            };
+            let simulator = hf_simulator(&config, &slip, &vmod);
+            assert_eq!(
+                simulator.ndata(),
+                want,
+                "duration {duration_s} s, dt {dt} s"
+            );
+            assert_eq!(hb_high::sim::n_samples(duration_s, dt), want);
+        }
+    }
+    assert_eq!(hb_high::sim::n_samples(30.0, 0.004), 7500);
+}

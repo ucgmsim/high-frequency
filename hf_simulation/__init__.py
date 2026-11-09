@@ -78,6 +78,9 @@ from hf_simulation._hf_simulation import (
 from hf_simulation._hf_simulation import (
     SourceParameters as _RustSourceParameters,
 )
+from hf_simulation._hf_simulation import (
+    n_samples as _rust_n_samples,
+)
 
 __all__ = [
     "COMPONENTS",
@@ -93,6 +96,7 @@ __all__ = [
     "SlipModel",
     "SourceParameters",
     "VelocityModel1D",
+    "n_samples",
     "station_seeds",
 ]
 
@@ -162,6 +166,40 @@ def _name_hash(name: str) -> int:
         "little",
         signed=False,
     )
+
+
+def n_samples(duration_s: float, dt: float) -> int:
+    """Samples per component in a record of ``duration_s`` seconds at interval ``dt``.
+
+    This is the length of the time axis :meth:`Simulator.run_stations` returns. Call it to
+    size arrays that must line up with a record, rather than recomputing
+    ``duration_s / dt``. The count is ``round(duration_s / dt)``, worked in double precision
+    from the single-precision values the simulation core stores; truncating instead can
+    drop the last sample, because values such as 0.004 are inexact in floating point.
+
+    Parameters
+    ----------
+    duration_s : float
+        Record length, seconds.
+    dt : float
+        Sample interval, seconds.
+
+    Returns
+    -------
+    int
+        The number of samples per component.
+
+    Raises
+    ------
+    ValueError
+        If either argument is not positive and finite, or ``duration_s < dt``.
+
+    Examples
+    --------
+    >>> n_samples(30.0, 0.004)
+    7500
+    """
+    return _rust_n_samples(duration_s, dt)
 
 
 def station_seeds(
