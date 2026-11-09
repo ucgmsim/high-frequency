@@ -1172,6 +1172,9 @@ fn subfault_pass(
                 run.ndata,
             ));
             let (np2, fold_count) = (plan.np2, plan.fold_count);
+            // A shortened transform holds only part of the envelope, and only that part's
+            // energy should land. See `SpectrumShape::land_only_the_transforms_share`.
+            let shortened = np2 < SpectrumPlan::length_for(source.window_s, run.dt);
 
             // The other way a contribution can miss: it ends before the record begins.
             let Some(placement) = arrival.placement(np2, run.ndata) else {
@@ -1207,6 +1210,9 @@ fn subfault_pass(
                             qbar: ray.qbar,
                         },
                     );
+                    if shortened {
+                        shape.land_only_the_transforms_share(plan);
+                    }
                     built_for = fmax_hz;
                 }
                 stochastic_spectrum(

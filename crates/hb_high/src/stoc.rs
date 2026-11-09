@@ -98,6 +98,12 @@ impl SpectrumPlan {
     /// As with [`Self::length_for`], a shorter transform gives a coarser `df`, so this changes
     /// the retained samples too, not only the discarded ones.
     ///
+    /// A shorter transform also cuts the shaping envelope off early. When this returns less
+    /// than [`Self::length_for`], call [`SpectrumShape::land_only_the_transforms_share`] after
+    /// each refresh, and [`stochastic_spectrum`] scales the amplitude down by `√S`, `S` being
+    /// the share of the envelope's energy inside the transform, so only that share lands
+    /// rather than the subfault's whole spectral energy.
+    ///
     /// `start_sample` is 1-based and may be negative. Its own samples are counted from its
     /// first one, so a contribution starting `k` samples before the origin has
     /// `ndata + k + 1` samples to cover before it reaches the record end, not `ndata`.
@@ -296,6 +302,10 @@ pub struct SpectrumShape {
     /// Sample interval, carried from the last [`SpectrumShape::refresh`] because the phase
     /// realisation needs it too.
     dt: f32,
+    /// `√S`, where `S` is the share of the unit-area envelope's energy that falls inside the
+    /// transform. Exactly one unless [`SpectrumShape::land_only_the_transforms_share`] set it;
+    /// see [`stochastic_spectrum`].
+    energy_share_sqrt: f32,
 }
 
 impl SpectrumShape {
@@ -307,6 +317,7 @@ impl SpectrumShape {
             amplitude: vec![0.0; np2_max],
             deviates: vec![0.0; np2_max],
             dt: 0.0,
+            energy_share_sqrt: 1.0,
         }
     }
 
@@ -441,7 +452,30 @@ impl SpectrumShape {
             *shape = a1 * a2a3 * frank as f64;
         });
 
+        // Back to the whole spectral energy; see `land_only_the_transforms_share`.
+        self.energy_share_sqrt = 1.0;
         self.dt = dt;
+    }
+
+    /// Land only the share of the envelope's energy that falls inside the transform.
+    ///
+    /// For a transform that [`SpectrumPlan::length_for_arrival`] shortened below
+    /// [`SpectrumPlan::length_for`], call this after each [`Self::refresh`]. The shortened
+    /// transform cuts the envelope off early, and without this [`stochastic_spectrum`] would
+    /// put the subfault's whole spectral energy into the samples computed. See
+    /// [`stochastic_spectrum`]'s power normalisation.
+    ///
+    /// `a` normalises the envelope to unit squared area, so the share is
+    /// `S = ∫₀^{np2·dt} w² dt`, here as the Riemann sum on the sample grid of the plan given
+    /// to the last [`Self::refresh`]. [`Self::refresh`] resets it to exactly one, which is left
+    /// alone at full length so that the output there does not move.
+    pub fn land_only_the_transforms_share(&mut self, plan: &SpectrumPlan) {
+        let share = self.dt as f64
+            * self.envelope[..plan.np2]
+                .iter()
+                .map(|&w| (w as f64) * (w as f64))
+                .sum::<f64>();
+        self.energy_share_sqrt = share.min(1.0).sqrt() as f32;
     }
 }
 
@@ -464,6 +498,13 @@ impl SpectrumShape {
 /// measuring the realised spectrum and correcting it is the same intent, and matches the RMS
 /// averaging of his Figure 1. Because `fsa` is measured from the same sequence, the result is
 /// invariant to the deviate source's scale.
+///
+/// `fsa` measures only the envelope that fits in the transform. When
+/// [`SpectrumPlan::length_for_arrival`] has cut the transform short, normalising that to unity
+/// would put the subfault's whole spectral energy into the samples computed and inflate them
+/// by `1/√S`, `S` being the share of the unit-area envelope's energy inside the transform. So
+/// `amp` is scaled by `√S` as well, set by [`SpectrumShape::land_only_the_transforms_share`],
+/// and only the share that reaches the record lands. Otherwise `√S` is exactly one.
 pub fn stochastic_spectrum(
     rng: &mut impl Draws,
     plan: &SpectrumPlan,
@@ -502,7 +543,7 @@ pub fn stochastic_spectrum(
         .iter()
         .map(Complex32::norm_sqr)
         .sum();
-    let amp = 1.0 / (dt * (fsa / fold_count as f32).sqrt());
+    let amp = shape.energy_share_sqrt / (dt * (fsa / fold_count as f32).sqrt());
 
     // Apply the shape, then mirror to Hermitian symmetry. The mirror is not a second
     // computation -- it is the symmetry of the first, and `as_` and `amp` being real is what
