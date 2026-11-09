@@ -292,6 +292,19 @@ pub enum SimError {
     },
 }
 
+/// Samples per component in a record of `duration_s` seconds at interval `dt` seconds.
+///
+/// The quotient is taken in `f64` and rounded to the nearest integer. Neither `0.004` nor
+/// `0.002` is exact in `f32`, so an `f32` quotient lands just below the integer and
+/// truncating it drops the last sample (30 s at 0.004 s would give 7499, not 7500).
+///
+/// This is the one definition of the record length: [`Simulator::ndata`] is computed with it,
+/// and callers sizing arrays to match a record should call it rather than recompute
+/// `duration / dt` themselves. Both arguments are expected positive and finite.
+pub fn n_samples(duration_s: f32, dt: f32) -> usize {
+    (f64::from(duration_s) / f64::from(dt)).round() as usize
+}
+
 /// A configured simulation, ready to run stations against.
 ///
 /// # Why this is built once
@@ -445,7 +458,7 @@ impl Simulator {
 
         // ------------------------------------------------------------ stations ---
         // No ceiling on the record length: buffers are sized from the requested duration.
-        let ndata = (duration_s / dt).trunc() as usize;
+        let ndata = n_samples(duration_s, dt);
 
         // The working model widens the `f32` input fields to `f64`.
         let vmod: VelocityModel = vmod_in.iter().copied().map(Layer::from).collect();

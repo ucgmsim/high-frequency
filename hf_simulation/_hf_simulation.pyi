@@ -127,3 +127,6 @@ class Simulator:
         kappa_s: FloatArray1D,
         q_frequency_exponent: FloatArray1D,
     ) -> FloatArray3D: ...
+
+def n_samples(duration_s: float, dt: float) -> int:
+    """Samples per component in a record of `duration_s` seconds at interval `dt`."""

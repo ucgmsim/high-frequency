@@ -21,6 +21,7 @@ from hf_simulation import (
     Simulator,
     SlipModel,
     VelocityModel1D,
+    n_samples,
     station_seeds,
 )
 
@@ -173,10 +174,46 @@ def test_shape_and_components(
     assert waveform.shape == (
         len(COMPONENTS),
         4,
-        int(RECORD_DURATION_S / RecordParameters(duration_s=RECORD_DURATION_S).dt),
+        n_samples(RECORD_DURATION_S, RecordParameters(duration_s=RECORD_DURATION_S).dt),
     )
     assert waveform.dtype == np.float32
     assert_not_silent(waveform)
+
+
+@pytest.mark.parametrize("dt", [0.002, 0.004, 0.005, 0.01])
+@pytest.mark.parametrize("duration_s", [1.0, 30.0])
+def test_record_length_rounds_duration_over_dt(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, duration_s: float, dt: float
+) -> None:
+    """The time axis is ``round(duration / dt)`` long, and `n_samples` says so.
+
+    0.004 and 0.002 are inexact in single precision, and truncating the quotient used to
+    drop the last sample: 30 s at 0.004 s gave 7499 samples, not 7500.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=duration_s, dt=dt)),
+    )
+    waveform = simulator.run_stations(
+        latitude_deg=STATION_LATITUDE[:1],
+        longitude_deg=STATION_LONGITUDE[:1],
+        station_seed=station_seeds(1234, STATION_NAMES[:1]),
+        kappa_s=STATION_KAPPA_S[:1],
+        q_frequency_exponent=STATION_Q_EXPONENT[:1],
+    )
+    assert n_samples(duration_s, dt) == round(duration_s / dt)
+    assert waveform.shape[2] == round(duration_s / dt)
+
+
+@pytest.mark.parametrize(
+    ("duration_s", "dt"),
+    [(1.0, 0.0), (1.0, -0.005), (float("nan"), 0.005), (0.001, 0.005)],
+)
+def test_n_samples_rejects_an_impossible_record(duration_s: float, dt: float) -> None:
+    """The helper refuses the same record shapes `RecordParameters` does."""
+    with pytest.raises(ValueError, match="positive and finite"):
+        n_samples(duration_s, dt)
 
 
 def test_station_order_does_not_matter(

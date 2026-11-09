@@ -316,6 +316,30 @@ impl PySiteParameters {
     }
 }
 
+/// Reject a record shape whose sample count would be meaningless.
+///
+/// The sample count is `round(duration_s / dt)` ([`hb_high::sim::n_samples`]): a zero `dt`
+/// makes it overflow, and a negative, non-finite or too-short value makes it zero -- a
+/// silently empty record.
+fn check_record(duration_s: f32, dt: f32) -> PyResult<()> {
+    let positive_finite = |value: f32| value.is_finite() && value > 0.0;
+    if !(positive_finite(duration_s) && positive_finite(dt) && duration_s >= dt) {
+        return Err(PyValueError::new_err(format!(
+            "duration_s and dt must be positive and finite, with duration_s >= dt; \
+             got duration_s={duration_s}, dt={dt}"
+        )));
+    }
+    Ok(())
+}
+
+/// Samples per component in a record of `duration_s` seconds at interval `dt` seconds.
+#[pyfunction]
+#[pyo3(signature = (duration_s, dt))]
+fn n_samples(duration_s: f32, dt: f32) -> PyResult<usize> {
+    check_record(duration_s, dt)?;
+    Ok(hb_high::sim::n_samples(duration_s, dt))
+}
+
 /// The shape of the record to produce.
 #[pyclass(frozen, name = "RecordParameters")]
 pub struct PyRecordParameters {
@@ -327,15 +351,7 @@ impl PyRecordParameters {
     #[new]
     #[pyo3(signature = (*, duration_s, dt))]
     fn new(duration_s: f32, dt: f32) -> PyResult<Self> {
-        // The sample count is `trunc(duration_s / dt)`: a zero `dt` makes it overflow, and a
-        // negative, non-finite or too-short value makes it zero -- a silently empty record.
-        let positive_finite = |value: f32| value.is_finite() && value > 0.0;
-        if !(positive_finite(duration_s) && positive_finite(dt) && duration_s >= dt) {
-            return Err(PyValueError::new_err(format!(
-                "duration_s and dt must be positive and finite, with duration_s >= dt; \
-                 got duration_s={duration_s}, dt={dt}"
-            )));
-        }
+        check_record(duration_s, dt)?;
         Ok(Self {
             inner: RecordParameters {
                 duration_s,
@@ -475,5 +491,6 @@ fn hf_simulation(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRecordParameters>()?;
     m.add_class::<PyHfConfig>()?;
     m.add_class::<PySimulator>()?;
+    m.add_function(wrap_pyfunction!(n_samples, m)?)?;
     Ok(())
 }
