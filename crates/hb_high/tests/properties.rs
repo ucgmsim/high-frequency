@@ -1233,7 +1233,11 @@ fn the_sample_count_rounds_duration_over_dt() {
                 ..config()
             };
             let simulator = hf_simulator(&config, &slip, &vmod);
-            assert_eq!(simulator.ndata(), want, "duration {duration_s} s, dt {dt} s");
+            assert_eq!(
+                simulator.ndata(),
+                want,
+                "duration {duration_s} s, dt {dt} s"
+            );
             assert_eq!(hb_high::sim::n_samples(duration_s, dt), want);
         }
     }
