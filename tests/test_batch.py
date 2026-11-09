@@ -818,3 +818,36 @@ def test_the_station_array_errors_are_verbatim(
             q_frequency_exponent=empty32,
         )
     assert str(raised.value) == "no stations given, so there is nothing to simulate"
+
+
+@pytest.mark.parametrize("pole", [90.0, -90.0])
+def test_a_station_exactly_on_a_pole_is_accepted(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, pole: float
+) -> None:
+    """``[-90, 90]`` is closed: a latitude of exactly ±90 is valid, not rejected."""
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    latitude = STATION_LATITUDE.copy()
+    latitude[2] = pole
+    waveform = simulator.run_stations(
+        latitude_deg=latitude,
+        longitude_deg=STATION_LONGITUDE,
+        station_seed=station_seeds(1234, STATION_NAMES),
+        kappa_s=STATION_KAPPA_S,
+        q_frequency_exponent=STATION_Q_EXPONENT,
+    )
+    assert waveform.shape[:2] == (3, len(STATION_NAMES))
+    assert np.isfinite(waveform).all()
+    # The polar station does not disturb the others: they match a batch without it.
+    others = [0, 1, 3]
+    expected = simulator.run_stations(
+        latitude_deg=STATION_LATITUDE[others],
+        longitude_deg=STATION_LONGITUDE[others],
+        station_seed=station_seeds(1234, [STATION_NAMES[i] for i in others]),
+        kappa_s=STATION_KAPPA_S[others],
+        q_frequency_exponent=STATION_Q_EXPONENT[others],
+    )
+    np.testing.assert_array_equal(waveform[:, others], expected)
