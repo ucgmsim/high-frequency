@@ -251,7 +251,8 @@ pub struct RayPath {
     /// where it does its work.
     pub moment_scale: f32,
     /// Capped at 15 Hz for the vertical component, which is why this is per-call rather
-    /// than a [`SourceModel`] constant.
+    /// than a [`SourceModel`] constant. Only read on the `κ ≤ 0` single-pole branch of
+    /// [`SpectrumShape::refresh`]; with `κ > 0` it has no effect, so the cap is a no-op.
     pub fmax_hz: f32,
     /// `q̄`, the travel-time weighted `Σ t/q` along the ray (Ou & Herrmann 1990). For a
     /// straight ray this reduces to `R/(βQ)`.
