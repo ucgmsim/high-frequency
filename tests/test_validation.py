@@ -176,3 +176,66 @@ def test_2d_station_input_names_the_argument(name: str) -> None:
         ValueError, match=re.escape(f"'{name}' must be 1-D, got shape (2, 1)")
     ):
         simulator.run_stations(**arguments)
+
+
+@pytest.mark.parametrize(
+    ("value", "type_name"),
+    [([[50.0] * 4] * 3, "list"), (((50.0,) * 4,) * 3, "tuple"), (None, "NoneType")],
+)
+def test_a_non_array_grid_names_its_type_and_the_fix(
+    value: object, type_name: str
+) -> None:
+    """The whole message: the type actually passed, and nothing after the fix."""
+    arguments = segment_arguments()
+    arguments["slip"] = value
+    message = (
+        f"FaultSegment: 'slip' must be a 2-D float32 array, got {type_name}; "
+        "use np.asarray(..., dtype=np.float32)"
+    )
+    with pytest.raises(TypeError) as error:
+        FaultSegment(**arguments)
+    assert str(error.value) == message
+
+
+def test_a_grid_error_has_no_trailing_note() -> None:
+    """FaultSegment passes no note, so its dtype and ndim messages end at the fix."""
+    arguments = segment_arguments()
+    arguments["rise_time_s"] = arguments["rise_time_s"].astype(np.float64)
+    with pytest.raises(TypeError) as dtype_error:
+        FaultSegment(**arguments)
+    assert str(dtype_error.value) == (
+        "FaultSegment: 'rise_time_s' must be a 2-D float32 array, got float64 with "
+        "shape (3, 4); use .astype(np.float32)"
+    )
+
+    arguments = segment_arguments()
+    arguments["rise_time_s"] = arguments["rise_time_s"].ravel()
+    with pytest.raises(ValueError) as ndim_error:
+        FaultSegment(**arguments)
+    assert str(ndim_error.value) == (
+        "FaultSegment: 'rise_time_s' must be a 2-D float32 array, got float32 with "
+        "shape (12,)"
+    )
+
+
+def test_a_non_array_layer_appends_the_dtype_note() -> None:
+    arguments = velocity_arguments()
+    arguments["vp_km_s"] = [3.0, 5.0, 6.0]
+    with pytest.raises(TypeError) as error:
+        VelocityModel1D(**arguments)
+    assert str(error.value) == (
+        "VelocityModel1D: 'vp_km_s' must be a 1-D float64 array, got list; "
+        "use np.asarray(..., dtype=np.float64) (thickness_km, quality_factor_p and "
+        "quality_factor_s are float32; vp_km_s, vsh_km_s and density_g_cm3 are "
+        "float64)"
+    )
+
+
+def test_issubclass_answers_for_the_extension_classes() -> None:
+    """The validated fronts stand in for the extension classes under issubclass."""
+    assert issubclass(extension.FaultSegment, FaultSegment)
+    assert issubclass(extension.VelocityModel1D, VelocityModel1D)
+    assert not issubclass(extension.VelocityModel1D, FaultSegment)
+    assert not issubclass(extension.FaultSegment, VelocityModel1D)
+    assert not issubclass(int, FaultSegment)
+    assert not issubclass(np.ndarray, VelocityModel1D)
