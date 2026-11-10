@@ -134,10 +134,18 @@ const STRAIGHT_RAY_VELOCITY_KM_S: f32 = 3.7;
 /// Where the window starts, as a fraction of the straight-ray travel time.
 const STRAIGHT_RAY_WINDOW_START_FRACTION: f32 = 0.7;
 
-/// Below this relative moment a subfault contributes nothing and is skipped outright. Applied
-/// identically when counting subfaults for the normalisation and when walking them in the
-/// subfault pass — the two must agree or `moment_scale`'s `N` counts subfaults that never
-/// radiate.
+/// A subfault radiates only if its *raw* relative moment, `slip · β² · ρ · L · W` before the
+/// normalisation, is strictly above this. The unit is 1e20 dyn·cm (see
+/// [`RELATIVE_MOMENT_TO_DYN_CM`]), so this is an absolute floor of 1e17 dyn·cm, about Mw 0.6:
+/// in practice it only excludes zero and near-zero slip.
+///
+/// It is compared once, in [`normalise_source`] pass 3, which both counts the subfault into
+/// `N` and zeroes the weight of every subfault it rejects. [`SubfaultSource::gather`] reads
+/// that decision through [`MomentWeight::radiates`] rather than re-deriving it, so `N` is
+/// exactly the number of subfaults that radiate (#6). The count uses the production
+/// Fortran's `.gt. 0.001`. The Fortran's second test, `.lt. 0.001` on the *normalised*
+/// weight in the subfault loop, is dropped: it skipped subfaults it had counted in `N`, whose
+/// normalised weights are below 1e-3 and so change no intensity measure measurably.
 const SUBFAULT_WEIGHT_THRESHOLD: MomentWeight = MomentWeight(0.001);
 
 /// One station's synthetic record.
@@ -889,7 +897,7 @@ impl SubfaultSource {
     ) -> Option<Self> {
         let grid = segment.seg.grid_index(along_strike, down_dip);
         let weight = segment.weights[grid];
-        if weight < SUBFAULT_WEIGHT_THRESHOLD {
+        if !weight.radiates() {
             return None;
         }
 
@@ -1478,6 +1486,15 @@ struct SourceScale {
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct MomentWeight(pub f32);
 
+impl MomentWeight {
+    /// Whether the subfault radiates. [`normalise_source`] zeroes every subfault it does not
+    /// count into `N`, and every counted subfault has a positive weight, so this is the
+    /// threshold decision itself rather than a second test that could disagree with it.
+    fn radiates(self) -> bool {
+        self.0 > 0.0
+    }
+}
+
 /// One segment's moment weights, indexed by [`Segment::grid_index`].
 type SegmentWeights = Vec<MomentWeight>;
 
@@ -1539,8 +1556,8 @@ type SegmentStrengths = Vec<SourceStrength>;
 ///
 /// 1. average subfault size
 /// 2. slip → moment via the rigidity, accumulating the moment sum
-/// 3. count the subfaults above [`SUBFAULT_WEIGHT_THRESHOLD`] and rescale so their mean
-///    weight is 1
+/// 3. count the subfaults above [`SUBFAULT_WEIGHT_THRESHOLD`], rescale so their mean
+///    weight is 1, and zero every other subfault's weight so it does not radiate
 ///
 /// Pass 3's count is the `N` of Graves & Pitarka (2010) eq. 12 that reaches `moment_scale`.
 ///
@@ -1621,8 +1638,15 @@ fn normalise_source(
         });
     }
     let scale = subfault_count as f32 / weight_sum;
+    // The same test as the count above, so the subfaults rescaled here are exactly the
+    // `subfault_count` that radiate; every other one is zeroed, which `gather` reads as
+    // "skip".
     for weight in weights.iter_mut().flatten() {
-        weight.0 *= scale;
+        weight.0 = if *weight > SUBFAULT_WEIGHT_THRESHOLD {
+            weight.0 * scale
+        } else {
+            0.0
+        };
     }
 
     Ok((
@@ -1680,6 +1704,85 @@ fn alpha_t(dip_deg: f32, rake_deg: f32, calpha: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{Segment, Slip, Subfault};
+    use crate::state::InputLayer;
+
+    /// The `N` that reaches `moment_scale` is exactly the number of subfaults that radiate
+    /// (#6), including at the edges of the old inconsistent band.
+    ///
+    /// One row, one layer below the air layer, β = 3.5 km/s, ρ = 2.7 g/cm³ and 2 km
+    /// subfaults: 132.3 raw relative moment per cm of slip. Mean slip is about 100 cm, so the
+    /// normalisation scale is about 1e-4. The slips cover zero, a raw moment just below
+    /// the threshold, one just above it (counted in `N` *and* below 0.001 once normalised,
+    /// which the old `gather` skipped) and ordinary slip.
+    #[test]
+    fn the_subfault_count_is_the_number_that_radiate() {
+        let per_cm = 3.5f64 * 3.5 * 2.7 * 2.0 * 2.0;
+        let just_below = (0.000_9 / per_cm) as f32;
+        let just_above = (0.001_1 / per_cm) as f32;
+        let slips = [0.0, just_below, just_above, 0.05, 50.0, 100.0, 150.0, 200.0];
+        let segment = Segment::builder()
+            .fault_lon_deg(173.0)
+            .fault_lat_deg(-43.0)
+            .along_strike_count(slips.len())
+            .down_dip_count(1)
+            .subfault_length_km(2.0)
+            .subfault_width_km(2.0)
+            .strike_deg(0.0)
+            .dip_deg(90.0)
+            .rake_deg(0.0)
+            .top_depth_km(1.0)
+            .hypocentre_along_strike_km(0.0)
+            .hypocentre_down_dip_km(1.0)
+            .subfaults(
+                slips
+                    .iter()
+                    .map(|&slip| Subfault {
+                        slip: Slip(slip),
+                        rise_time_s: 1.0,
+                        rupture_time_s: 0.0,
+                        stress_drop_bars: 50.0,
+                    })
+                    .collect(),
+            )
+            .build();
+        let layer = |thickness_km, vsh_km_s, density_g_cm3| InputLayer {
+            depth_km: thickness_km,
+            thickness_km,
+            vp_km_s: 6.0,
+            vsh_km_s,
+            density_g_cm3,
+            attenuation_p: 200.0,
+            attenuation_s: 100.0,
+        };
+        // An air layer at index 0, as `insert_air_layer` leaves it, then one real layer.
+        let vmod_in = vec![layer(0.0001, 0.0001, 0.0001), layer(999.0, 3.5, 2.7)];
+
+        let (scale, weights) =
+            normalise_source(&StochModel::new(vec![segment]), &vmod_in).expect("radiates");
+        let radiating: Vec<bool> = weights.iter().flatten().map(|w| w.radiates()).collect();
+
+        assert_eq!(
+            radiating,
+            [false, false, true, true, true, true, true, true],
+            "raw moment {per_cm} per cm: zero and just-below are out, just-above is in"
+        );
+        assert_eq!(
+            scale.subfault_count,
+            radiating.iter().filter(|&&r| r).count(),
+            "N must count exactly the subfaults gather accepts"
+        );
+        // The case the old code got wrong: counted, and below 0.001 once normalised.
+        assert!(weights[0][2].0 > 0.0 && weights[0][2] < SUBFAULT_WEIGHT_THRESHOLD);
+        let mean = weights
+            .iter()
+            .flatten()
+            .filter(|w| w.radiates())
+            .map(|w| w.0)
+            .sum::<f32>()
+            / scale.subfault_count as f32;
+        assert!((mean - 1.0).abs() < 1e-5, "mean radiating weight is {mean}");
+    }
 
     /// A subfault inside the 0.1 m air layer takes layer 1, not the air's properties.
     #[test]
