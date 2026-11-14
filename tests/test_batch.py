@@ -713,6 +713,40 @@ def test_station_arrays_of_any_numeric_dtype_are_converted(
 
 
 @pytest.mark.parametrize(
+    "seeds",
+    [
+        np.array([1.2, 1.9, 3.0, 4.0]),
+        np.array([1.0, 2.0, 3.0, np.nan]),
+        station_seeds(1234, STATION_NAMES).astype(np.float64),
+        np.array([1.0, 2.0, 3.0, 4.0], np.float32),
+    ],
+    ids=["fractional", "nan", "float64-rounded", "float32"],
+)
+def test_non_integer_station_seeds_are_rejected(
+    slip_model: SlipModel, velocity_model: VelocityModel1D, seeds: np.ndarray
+) -> None:
+    """A float seed is refused rather than truncated or rounded to a different seed.
+
+    Casting would make 1.2 and 1.9 the same seed, and a 64-bit seed that passed through
+    float64 would silently lose its low bits, so the records could not be reproduced from
+    the recorded seeds.
+    """
+    simulator = Simulator(
+        slip_model,
+        velocity_model,
+        HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
+    )
+    with pytest.raises(TypeError, match="'station_seed' must be an integer array"):
+        simulator.run_stations(
+            latitude_deg=STATION_LATITUDE,
+            longitude_deg=STATION_LONGITUDE,
+            station_seed=seeds,  # ty: ignore[invalid-argument-type]
+            kappa_s=STATION_KAPPA_S,
+            q_frequency_exponent=STATION_Q_EXPONENT,
+        )
+
+
+@pytest.mark.parametrize(
     ("short", "expected"),
     [
         ("latitude_deg", "'latitude_deg': (2,), 'longitude_deg': (4,)"),
