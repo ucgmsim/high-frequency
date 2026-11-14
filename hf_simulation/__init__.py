@@ -583,10 +583,19 @@ class Simulator:
             If the arrays do not have one entry per station, the batch is empty, a
             latitude, longitude, kappa or Q exponent is not finite, or a latitude is
             outside [-90, 90]. The message names the first offending station index.
+        TypeError
+            If ``station_seed`` is not an integer array. A float seed would be truncated
+            or rounded to a different seed rather than refused.
         """
         latitude = np.ascontiguousarray(latitude_deg, dtype=np.float32)
         longitude = np.ascontiguousarray(longitude_deg, dtype=np.float32)
-        seeds = np.ascontiguousarray(station_seed, dtype=np.uint64)
+        seed_array = np.asarray(station_seed)
+        if not np.issubdtype(seed_array.dtype, np.integer):
+            raise TypeError(
+                "run_stations: 'station_seed' must be an integer array (see "
+                f"station_seeds), got {seed_array.dtype}"
+            )
+        seeds = np.ascontiguousarray(seed_array, dtype=np.uint64)
         kappa = np.ascontiguousarray(kappa_s, dtype=np.float32)
         q_exponent = np.ascontiguousarray(q_frequency_exponent, dtype=np.float32)
 
