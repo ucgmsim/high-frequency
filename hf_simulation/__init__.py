@@ -33,7 +33,7 @@ Examples
 ...         quality_factor_s=np.array([50.0, 100.0, 200.0], np.float32),
 ...         vs_moho_km_s=999.9,
 ...     ),
-...     HfConfig(record=RecordParameters(duration_s=10.0)),
+...     HfConfig(record=RecordParameters(duration_s=40.0)),
 ... )
 >>> waveform = simulator.run_stations(
 ...     latitude_deg=np.array([-43.4], np.float32),
@@ -44,6 +44,8 @@ Examples
 ... )
 >>> waveform.shape[0]
 3
+>>> bool(np.abs(waveform).max() > 0)
+True
 """
 
 import dataclasses
