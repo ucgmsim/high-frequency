@@ -266,8 +266,7 @@ pub fn geometric_spreading(
     let mut rsum = ri;
     let mut qb = (ti / vmod[nh1].attenuation_s as f64) as f32;
 
-    for j in 1..state.rays.segment_count() {
-        let nhj = state.rays.layer_indices[j];
+    for &nhj in &state.rays.layer_indices[1..state.rays.segment_count()] {
         let incidence_sine = ray_parameter * vmod[nhj].vsh_km_s;
         let sini = if incidence_sine >= 1.0 {
             SIN_INCIDENCE_CLAMP

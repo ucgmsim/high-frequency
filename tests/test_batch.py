@@ -740,7 +740,7 @@ def test_non_integer_station_seeds_are_rejected(
         simulator.run_stations(
             latitude_deg=STATION_LATITUDE,
             longitude_deg=STATION_LONGITUDE,
-            station_seed=seeds,  # ty: ignore[invalid-argument-type]
+            station_seed=seeds,
             kappa_s=STATION_KAPPA_S,
             q_frequency_exponent=STATION_Q_EXPONENT,
         )
