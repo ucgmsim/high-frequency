@@ -5,12 +5,14 @@ depends on, which must hold for any correct implementation. Per-station seeding 
 makes the three waveform invariants possible.
 """
 
+import hashlib
 from collections.abc import Iterable
 
 import numpy as np
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from numpy.random import SeedSequence
 
 from hf_simulation import (
     COMPONENTS,
@@ -671,6 +673,52 @@ def test_station_seeds_are_distinct_and_unsigned(names: list[str], root: int) ->
     assert len(set(seeds.tolist())) == len(names)
 
 
+@pytest.mark.parametrize(
+    ("root", "names", "expected"),
+    [
+        (
+            1234,
+            ["CHCH", "LINC", "Ōtautahi"],
+            [1905741496502012377, 13603888227495392929, 10769600984917523404],
+        ),
+        (0, ["CHCH"], [4808463430339365170]),
+        (2**64 - 1, ["CHCH"], [9706638825086771985]),
+    ],
+    ids=["mixed-names", "zero-root", "max-uint64-root"],
+)
+def test_station_seeds_are_reproducible(
+    root: int, names: list[str], expected: list[int]
+) -> None:
+    """Seeds are pinned to exact values, so recorded seeds stay reproducible.
+
+    The invariants above hold for any hash; these values hold only for blake2b-64 of the
+    UTF-8 name read little-endian and unsigned, mixed through ``SeedSequence``. A change
+    to any of those would silently change every station's waveform for a given root.
+    """
+    seeds = station_seeds(root, names)
+    assert seeds.dtype == np.uint64
+    assert seeds.tolist() == expected
+
+
+def test_station_seeds_match_the_documented_recipe() -> None:
+    """Each seed is the first uint64 of ``SeedSequence([root, blake2b_64(name)])``."""
+    names = ["CHCH", "LINC", "Ōtautahi", "a" * 200]
+    expected = [
+        SeedSequence(
+            entropy=[
+                1234,
+                int.from_bytes(
+                    hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest(),
+                    "little",
+                    signed=False,
+                ),
+            ]
+        ).generate_state(1, dtype=np.uint64)[0]
+        for name in names
+    ]
+    np.testing.assert_array_equal(station_seeds(1234, names), expected)
+
+
 def test_a_negative_root_seed_is_rejected() -> None:
     """``SeedSequence`` cannot take negative entropy, so say so rather than crash."""
     with pytest.raises(ValueError, match="must be non-negative"):
@@ -736,7 +784,7 @@ def test_non_integer_station_seeds_are_rejected(
         velocity_model,
         HfConfig(record=RecordParameters(duration_s=RECORD_DURATION_S)),
     )
-    with pytest.raises(TypeError, match="'station_seed' must be an integer array"):
+    with pytest.raises(TypeError) as excinfo:
         simulator.run_stations(
             latitude_deg=STATION_LATITUDE,
             longitude_deg=STATION_LONGITUDE,
@@ -744,6 +792,12 @@ def test_non_integer_station_seeds_are_rejected(
             kappa_s=STATION_KAPPA_S,
             q_frequency_exponent=STATION_Q_EXPONENT,
         )
+    # The whole message, so the caller is pointed at `station_seeds` and told which
+    # dtype was actually passed.
+    assert str(excinfo.value) == (
+        "run_stations: 'station_seed' must be an integer array (see station_seeds), "
+        f"got {seeds.dtype}"
+    )
 
 
 @pytest.mark.parametrize(
