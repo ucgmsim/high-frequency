@@ -239,3 +239,54 @@ def test_issubclass_answers_for_the_extension_classes() -> None:
     assert not issubclass(extension.FaultSegment, VelocityModel1D)
     assert not issubclass(int, FaultSegment)
     assert not issubclass(np.ndarray, VelocityModel1D)
+
+
+SCALARS = (
+    "longitude_deg",
+    "latitude_deg",
+    "strike_deg",
+    "dip_deg",
+    "rake_deg",
+    "top_depth_km",
+    "subfault_length_km",
+    "subfault_width_km",
+    "hypocentre_along_strike_km",
+    "hypocentre_down_dip_km",
+)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("name", SCALARS)
+def test_a_non_finite_scalar_names_the_argument(name: str, value: float) -> None:
+    """A non-finite origin or orientation would otherwise give a NaN record."""
+    arguments = segment_arguments()
+    arguments[name] = value
+    with pytest.raises(ValueError, match=f"^{name} must be finite"):
+        FaultSegment(**arguments)
+
+
+@pytest.mark.parametrize("value", [90.5, -95.0])
+def test_a_fault_latitude_outside_the_globe_is_rejected(value: float) -> None:
+    arguments = segment_arguments()
+    arguments["latitude_deg"] = value
+    with pytest.raises(ValueError, match=r"^latitude_deg must be within \[-90, 90\]"):
+        FaultSegment(**arguments)
+
+
+@pytest.mark.parametrize("value", [90.0, -90.0])
+def test_a_polar_fault_latitude_is_accepted(value: float) -> None:
+    arguments = segment_arguments()
+    arguments["latitude_deg"] = value
+    FaultSegment(**arguments)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.5])
+@pytest.mark.parametrize("name", ["subfault_length_km", "subfault_width_km"])
+def test_a_non_positive_subfault_size_names_the_argument(
+    name: str, value: float
+) -> None:
+    """Caught here rather than as a misleading zero-moment error in Simulator."""
+    arguments = segment_arguments()
+    arguments[name] = value
+    with pytest.raises(ValueError, match=f"^{name} must be positive"):
+        FaultSegment(**arguments)

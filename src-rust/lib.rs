@@ -49,6 +49,43 @@ impl PyFaultSegment {
         rupture_time_s: PyReadonlyArray2<f32>,
         stress_drop_bars: PyReadonlyArray2<f32>,
     ) -> PyResult<Self> {
+        // A non-finite origin or orientation reaches the geodesic and radiation-pattern
+        // terms and comes back as a NaN record rather than an error.
+        for (name, value) in [
+            ("longitude_deg", longitude_deg),
+            ("latitude_deg", latitude_deg),
+            ("strike_deg", strike_deg),
+            ("dip_deg", dip_deg),
+            ("rake_deg", rake_deg),
+            ("top_depth_km", top_depth_km),
+            ("subfault_length_km", subfault_length_km),
+            ("subfault_width_km", subfault_width_km),
+            ("hypocentre_along_strike_km", hypocentre_along_strike_km),
+            ("hypocentre_down_dip_km", hypocentre_down_dip_km),
+        ] {
+            if !value.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be finite; got {value}"
+                )));
+            }
+        }
+        if latitude_deg.abs() > 90.0 {
+            return Err(PyValueError::new_err(format!(
+                "latitude_deg must be within [-90, 90]; got {latitude_deg}"
+            )));
+        }
+        // A zero or negative subfault area would otherwise surface later as a misleading
+        // "no subfault carries moment" error from the simulator.
+        for (name, value) in [
+            ("subfault_length_km", subfault_length_km),
+            ("subfault_width_km", subfault_width_km),
+        ] {
+            if value <= 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be positive; got {value}"
+                )));
+            }
+        }
         let (slip, rise, rupture, stress) = (
             slip.as_array(),
             rise_time_s.as_array(),
